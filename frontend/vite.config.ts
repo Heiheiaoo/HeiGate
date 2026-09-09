@@ -169,6 +169,18 @@ export default defineConfig(({ mode }) => {
         '/setup': {
           target: backendUrl,
           changeOrigin: true
+        },
+        '/health': {
+          target: backendUrl,
+          changeOrigin: true
+        },
+        '/desktop/api': {
+          target: backendUrl,
+          changeOrigin: true
+        },
+        '/desktop/gateway': {
+          target: backendUrl,
+          changeOrigin: true
         }
       }
     }

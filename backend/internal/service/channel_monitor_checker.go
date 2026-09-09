@@ -553,10 +553,14 @@ func postRawJSON(ctx context.Context, fullURL string, payload []byte, headers ma
 
 // joinURL 把 base origin 与 path 拼成完整 URL。
 // 容忍 base 末尾有/无斜杠，path 必带前导斜杠。
+// 同时自动兼容容错：若 base 已带 /v1 且 path 以 /v1/ 开头，自动去重避免拼出 /v1/v1/...
 func joinURL(base, path string) string {
 	base = strings.TrimRight(base, "/")
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
+	}
+	if strings.HasSuffix(base, "/v1") && strings.HasPrefix(path, "/v1/") {
+		path = strings.TrimPrefix(path, "/v1")
 	}
 	return base + path
 }

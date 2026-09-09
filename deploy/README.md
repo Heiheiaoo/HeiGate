@@ -1,6 +1,6 @@
-# Sub2API Deployment Files
+# HeiGate Deployment Files
 
-This directory contains files for deploying Sub2API on Linux servers and Apple-silicon Macs.
+This directory contains files for deploying HeiGate on Linux servers and Apple-silicon Macs.
 
 ## Deployment Methods
 
@@ -23,8 +23,8 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 | `DOCKER.md` | Docker Hub documentation |
 | `install.sh` | One-click binary installation script |
 | `install-datamanagementd.sh` | datamanagementd 一键安装脚本 |
-| `sub2api.service` | Systemd service unit file |
-| `sub2api-datamanagementd.service` | datamanagementd systemd service unit file |
+| `heigate.service` | Systemd service unit file |
+| `heigate-datamanagementd.service` | datamanagementd systemd service unit file |
 | `DATAMANAGEMENTD_CN.md` | datamanagementd 部署与联动说明（中文） |
 | `config.example.yaml` | Example configuration file |
 | `EDGE_SECURITY.md` | Reverse proxy, CDN/WAF, trusted proxy, and ingress hardening guide |
@@ -33,7 +33,7 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 
 ## Apple container Deployment
 
-Apple-silicon Macs running macOS 26 can run the complete Sub2API, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
+Apple-silicon Macs running macOS 26 can run the complete HeiGate, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
 
 ```bash
 ./apple-container.sh init
@@ -56,10 +56,10 @@ Use the automated preparation script for the easiest setup:
 
 ```bash
 # Download and run the preparation script
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/docker-deploy.sh | bash
 
 # Or download first, then run
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh -o docker-deploy.sh
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/docker-deploy.sh -o docker-deploy.sh
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 ```
@@ -92,7 +92,7 @@ If you prefer manual control:
 
 ```bash
 # Clone repository
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api/deploy
 
 # Configure environment
@@ -148,7 +148,7 @@ When using Docker Compose with `AUTO_SETUP=true`:
 
 ### Startup and Database Recovery
 
-Sub2API applies database migrations during application startup. PostgreSQL can
+HeiGate applies database migrations during application startup. PostgreSQL can
 remain in its recovery/startup phase briefly after a host or Docker daemon
 restart. The application retries transient PostgreSQL startup and connection
 errors with bounded exponential backoff, then starts automatically when the
@@ -162,9 +162,9 @@ replacement for application-level retries when Docker restores existing
 containers after a host restart.
 
 For systemd deployments, keep `Restart=always` and `RestartSec` configured in
-`sub2api.service`; the application retry covers transient database startup,
+`heigate.service`; the application retry covers transient database startup,
 while systemd remains the supervisor for permanent process exits. For
-Kubernetes, use a PostgreSQL readiness probe and retain the Sub2API startup
+Kubernetes, use a PostgreSQL readiness probe and retain the HeiGate startup
 retry behavior; configure the application liveness probe separately so a
 database recovery period is not treated as a permanent process failure.
 
@@ -196,7 +196,7 @@ SELECT
 
 如需启用管理后台“数据管理”功能，请额外部署宿主机 `datamanagementd`：
 
-- 主进程固定探测 `/tmp/sub2api-datamanagement.sock`
+- 主进程固定探测 `/tmp/heigate-datamanagement.sock`
 - Docker 场景下需把宿主机 Socket 挂载到容器内同路径
 - 详细步骤见：`deploy/DATAMANAGEMENTD_CN.md`
 
@@ -214,7 +214,7 @@ docker compose -f docker-compose.local.yml down
 # View logs
 docker compose -f docker-compose.local.yml logs -f sub2api
 
-# Restart Sub2API only
+# Restart HeiGate only
 docker compose -f docker-compose.local.yml restart sub2api
 
 # Update to latest version
@@ -238,7 +238,7 @@ docker compose down
 # View logs
 docker compose logs -f sub2api
 
-# Restart Sub2API only
+# Restart HeiGate only
 docker compose restart sub2api
 
 # Update to latest version
@@ -296,7 +296,7 @@ Your entire deployment (configuration + data) is migrated!
 
 ## Gemini OAuth Configuration
 
-Sub2API supports three methods to connect to Gemini:
+HeiGate supports three methods to connect to Gemini:
 
 ### Method 1: Code Assist OAuth (Recommended for GCP Users)
 
@@ -341,7 +341,7 @@ Requires your own OAuth client credentials.
    - Go to "APIs & Services" → "Credentials"
    - Click "Create Credentials" → "OAuth client ID"
    - Application type: **Web application** (or **Desktop app**)
-   - Name: e.g., "Sub2API Gemini"
+   - Name: e.g., "HeiGate Gemini"
    - Authorized redirect URIs: Add `http://localhost:1455/auth/callback`
 6. Copy the **Client ID** and **Client Secret**
 7. **⚠️ Publish to Production (IMPORTANT):**
@@ -398,19 +398,19 @@ For production servers using systemd.
 ### One-Line Installation
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/install.sh | sudo bash
 ```
 
 ### Manual Installation
 
-1. Download the latest release from [GitHub Releases](https://github.com/Wei-Shaw/sub2api/releases)
-2. Extract and copy the binary to `/opt/sub2api/`
-3. Copy `sub2api.service` to `/etc/systemd/system/`
+1. Download the latest release from [GitHub Releases](https://github.com/Heiheiaoo/HeiGate/releases)
+2. Extract and copy the binary to `/opt/heigate/`
+3. Copy `heigate.service` to `/etc/systemd/system/`
 4. Run:
    ```bash
    sudo systemctl daemon-reload
-   sudo systemctl enable sub2api
-   sudo systemctl start sub2api
+   sudo systemctl enable heigate
+   sudo systemctl start heigate
    ```
 5. Open the Setup Wizard in your browser to complete configuration
 
@@ -481,7 +481,7 @@ If you need to use AI Studio OAuth for Gemini accounts, add the OAuth client cre
 
 1. Edit the service file:
    ```bash
-   sudo nano /etc/systemd/system/sub2api.service
+   sudo nano /etc/systemd/system/heigate.service
    ```
 
 2. Add your OAuth credentials in the `[Service]` section (after the existing `Environment=` lines):
@@ -518,12 +518,12 @@ The main config file is at `/etc/sub2api/config.yaml` (created by Setup Wizard).
 ### Directory Structure
 
 ```
-/opt/sub2api/
-├── sub2api              # Main binary
-├── sub2api.backup       # Backup (after upgrade)
+/opt/heigate/
+├── heigate              # Main binary
+├── heigate.backup       # Backup (after upgrade)
 └── data/                # Runtime data
 
-/etc/sub2api/
+/etc/heigate/
 └── config.yaml          # Configuration file
 ```
 
@@ -604,7 +604,7 @@ sudo systemctl status redis
 
 ## TLS Fingerprint Configuration
 
-Sub2API supports TLS fingerprint simulation to make requests appear as if they come from the official Claude CLI (Node.js client).
+HeiGate supports TLS fingerprint simulation to make requests appear as if they come from the official Claude CLI (Node.js client).
 
 > **💡 Tip:** Visit **[tls.sub2api.org](https://tls.sub2api.org/)** to get TLS fingerprint information for different devices and browsers.
 

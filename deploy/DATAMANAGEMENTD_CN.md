@@ -4,44 +4,44 @@
 
 ## 1. 关键约束
 
-- 主进程固定探测路径：`/tmp/sub2api-datamanagement.sock`
+- 主进程固定探测路径：`/tmp/heigate-datamanagement.sock`
 - 仅当该 Unix Socket 可连通且 `Health` 成功时，后台“数据管理”才会启用
 - `datamanagementd` 使用 SQLite 持久化元数据，不依赖主库
 
 ## 2. 宿主机构建与运行
 
 ```bash
-cd /opt/sub2api-src/datamanagement
-go build -o /opt/sub2api/datamanagementd ./cmd/datamanagementd
+cd /opt/heigate-src/datamanagement
+go build -o /opt/heigate/datamanagementd ./cmd/datamanagementd
 
-mkdir -p /var/lib/sub2api/datamanagement
-chown -R sub2api:sub2api /var/lib/sub2api/datamanagement
+mkdir -p /var/lib/heigate/datamanagement
+chown -R heigate:heigate /var/lib/heigate/datamanagement
 ```
 
 手动启动示例：
 
 ```bash
-/opt/sub2api/datamanagementd \
-  -socket-path /tmp/sub2api-datamanagement.sock \
-  -sqlite-path /var/lib/sub2api/datamanagement/datamanagementd.db \
+/opt/heigate/datamanagementd \
+  -socket-path /tmp/heigate-datamanagement.sock \
+  -sqlite-path /var/lib/heigate/datamanagement/datamanagementd.db \
   -version 1.0.0
 ```
 
 ## 3. systemd 托管（推荐）
 
-仓库已提供示例服务文件：`deploy/sub2api-datamanagementd.service`
+仓库已提供示例服务文件：`deploy/heigate-datamanagementd.service`
 
 ```bash
-sudo cp deploy/sub2api-datamanagementd.service /etc/systemd/system/
+sudo cp deploy/heigate-datamanagementd.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now sub2api-datamanagementd
-sudo systemctl status sub2api-datamanagementd
+sudo systemctl enable --now heigate-datamanagementd
+sudo systemctl status heigate-datamanagementd
 ```
 
 查看日志：
 
 ```bash
-sudo journalctl -u sub2api-datamanagementd -f
+sudo journalctl -u heigate-datamanagementd -f
 ```
 
 也可以使用一键安装脚本（自动安装二进制 + 注册 systemd）：
@@ -60,9 +60,9 @@ sudo ./deploy/install-datamanagementd.sh --source /path/to/sub2api
 
 ```yaml
 services:
-  sub2api:
+  heigate:
     volumes:
-      - /tmp/sub2api-datamanagement.sock:/tmp/sub2api-datamanagement.sock
+      - /tmp/heigate-datamanagement.sock:/tmp/heigate-datamanagement.sock
 ```
 
 建议在 `docker-compose.override.yml` 中维护该挂载，避免覆盖主 compose 文件。

@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Sub2API Logo" width="128" />
+<img src="assets/logo.svg" alt="HeiGate Logo" width="128" />
 
-# Sub2API
+# HeiGate
 
 [![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
@@ -10,13 +10,55 @@
 [![Redis](https://img.shields.io/badge/Redis-7+-DC382D.svg)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
 
-<a href="https://trendshift.io/repositories/21823" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21823" alt="Wei-Shaw%2Fsub2api | Trendshift" width="250" height="55"/></a>
-
-**AI API Gateway Platform for Subscription Quota Distribution**
+**Local-first and self-hosted AI API gateway with multi-provider routing, failover, usage management, and desktop integration.**
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
 </div>
+
+HeiGate provides two operating modes:
+
+- **Desktop mode**: a local SQLite-backed gateway for macOS, with channel health checks, model routing, request analytics, and Claude/Codex client configuration.
+- **Server mode**: the full multi-user gateway with PostgreSQL, Redis, authentication, billing, quotas, monitoring, plugins, and Docker deployment.
+
+> [!IMPORTANT]
+> HeiGate is a derivative of [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api). It is not the official sub2api repository and is maintained independently. See [NOTICE](NOTICE) for attribution and licensing details.
+
+## Quick Start
+
+### macOS desktop application
+
+```bash
+make build-desktop-macos
+open dist/desktop/HeiGate.app
+```
+
+### Local desktop gateway
+
+```bash
+make build-desktop
+DATA_DIR="$PWD/desktop-data" ./dist/desktop/heigate-desktop -desktop
+```
+
+Open `http://127.0.0.1:8080/desktop`.
+
+### Full server deployment
+
+```bash
+cd deploy
+cp .env.example .env
+docker compose up -d
+```
+
+Review and replace every secret in `.env` before exposing the service. The detailed deployment guide is in [deploy/README.md](deploy/README.md).
+
+## Community
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Use the issue templates for reproducible bug reports and focused feature proposals.
+- Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+- Community conduct is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- Release and compatibility expectations are documented in [docs/OPEN_SOURCE.md](docs/OPEN_SOURCE.md).
 
 ## ⚠️ Important Notice
 
@@ -25,11 +67,11 @@ Please read the following carefully before using this project:
 - **🚨 Terms of Service Risk**: Using this project may violate the terms of service of Anthropic and other upstream providers. Please review the relevant providers' user agreements before use; all risks arising from such use are borne solely by the user.
 - **⚖️ Compliant Use**: Use this project only in compliance with the laws and regulations of your country or region. Any unlawful use is strictly prohibited.
 - **📖 Disclaimer**: This project is provided for technical learning and research purposes only. The authors assume no liability for account bans, service interruptions, data loss, or any other direct or indirect damages resulting from the use of this project.
-- **🚫 No Commercial Authorization**: The developers of this project have never authorized any individual or organization to conduct any form of commercial operation based on this project. Any commercial activity conducted in the name of or based on this project is unrelated to this project and its developers, and all resulting disputes, losses, and legal liabilities shall be borne solely by the party conducting such activity.
+- **🏷️ No Trademark Or Service Endorsement**: The LGPL license permits use under its terms, including commercial use. It does not grant rights to project names, logos, upstream accounts, hosted services, or provider relationships, and it does not imply endorsement by the maintainers.
 
-## ❤️ Sponsors
+## Upstream Sponsors
 
-> [Want to appear here?](mailto:support@sub2api.org)
+The organizations below sponsor the upstream sub2api project. Their inclusion is retained for attribution and does not imply sponsorship of HeiGate.
 
 <table>
 
@@ -92,7 +134,7 @@ Please read the following carefully before using this project:
 
 <tr>
 <td width="180"><a href="https://roxybrowser.com/invite/bgGKG7"><img src="assets/partners/logos/RoxyBrowser.png" alt="veilx" width="150"></a></td>
-<td>Thanks to RoxyBrowser for sponsoring this project! <a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> RoxyBrowser is the perfect partner for Sub2API: it features a built-in native Roxy AI Agent and high-quality native residential IPs, supports batch automation via simple commands, and significantly boosts security and efficiency for multi-account management! Click <a href="https://roxybrowser.com/invite/bgGKG7">this link</a> to sign up and receive a free residential IP package plus a 10% lifetime discount.
+<td>Thanks to RoxyBrowser for sponsoring this project! <a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> RoxyBrowser is the perfect partner for HeiGate: it features a built-in native Roxy AI Agent and high-quality native residential IPs, supports batch automation via simple commands, and significantly boosts security and efficiency for multi-account management! Click <a href="https://roxybrowser.com/invite/bgGKG7">this link</a> to sign up and receive a free residential IP package plus a 10% lifetime discount.
 </td>
 </tr>
 
@@ -134,12 +176,12 @@ Please read the following carefully before using this project:
 
 <tr>
 <td width="180"><a href="https://s.qiniu.com/u6rQrq"><img src="assets/partners/logos/qiniu.jpg" alt="Qiniu AI" width="150"></a></td>
-<td>Thanks to Qiniu AI for sponsoring this project! Qiniu AI is the enterprise-grade large-model MaaS platform under Qiniu Cloud (02567.HK), offering one-stop access to 150+ mainstream models worldwide, compatible with the protocols of major global model providers, and covering full-modality capabilities including text, image, audio, video, and file processing, serving over 1.69 million enterprises and developers. Qiniu AI offers an exclusive benefit for Sub2API users: register via <a href="https://s.qiniu.com/u6rQrq">this link</a> — enterprise users get 12 million tokens free, and developers get 3 million tokens free.</td>
+<td>Thanks to Qiniu AI for sponsoring this project! Qiniu AI is the enterprise-grade large-model MaaS platform under Qiniu Cloud (02567.HK), offering one-stop access to 150+ mainstream models worldwide, compatible with the protocols of major global model providers, and covering full-modality capabilities including text, image, audio, video, and file processing, serving over 1.69 million enterprises and developers. Qiniu AI offers an exclusive benefit for HeiGate users: register via <a href="https://s.qiniu.com/u6rQrq">this link</a> — enterprise users get 12 million tokens free, and developers get 3 million tokens free.</td>
 </tr>
 
 <tr>
 <td width="180"><a href="https://api.fenno.ai/s/dC4k"><img src="assets/partners/logos/fennoai.jpg" alt="FennoAI" width="150"></a></td>
-<td>Thanks to FennoAI for sponsoring this project! FennoAI is a high-stability, high-performance API relay provider for enterprise R&D teams and developers, compatible with the OpenAI and Anthropic protocols and seamlessly integrating with mainstream AI coding tools such as Codex, Claude Code, and OpenCode. The platform delivers enterprise-grade stability, supporting call volumes of 100 billion tokens per day, and supports business-to-business settlement and invoicing for both domestic and overseas entities to meet enterprise R&D and procurement needs. As an exclusive benefit for Sub2API users, purchase a subscription via the <a href="https://api.fenno.ai/s/dC4k">exclusive link</a> to get $50 worth of Coding Plan credit for only $1.99. Referral rewards are also available: invite friends to purchase and earn up to 20% commission — the more you invite, the more you earn.</td>
+<td>Thanks to FennoAI for sponsoring this project! FennoAI is a high-stability, high-performance API relay provider for enterprise R&D teams and developers, compatible with the OpenAI and Anthropic protocols and seamlessly integrating with mainstream AI coding tools such as Codex, Claude Code, and OpenCode. The platform delivers enterprise-grade stability, supporting call volumes of 100 billion tokens per day, and supports business-to-business settlement and invoicing for both domestic and overseas entities to meet enterprise R&D and procurement needs. As an exclusive benefit for HeiGate users, purchase a subscription via the <a href="https://api.fenno.ai/s/dC4k">exclusive link</a> to get $50 worth of Coding Plan credit for only $1.99. Referral rewards are also available: invite friends to purchase and earn up to 20% commission — the more you invite, the more you earn.</td>
 </tr>
 
 <tr>
@@ -181,7 +223,7 @@ Please read the following carefully before using this project:
 
 ## Overview
 
-Sub2API is an AI API gateway platform designed to distribute and manage API quotas from AI product subscriptions. Users can access upstream AI services through platform-generated API Keys, while the platform handles authentication, billing, load balancing, and request forwarding.
+HeiGate is an AI API gateway platform designed to distribute and manage API quotas from AI product subscriptions. Users can access upstream AI services through platform-generated API Keys, while the platform handles authentication, billing, load balancing, and request forwarding.
 
 ## Features
 
@@ -198,11 +240,11 @@ Sub2API is an AI API gateway platform designed to distribute and manage API quot
 
 ## Ecosystem
 
-Community projects that extend or integrate with Sub2API:
+Community projects that extend or integrate with HeiGate:
 
 | Project | Description | Features |
 |---------|-------------|----------|
-| ~~[Sub2ApiPay](https://github.com/touwaeriol/sub2apipay)~~ | ~~Self-service payment system~~ | **Now Built-in** — Payment is now integrated into Sub2API, no separate deployment needed. See [Payment Configuration Guide](docs/PAYMENT.md) |
+| ~~[Sub2ApiPay](https://github.com/touwaeriol/sub2apipay)~~ | ~~Self-service payment system~~ | **Now Built-in** — Payment is now integrated into HeiGate, no separate deployment needed. See [Payment Configuration Guide](docs/PAYMENT.md) |
 | [sub2api-mobile](https://github.com/ckken/sub2api-mobile) | Mobile admin console | Cross-platform app (iOS/Android/Web) for user management, account management, monitoring dashboard, and multi-backend switching; built with Expo + React Native |
 
 ## Tech Stack
@@ -218,7 +260,7 @@ Community projects that extend or integrate with Sub2API:
 
 ## Nginx Reverse Proxy Note
 
-When using Nginx as a reverse proxy for Sub2API (or CRS) with Codex CLI, add the following to the `http` block in your Nginx configuration:
+When using Nginx as a reverse proxy for HeiGate (or CRS) with Codex CLI, add the following to the `http` block in your Nginx configuration:
 
 ```nginx
 underscores_in_headers on;
@@ -244,13 +286,13 @@ One-click installation script that downloads pre-built binaries from GitHub Rele
 #### Installation Steps
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/install.sh | sudo bash
 ```
 
 The script will:
 1. Detect your system architecture
 2. Download the latest release
-3. Install binary to `/opt/sub2api`
+3. Install binary to `/opt/heigate`
 4. Create systemd service
 5. Configure system user and permissions
 
@@ -294,7 +336,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # Uninstall
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -317,7 +359,7 @@ Use the automated deployment script for easy setup:
 mkdir -p sub2api-deploy && cd sub2api-deploy
 
 # Download and run deployment preparation script
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/docker-deploy.sh | bash
 
 # Start services
 docker compose up -d
@@ -339,7 +381,7 @@ If you prefer manual setup:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api/deploy
 
 # 2. Copy environment configuration
@@ -466,10 +508,10 @@ rm -rf data/ postgres_data/ redis_data/
 
 ### Method 3: Apple container (macOS)
 
-Apple-silicon Macs running macOS 26 can run the full Sub2API, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
+Apple-silicon Macs running macOS 26 can run the full HeiGate, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
 
 ```bash
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api/deploy
 ./apple-container.sh init
 ./apple-container.sh up
@@ -495,7 +537,7 @@ Build and run from source code for development or customization.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api
 
 # 2. Install pnpm (if not already installed)
@@ -563,7 +605,7 @@ Additional security-related options are available in `config.yaml`:
 - `security.response_headers.enabled` to enable configurable response header filtering (disabled uses default allowlist)
 - `security.csp` to control Content-Security-Policy headers
 - `billing.circuit_breaker` to fail closed on billing errors
-- `security.trust_forwarded_ip_for_api_key_acl` enables legacy raw forwarded-header takeover (enabled by default for upgrade compatibility); disable it to enforce `server.trusted_proxies`, which should contain only the exact proxy CIDRs that connect directly to Sub2API
+- `security.trust_forwarded_ip_for_api_key_acl` enables legacy raw forwarded-header takeover (enabled by default for upgrade compatibility); disable it to enforce `server.trusted_proxies`, which should contain only the exact proxy CIDRs that connect directly to HeiGate
 - `security.forwarded_client_ip_headers` configures up to 16 third-party CDN client-IP header names; they are checked in order before the built-in headers only while legacy takeover is enabled
 - `turnstile.required` to require Turnstile in release mode
 
@@ -747,7 +789,7 @@ Long-running OpenAI/Grok image generation and editing can be submitted through `
 
 ## Grok / xAI Support
 
-Sub2API supports both Grok subscription accounts through xAI OAuth and standard xAI API-key accounts. Both account types forward OpenAI-compatible Responses traffic to xAI.
+HeiGate supports both Grok subscription accounts through xAI OAuth and standard xAI API-key accounts. Both account types forward OpenAI-compatible Responses traffic to xAI.
 
 ### Supported Scope
 
@@ -792,8 +834,8 @@ For API-key accounts, select **Grok → API Key** in the create-account dialog. 
 
 ### Grok Build CLI Configuration
 
-1. In the Sub2API admin dashboard, add either a `grok` OAuth account and complete xAI authorization, or add a Grok API-key account.
-2. Create a Grok group, attach the account to it, then create a Sub2API API key assigned to that group.
+1. In the HeiGate admin dashboard, add either a `grok` OAuth account and complete xAI authorization, or add a Grok API-key account.
+2. Create a Grok group, attach the account to it, then create a HeiGate API key assigned to that group.
 3. In the user API-key page, click **Use Key** and select **Grok CLI**. The modal generates the correct file and base URL for macOS/Linux or Windows. It also provides an OpenCode configuration on the **OpenCode** tab.
 4. If configuring manually, save the following as `~/.grok/config.toml` (Windows: `%USERPROFILE%\.grok\config.toml`):
 
@@ -812,18 +854,18 @@ context_window = 1000000
 supports_backend_search = true
 ```
 
-Back up an existing `config.toml` before merging the entry. The file contains a Sub2API API key, so keep it private and restrict its permissions where supported. Verify the effective configuration and make a smoke request:
+Back up an existing `config.toml` before merging the entry. The file contains a HeiGate API key, so keep it private and restrict its permissions where supported. Verify the effective configuration and make a smoke request:
 
 ```bash
 grok inspect
 grok -p "Reply with sub2api-ok" -m grok
 ```
 
-The `base_url` above is the public Sub2API URL ending in `/v1`, not `api.x.ai` or the internal xAI OAuth proxy URL.
+The `base_url` above is the public HeiGate URL ending in `/v1`, not `api.x.ai` or the internal xAI OAuth proxy URL.
 
 ### Usage And Quota Display
 
-xAI quota is passive. Sub2API does not invent subscription quota values; it records whitelisted xAI rate-limit headers from successful or rate-limited upstream responses when xAI sends them. Before the first usable upstream response, the dashboard shows quota as unknown and still displays local Sub2API usage stats.
+xAI quota is passive. HeiGate does not invent subscription quota values; it records whitelisted xAI rate-limit headers from successful or rate-limited upstream responses when xAI sends them. Before the first usable upstream response, the dashboard shows quota as unknown and still displays local HeiGate usage stats.
 
 `401` responses temporarily remove accounts with invalid credentials from scheduling. `403` responses are treated as access or entitlement failures instead of token-refresh loops. `429` responses use `Retry-After` or a short cooldown to temporarily remove the account from scheduling.
 
@@ -835,7 +877,7 @@ Administrators can override automatic media eligibility through the account crea
 
 ## Antigravity Support
 
-Sub2API supports [Antigravity](https://antigravity.so/) accounts. After authorization, dedicated endpoints are available for Claude and Gemini models.
+HeiGate supports [Antigravity](https://antigravity.so/) accounts. After authorization, dedicated endpoints are available for Claude and Gemini models.
 
 ### Dedicated Endpoints
 
@@ -889,21 +931,21 @@ sub2api/
 
 ## Star History
 
-<a href="https://star-history.dera.page/#Wei-Shaw/sub2api&Date">
+<a href="https://star-history.dera.page/#Heiheiaoo/HeiGate&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
-   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date" />
  </picture>
 </a>
 
 ---
 
-## License
+## License And Attribution
 
 This project is licensed under the [GNU Lesser General Public License v3.0](LICENSE) (or later).
 
-Copyright (c) 2026 Wesley Liddick
+HeiGate contains work derived from [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api). Original copyright notices remain with their respective owners. See [NOTICE](NOTICE).
 
 ---
 

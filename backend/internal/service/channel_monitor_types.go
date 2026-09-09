@@ -134,14 +134,14 @@ type ChannelMonitorUpdateParams struct {
 
 // CheckResult 单个模型一次检测的结果。
 type CheckResult struct {
-	Model         string
-	Status        string // operational / degraded / failed / error
-	LatencyMs     *int
-	PingLatencyMs *int
-	Message       string
-	CheckedAt     time.Time
+	Model         string                       `json:"model"`
+	Status        string                       `json:"status"` // operational / degraded / failed / error
+	LatencyMs     *int                         `json:"latency_ms,omitempty"`
+	PingLatencyMs *int                         `json:"ping_latency_ms,omitempty"`
+	Message       string                       `json:"message,omitempty"`
+	CheckedAt     time.Time                    `json:"checked_at"`
 	// Quota 配额模式附带快照（quota 模式唯一数据；quota_probe 挂在主模型行）。
-	Quota *domain.MonitorQuotaSnapshot
+	Quota *domain.MonitorQuotaSnapshot `json:"quota,omitempty"`
 }
 
 // UserMonitorView 用户只读视图：监控概览（含主模型最近状态 + 7d 可用率 + 附加模型最近状态）。

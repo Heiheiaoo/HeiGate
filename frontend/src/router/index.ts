@@ -1,5 +1,5 @@
 /**
- * Vue Router configuration for Sub2API frontend
+ * Vue Router configuration for HeiGate frontend
  * Defines all application routes with lazy loading and navigation guards
  */
 
@@ -37,6 +37,15 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'Home'
+    }
+  },
+  {
+    path: '/desktop',
+    name: 'DesktopPreview',
+    component: () => import('@/views/DesktopPreviewView.vue'),
+    meta: {
+      requiresAuth: false,
+      title: 'HeiGate'
     }
   },
   {
@@ -750,7 +759,7 @@ let authInitialized = false
 const navigationLoading = useNavigationLoadingState()
 // 延迟初始化预加载，传入 router 实例
 let routePrefetch: ReturnType<typeof useRoutePrefetch> | null = null
-const BACKEND_MODE_ALLOWED_PATHS = ['/login', '/key-usage', '/setup', '/payment/result', '/payment/airwallex', '/legal']
+const BACKEND_MODE_ALLOWED_PATHS = ['/login', '/desktop', '/key-usage', '/setup', '/payment/result', '/payment/airwallex', '/legal']
 const BACKEND_MODE_CALLBACK_PATHS = [
   '/auth/callback',
   '/auth/linuxdo/callback',

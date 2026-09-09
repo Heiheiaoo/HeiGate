@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Sub2API Logo" width="128" />
+<img src="assets/logo.svg" alt="HeiGate Logo" width="128" />
 
-# Sub2API
+# HeiGate
 
 [![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
@@ -10,13 +10,55 @@
 [![Redis](https://img.shields.io/badge/Redis-7+-DC382D.svg)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
 
-<a href="https://trendshift.io/repositories/21823" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21823" alt="Wei-Shaw%2Fsub2api | Trendshift" width="250" height="55"/></a>
-
-**AI API 网关平台 - 订阅配额分发管理**
+**本地优先、可私有部署的 AI API 网关，提供多渠道路由、故障转移、用量管理和桌面端集成。**
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
 </div>
+
+HeiGate 提供两种运行形态：
+
+- **桌面模式**：面向 macOS 的本地 SQLite 网关，包含渠道探活、模型路由、请求分析和 Claude/Codex 客户端配置。
+- **服务器模式**：完整的多用户网关，支持 PostgreSQL、Redis、身份认证、计费、配额、监控、插件和 Docker 部署。
+
+> [!IMPORTANT]
+> HeiGate 基于 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 修改而来，不是 sub2api 官方仓库，由独立维护者维护。版权和许可说明见 [NOTICE](NOTICE)。
+
+## 快速开始
+
+### macOS 桌面应用
+
+```bash
+make build-desktop-macos
+open dist/desktop/HeiGate.app
+```
+
+### 本地桌面网关
+
+```bash
+make build-desktop
+DATA_DIR="$PWD/desktop-data" ./dist/desktop/heigate-desktop -desktop
+```
+
+打开 `http://127.0.0.1:8080/desktop`。
+
+### 完整服务器部署
+
+```bash
+cd deploy
+cp .env.example .env
+docker compose up -d
+```
+
+公网暴露服务前，必须替换 `.env` 中所有密钥。详细部署说明见 [deploy/README.md](deploy/README.md)。
+
+## 开源社区
+
+- 提交 Pull Request 前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 报告问题或提议功能时，请使用 GitHub Issue 模板。
+- 安全漏洞请按 [SECURITY.md](SECURITY.md) 私下报告。
+- 社区行为遵循 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+- 发布与兼容性约定见 [docs/OPEN_SOURCE.md](docs/OPEN_SOURCE.md)。
 
 
 ## ⚠️ 重要提醒
@@ -26,11 +68,11 @@
 - **🚨 服务条款风险**：使用本项目可能违反 Anthropic 等上游服务商的服务条款。请在使用前仔细阅读相关服务商的用户协议，由此产生的一切风险由用户自行承担。
 - **⚖️ 合规使用**：请在符合您所在国家或地区法律法规的前提下使用本项目，严禁将其用于任何违法违规用途。
 - **📖 免责声明**：本项目仅供技术学习与研究使用，作者不对因使用本项目导致的账户封禁、服务中断、数据丢失或其他任何直接或间接损失承担责任。
-- **🚫 无商业授权**：本项目从未授权任何个人或组织基于本项目开展任何形式的商业化运营。任何以本项目名义或基于本项目从事的商业行为均与本项目及其开发者无关，由此产生的一切纠纷、损失和法律责任由行为主体自行承担。
+- **🏷️ 不授予商标或服务背书**：LGPL 许可证允许在其条款下使用本项目，包括商业使用；但不授予项目名称、Logo、上游账号、托管服务或服务商关系的任何权利，也不代表维护者背书。
 
-## ❤️ 赞助商
+## 上游项目赞助商
 
-> [想出现在这里？](mailto:support@sub2api.org)
+以下机构赞助的是上游 sub2api 项目。保留该列表是为了尊重上游归属，不代表其赞助 HeiGate。
 
 <table>
 
@@ -95,7 +137,7 @@
 
 <tr>
 <td width="180"><a href="https://roxybrowser.com/invite/bgGKG7"><img src="assets/partners/logos/RoxyBrowser.png" alt="RoxyBrowser" width="150"></a></td>
-<td>感谢 RoxyBrowser 赞助本项目！<a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> 是 Sub2API 的理想搭档：内置原生 Roxy AI Agent 与高质量原生住宅 IP，支持通过简单命令实现批量自动化，显著提升多账号管理的安全性与效率！点击<a href="https://roxybrowser.com/invite/bgGKG7">此链接</a>注册，可领取免费住宅 IP 套餐与终身 9 折优惠。
+<td>感谢 RoxyBrowser 赞助本项目！<a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> 是 HeiGate 的理想搭档：内置原生 Roxy AI Agent 与高质量原生住宅 IP，支持通过简单命令实现批量自动化，显著提升多账号管理的安全性与效率！点击<a href="https://roxybrowser.com/invite/bgGKG7">此链接</a>注册，可领取免费住宅 IP 套餐与终身 9 折优惠。
 </td>
 </tr>
 
@@ -137,12 +179,12 @@
 
 <tr>
 <td width="180"><a href="https://s.qiniu.com/u6rQrq"><img src="assets/partners/logos/qiniu.jpg" alt="七牛云AI" width="150"></a></td>
-<td>感谢 七牛云AI 赞助本项目！七牛云AI 是七牛云（02567.HK）旗下企业级大模型 MaaS 平台，一站式调用全球 150+ 主流模型，兼容全球主流模型厂商协议，覆盖文本、图像、音频、视频、文件处理等全模态处理能力，服务超过169万企业及开发者用户。七牛云 AI 为 Sub2API 的用户提供了专属福利：通过<a href="https://s.qiniu.com/u6rQrq">此链接</a>注册，企业用户免费领1200万Token，开发者免费领300万Token。</td>
+<td>感谢 七牛云AI 赞助本项目！七牛云AI 是七牛云（02567.HK）旗下企业级大模型 MaaS 平台，一站式调用全球 150+ 主流模型，兼容全球主流模型厂商协议，覆盖文本、图像、音频、视频、文件处理等全模态处理能力，服务超过169万企业及开发者用户。七牛云 AI 为 HeiGate 的用户提供了专属福利：通过<a href="https://s.qiniu.com/u6rQrq">此链接</a>注册，企业用户免费领1200万Token，开发者免费领300万Token。</td>
 </tr>
 
 <tr>
 <td width="180"><a href="https://api.fenno.ai/s/dC4k"><img src="assets/partners/logos/fennoai.jpg" alt="FennoAI" width="150"></a></td>
-<td>感谢 FennoAI 赞助本项目！FennoAI 是一家面向企业研发团队和开发者的高稳定、高性能 API 中转服务商，兼容 OpenAI 与 Anthropic 协议，可无缝接入 Codex、Claude Code、OpenCode 等主流 AI 编程工具。平台具备企业级稳定性，可支撑千亿 Token/日的调用规模，并支持境内外主体公对公结算及开票，满足企业级研发与采购需求。作为 Sub2API 用户专属福利，通过<a href="https://api.fenno.ai/s/dC4k">专属链接</a>购买订阅，仅需 1.99 美元即可获得价值 50 美元的 Coding Plan 额度。同时支持邀请奖励，邀请好友购买最高可获得 20% 返佣，邀请越多，奖励越高。</td>
+<td>感谢 FennoAI 赞助本项目！FennoAI 是一家面向企业研发团队和开发者的高稳定、高性能 API 中转服务商，兼容 OpenAI 与 Anthropic 协议，可无缝接入 Codex、Claude Code、OpenCode 等主流 AI 编程工具。平台具备企业级稳定性，可支撑千亿 Token/日的调用规模，并支持境内外主体公对公结算及开票，满足企业级研发与采购需求。作为 HeiGate 用户专属福利，通过<a href="https://api.fenno.ai/s/dC4k">专属链接</a>购买订阅，仅需 1.99 美元即可获得价值 50 美元的 Coding Plan 额度。同时支持邀请奖励，邀请好友购买最高可获得 20% 返佣，邀请越多，奖励越高。</td>
 </tr>
 
 <tr>
@@ -184,7 +226,7 @@
 
 ## 项目概述
 
-Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的 API 配额。用户通过平台生成的 API Key 调用上游 AI 服务，平台负责鉴权、计费、负载均衡和请求转发。
+HeiGate 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的 API 配额。用户通过平台生成的 API Key 调用上游 AI 服务，平台负责鉴权、计费、负载均衡和请求转发。
 
 ## 核心功能
 
@@ -200,11 +242,11 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 
 ## 生态项目
 
-围绕 Sub2API 的社区扩展与集成项目：
+围绕 HeiGate 的社区扩展与集成项目：
 
 | 项目 | 说明 | 功能 |
 |------|------|------|
-| ~~[Sub2ApiPay](https://github.com/touwaeriol/sub2apipay)~~ | ~~自助支付系统~~ | **已内置** — 支付功能已集成到 Sub2API 中，无需独立部署。详见 [支付配置指南](docs/PAYMENT_CN.md) |
+| ~~[Sub2ApiPay](https://github.com/touwaeriol/sub2apipay)~~ | ~~自助支付系统~~ | **已内置** — 支付功能已集成到 HeiGate 中，无需独立部署。详见 [支付配置指南](docs/PAYMENT_CN.md) |
 | [sub2api-mobile](https://github.com/ckken/sub2api-mobile) | 移动端管理控制台 | 跨平台应用（iOS/Android/Web），支持用户管理、账号管理、监控看板、多后端切换；基于 Expo + React Native 构建 |
 
 ## 技术栈
@@ -220,7 +262,7 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 
 ## Nginx 反向代理注意事项
 
-通过 Nginx 反向代理 Sub2API（或 CRS 服务）并搭配 Codex CLI 使用时，需要在 Nginx 配置的 `http` 块中添加：
+通过 Nginx 反向代理 HeiGate（或 CRS 服务）并搭配 Codex CLI 使用时，需要在 Nginx 配置的 `http` 块中添加：
 
 ```nginx
 underscores_in_headers on;
@@ -246,13 +288,13 @@ Nginx 默认会丢弃名称中含下划线的请求头（如 `session_id`），�
 #### 安装步骤
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/install.sh | sudo bash
 ```
 
 脚本会自动：
 1. 检测系统架构
 2. 下载最新版本
-3. 安装二进制文件到 `/opt/sub2api`
+3. 安装二进制文件到 `/opt/heigate`
 4. 创建 systemd 服务
 5. 配置系统用户和权限
 
@@ -296,7 +338,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # 卸载
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -319,7 +361,7 @@ curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install
 mkdir -p sub2api-deploy && cd sub2api-deploy
 
 # 下载并运行部署准备脚本
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/docker-deploy.sh | bash
 
 # 启动服务
 docker compose up -d
@@ -341,7 +383,7 @@ docker compose logs -f sub2api
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api/deploy
 
 # 2. 复制环境配置文件
@@ -417,7 +459,7 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 关键点：
 
-- 主进程固定探测：`/tmp/sub2api-datamanagement.sock`
+- 主进程固定探测：`/tmp/heigate-datamanagement.sock`
 - 只有该 Socket 可连通时，数据管理功能才会开启
 - Docker 场景需将宿主机 Socket 挂载到容器同路径
 
@@ -480,10 +522,10 @@ rm -rf data/ postgres_data/ redis_data/
 
 ### 方式三：Apple container（macOS）
 
-Apple 芯片 Mac 在 macOS 26 上可使用 Apple `container` 1.1.0 或更高版本运行完整的 Sub2API、PostgreSQL 和 Redis：
+Apple 芯片 Mac 在 macOS 26 上可使用 Apple `container` 1.1.0 或更高版本运行完整的 HeiGate、PostgreSQL 和 Redis：
 
 ```bash
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api/deploy
 ./apple-container.sh init
 ./apple-container.sh up
@@ -509,7 +551,7 @@ cd sub2api/deploy
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api
 
 # 2. 安装 pnpm（如果还没有安装）
@@ -576,7 +618,7 @@ default:
 - `security.response_headers.enabled` 可启用可配置响应头过滤（关闭时使用默认白名单）
 - `security.csp` 配置 Content-Security-Policy
 - `billing.circuit_breaker` 计费异常时 fail-closed
-- `security.trust_forwarded_ip_for_api_key_acl` 控制旧版原始转发头接管（为升级兼容默认开启）；关闭后严格使用 `server.trusted_proxies`，其中只应填写直接连接 Sub2API 的精确代理 CIDR
+- `security.trust_forwarded_ip_for_api_key_acl` 控制旧版原始转发头接管（为升级兼容默认开启）；关闭后严格使用 `server.trusted_proxies`，其中只应填写直接连接 HeiGate 的精确代理 CIDR
 - `security.forwarded_client_ip_headers` 最多配置 16 个第三方 CDN 客户端 IP 请求头；仅在旧版接管开启时按顺序优先于内置请求头解析
 - `turnstile.required` 在 release 模式强制启用 Turnstile
 
@@ -719,7 +761,7 @@ go generate ./cmd/server
 
 ## Antigravity 使用说明
 
-Sub2API 支持 [Antigravity](https://antigravity.so/) 账户，授权后可通过专用端点访问 Claude 和 Gemini 模型。
+HeiGate 支持 [Antigravity](https://antigravity.so/) 账户，授权后可通过专用端点访问 Claude 和 Gemini 模型。
 
 ### 专用端点
 
@@ -773,21 +815,21 @@ sub2api/
 
 ## Star History
 
-<a href="https://star-history.dera.page/#Wei-Shaw/sub2api&Date">
+<a href="https://star-history.dera.page/#Heiheiaoo/HeiGate&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
-   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date" />
  </picture>
 </a>
 
 ---
 
-## 许可证
+## 许可证与归属
 
 本项目基于 [GNU 宽通用公共许可证 v3.0](LICENSE)（或更高版本）授权。
 
-Copyright (c) 2026 Wesley Liddick
+HeiGate 包含基于 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 修改的作品。原始版权归各自权利人所有，详见 [NOTICE](NOTICE)。
 
 ---
 

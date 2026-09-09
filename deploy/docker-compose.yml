@@ -1,5 +1,5 @@
 # =============================================================================
-# Sub2API Docker Compose Configuration
+# HeiGate Docker Compose Configuration
 # =============================================================================
 # Quick Start:
 #   1. Copy .env.example to .env and configure
@@ -13,10 +13,13 @@
 
 services:
   # ===========================================================================
-  # Sub2API Application
+  # HeiGate Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ${HEIGATE_IMAGE:-heigate:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: sub2api
     restart: unless-stopped
     security_opt:
@@ -51,6 +54,10 @@ services:
       - SERVER_MODE=${SERVER_MODE:-release}
       - ENABLE_SERVER_TIMING=${ENABLE_SERVER_TIMING:-false}
       - RUN_MODE=${RUN_MODE:-standard}
+      # Local-only desktop channel manager and gateway. Keep disabled for the
+      # normal authenticated SaaS deployment; enable explicitly for desktop use.
+      - DESKTOP_API_ENABLED=${DESKTOP_API_ENABLED:-false}
+      - DESKTOP_ONLY=${DESKTOP_ONLY:-false}
       - UPDATE_GITHUB_TOKEN=${UPDATE_GITHUB_TOKEN:-}
       - ALIPAY_MOBILE_PRECREATE_DEEP_LINK=${ALIPAY_MOBILE_PRECREATE_DEEP_LINK:-}
 
@@ -159,7 +166,7 @@ services:
       # Gateway Upstream, Scheduling & Image Configuration
       # =======================================================================
       # Gateway values come from Compose .env or the shell.
-      # Fallbacks mirror Sub2API backend defaults so omitted values preserve behavior.
+      # Fallbacks mirror HeiGate backend defaults so omitted values preserve behavior.
       - GATEWAY_FORCE_CODEX_CLI=${GATEWAY_FORCE_CODEX_CLI:-false}
       - GATEWAY_OPENAI_COMPACT_MODEL=${GATEWAY_OPENAI_COMPACT_MODEL:-gpt-5.4}
       - GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT=${GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT:-0}

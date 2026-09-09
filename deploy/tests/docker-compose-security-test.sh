@@ -27,7 +27,7 @@ check_application_security_opt() {
   )
 
   if [ "$count" -ne 1 ]; then
-    printf '%s must enable no-new-privileges exactly once for the sub2api service\n' "$file" >&2
+    printf '%s must enable no-new-privileges exactly once for the heigate service\n' "$file" >&2
     exit 1
   fi
 }

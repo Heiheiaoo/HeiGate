@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Sub2API Logo" width="128" />
+<img src="assets/logo.svg" alt="HeiGate Logo" width="128" />
 
-# Sub2API
+# HeiGate
 
 [![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
@@ -10,13 +10,14 @@
 [![Redis](https://img.shields.io/badge/Redis-7+-DC382D.svg)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
 
-<a href="https://trendshift.io/repositories/21823" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21823" alt="Wei-Shaw%2Fsub2api | Trendshift" width="250" height="55"/></a>
-
 **サブスクリプションクォータ配分のための AI API ゲートウェイプラットフォーム**
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
 </div>
+
+> [!IMPORTANT]
+> HeiGate は [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) を基にした派生プロジェクトです。sub2api の公式リポジトリではなく、独立してメンテナンスされています。帰属とライセンスの詳細は [NOTICE](NOTICE) を参照してください。
 
 ## ⚠️ 重要なお知らせ
 
@@ -25,11 +26,11 @@
 - **🚨 利用規約のリスク**：本プロジェクトの使用は、Anthropic をはじめとする上流プロバイダーの利用規約に違反する可能性があります。ご利用前に各プロバイダーのユーザー規約を必ずご確認ください。使用により生じるすべてのリスクはユーザーご自身が負うものとします。
 - **⚖️ 法令遵守**：お住まいの国または地域の法令を遵守した上で本プロジェクトをご利用ください。いかなる違法な目的での使用も固く禁じます。
 - **📖 免責事項**：本プロジェクトは技術的な学習および研究の目的でのみ提供されます。本プロジェクトの使用により生じたアカウントの停止、サービスの中断、データの損失、その他一切の直接的または間接的な損害について、作者は一切の責任を負いません。
-- **🚫 商用利用の非許諾**：本プロジェクトの開発者は、いかなる個人または組織に対しても、本プロジェクトを利用したいかなる形態の商業運営も一切許諾していません。本プロジェクトの名義で、または本プロジェクトに基づいて行われる商業行為はすべて本プロジェクトおよびその開発者とは無関係であり、それにより生じる一切の紛争、損失、法的責任は行為者自身が負うものとします。
+- **🏷️ 商標またはサービスの推奨は含まれません**：LGPL はその条件に従った商用を含む利用を許可します。ただし、プロジェクト名、ロゴ、アップストリームアカウント、ホスティングサービス、プロバイダー関係への権利や、メンテナーによる推奨を与えるものではありません。
 
-## ❤️ スポンサー
+## アップストリームのスポンサー
 
-> [こちらに掲載しませんか？](mailto:support@sub2api.org)
+以下はアップストリームの sub2api プロジェクトのスポンサーです。帰属のために保持しており、HeiGate へのスポンサーシップを意味しません。
 
 <table>
 
@@ -94,7 +95,7 @@
 
 <tr>
 <td width="180"><a href="https://roxybrowser.com/invite/bgGKG7"><img src="assets/partners/logos/RoxyBrowser.png" alt="RoxyBrowser" width="150"></a></td>
-<td>RoxyBrowser のご支援に感謝します！<a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> は Sub2API の理想的なパートナーです：ネイティブ統合された Roxy AI Agent と高品質なネイティブ住宅 IP を搭載し、シンプルなコマンドで一括自動化をサポート、マルチアカウント管理のセキュリティと効率を大幅に向上させます！<a href="https://roxybrowser.com/invite/bgGKG7">このリンク</a>から登録すると、無料の住宅 IP パッケージと生涯 10% 割引を獲得できます。
+<td>RoxyBrowser のご支援に感謝します！<a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> は HeiGate の理想的なパートナーです：ネイティブ統合された Roxy AI Agent と高品質なネイティブ住宅 IP を搭載し、シンプルなコマンドで一括自動化をサポート、マルチアカウント管理のセキュリティと効率を大幅に向上させます！<a href="https://roxybrowser.com/invite/bgGKG7">このリンク</a>から登録すると、無料の住宅 IP パッケージと生涯 10% 割引を獲得できます。
 </td>
 </tr>
 
@@ -136,12 +137,12 @@
 
 <tr>
 <td width="180"><a href="https://s.qiniu.com/u6rQrq"><img src="assets/partners/logos/qiniu.jpg" alt="Qiniu AI" width="150"></a></td>
-<td>七牛云AI のご支援に感謝します！七牛云AI は、七牛云（02567.HK）傘下のエンタープライズ向け大規模モデル MaaS プラットフォームです。世界の主要モデル 150+ をワンストップで利用でき、グローバル主要モデルプロバイダーのプロトコルに対応し、テキスト、画像、音声、動画、ファイル処理などのフルモーダル処理能力をカバー。169万を超える企業・開発者ユーザーにサービスを提供しています。Sub2API ユーザー向けの限定特典として、<a href="https://s.qiniu.com/u6rQrq">こちらのリンク</a>から登録すると、企業ユーザーは 1200万 Token、開発者は 300万 Token を無料で獲得できます。</td>
+<td>七牛云AI のご支援に感謝します！七牛云AI は、七牛云（02567.HK）傘下のエンタープライズ向け大規模モデル MaaS プラットフォームです。世界の主要モデル 150+ をワンストップで利用でき、グローバル主要モデルプロバイダーのプロトコルに対応し、テキスト、画像、音声、動画、ファイル処理などのフルモーダル処理能力をカバー。169万を超える企業・開発者ユーザーにサービスを提供しています。HeiGate ユーザー向けの限定特典として、<a href="https://s.qiniu.com/u6rQrq">こちらのリンク</a>から登録すると、企業ユーザーは 1200万 Token、開発者は 300万 Token を無料で獲得できます。</td>
 </tr>
 
 <tr>
 <td width="180"><a href="https://api.fenno.ai/s/dC4k"><img src="assets/partners/logos/fennoai.jpg" alt="FennoAI" width="150"></a></td>
-<td>FennoAI のご支援に感謝します！FennoAI は、企業の研究開発チームと開発者向けの高安定・高性能 API 中継サービスプロバイダーです。OpenAI と Anthropic のプロトコルに対応し、Codex、Claude Code、OpenCode などの主要 AI コーディングツールにシームレスに接続できます。エンタープライズ級の安定性を備え、1 日あたり千億規模の Token 呼び出しに対応。国内外法人間の企業間決済と請求書発行もサポートし、企業の研究開発・調達ニーズに応えます。Sub2API ユーザー限定特典として、<a href="https://api.fenno.ai/s/dC4k">専用リンク</a>からサブスクリプションを購入すると、わずか 1.99 ドルで 50 ドル相当の Coding Plan クレジットを獲得できます。さらに招待報酬にも対応しており、友達の購入で最大 20% の還元を獲得可能。招待が多いほど、報酬も増えます。</td>
+<td>FennoAI のご支援に感謝します！FennoAI は、企業の研究開発チームと開発者向けの高安定・高性能 API 中継サービスプロバイダーです。OpenAI と Anthropic のプロトコルに対応し、Codex、Claude Code、OpenCode などの主要 AI コーディングツールにシームレスに接続できます。エンタープライズ級の安定性を備え、1 日あたり千億規模の Token 呼び出しに対応。国内外法人間の企業間決済と請求書発行もサポートし、企業の研究開発・調達ニーズに応えます。HeiGate ユーザー限定特典として、<a href="https://api.fenno.ai/s/dC4k">専用リンク</a>からサブスクリプションを購入すると、わずか 1.99 ドルで 50 ドル相当の Coding Plan クレジットを獲得できます。さらに招待報酬にも対応しており、友達の購入で最大 20% の還元を獲得可能。招待が多いほど、報酬も増えます。</td>
 </tr>
 
 <tr>
@@ -183,7 +184,7 @@
 
 ## 概要
 
-Sub2API は、AI 製品のサブスクリプションから API クォータを配分・管理するために設計された AI API ゲートウェイプラットフォームです。ユーザーはプラットフォームが生成した API キーを通じて上流の AI サービスにアクセスでき、プラットフォームは認証、課金、負荷分散、リクエスト転送を処理します。
+HeiGate は、AI 製品のサブスクリプションから API クォータを配分・管理するために設計された AI API ゲートウェイプラットフォームです。ユーザーはプラットフォームが生成した API キーを通じて上流の AI サービスにアクセスでき、プラットフォームは認証、課金、負荷分散、リクエスト転送を処理します。
 
 ## 機能
 
@@ -199,11 +200,11 @@ Sub2API は、AI 製品のサブスクリプションから API クォータを�
 
 ## エコシステム
 
-Sub2API を拡張・統合するコミュニティプロジェクト:
+HeiGate を拡張・統合するコミュニティプロジェクト:
 
 | プロジェクト | 説明 | 機能 |
 |---------|-------------|----------|
-| ~~[Sub2ApiPay](https://github.com/touwaeriol/sub2apipay)~~ | ~~セルフサービス決済システム~~ | **内蔵済み** — 決済機能は Sub2API に統合されました。別途デプロイは不要です。[決済設定ガイド](docs/PAYMENT.md)をご参照ください |
+| ~~[Sub2ApiPay](https://github.com/touwaeriol/sub2apipay)~~ | ~~セルフサービス決済システム~~ | **内蔵済み** — 決済機能は HeiGate に統合されました。別途デプロイは不要です。[決済設定ガイド](docs/PAYMENT.md)をご参照ください |
 | [sub2api-mobile](https://github.com/ckken/sub2api-mobile) | モバイル管理コンソール | ユーザー管理、アカウント管理、監視ダッシュボード、マルチバックエンド切り替えが可能なクロスプラットフォームアプリ（iOS/Android/Web）。Expo + React Native で構築 |
 
 ## 技術スタック
@@ -219,7 +220,7 @@ Sub2API を拡張・統合するコミュニティプロジェクト:
 
 ## Nginx リバースプロキシに関する注意
 
-Sub2API（または CRS）を Nginx でリバースプロキシし、Codex CLI と組み合わせて使用する場合、Nginx の `http` ブロックに以下の設定を追加してください:
+HeiGate（または CRS）を Nginx でリバースプロキシし、Codex CLI と組み合わせて使用する場合、Nginx の `http` ブロックに以下の設定を追加してください:
 
 ```nginx
 underscores_in_headers on;
@@ -245,13 +246,13 @@ GitHub Releases からビルド済みバイナリをダウンロードするワ�
 #### インストール手順
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/install.sh | sudo bash
 ```
 
 スクリプトは以下を実行します:
 1. システムアーキテクチャの検出
 2. 最新リリースのダウンロード
-3. バイナリを `/opt/sub2api` にインストール
+3. バイナリを `/opt/heigate` にインストール
 4. systemd サービスの作成
 5. システムユーザーと権限の設定
 
@@ -295,7 +296,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # アンインストール
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -318,7 +319,7 @@ PostgreSQL と Redis のコンテナを含む Docker Compose でデプロイし�
 mkdir -p sub2api-deploy && cd sub2api-deploy
 
 # デプロイ準備スクリプトをダウンロードして実行
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/Heiheiaoo/HeiGate/main/deploy/docker-deploy.sh | bash
 
 # サービスを起動
 docker compose up -d
@@ -340,7 +341,7 @@ docker compose logs -f sub2api
 
 ```bash
 # 1. リポジトリをクローン
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api/deploy
 
 # 2. 環境設定ファイルをコピー
@@ -467,10 +468,10 @@ rm -rf data/ postgres_data/ redis_data/
 
 ### 方法3: Apple container（macOS）
 
-Apple シリコン搭載 Mac と macOS 26 では、Apple `container` 1.1.0 以降を使用して Sub2API、PostgreSQL、Redis の完全なスタックを実行できます:
+Apple シリコン搭載 Mac と macOS 26 では、Apple `container` 1.1.0 以降を使用して HeiGate、PostgreSQL、Redis の完全なスタックを実行できます:
 
 ```bash
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api/deploy
 ./apple-container.sh init
 ./apple-container.sh up
@@ -496,7 +497,7 @@ cd sub2api/deploy
 
 ```bash
 # 1. リポジトリをクローン
-git clone https://github.com/Wei-Shaw/sub2api.git
+git clone https://github.com/Heiheiaoo/HeiGate.git
 cd sub2api
 
 # 2. pnpm をインストール（未インストールの場合）
@@ -563,7 +564,7 @@ default:
 - `security.response_headers.enabled` - 設定可能なレスポンスヘッダーフィルタリングを有効化（無効時はデフォルトの許可リストを使用）
 - `security.csp` - Content-Security-Policy ヘッダーの制御
 - `billing.circuit_breaker` - 課金エラー時にフェイルクローズ
-- `security.trust_forwarded_ip_for_api_key_acl` - 従来の生転送ヘッダーによる上書きを制御（アップグレード互換性のため既定で有効）。無効にすると `server.trusted_proxies` を厳格に使用し、Sub2API に直接接続するプロキシの正確な CIDR のみを指定
+- `security.trust_forwarded_ip_for_api_key_acl` - 従来の生転送ヘッダーによる上書きを制御（アップグレード互換性のため既定で有効）。無効にすると `server.trusted_proxies` を厳格に使用し、HeiGate に直接接続するプロキシの正確な CIDR のみを指定
 - `security.forwarded_client_ip_headers` - サードパーティ CDN のクライアント IP ヘッダーを最大 16 個指定。従来モードが有効な場合のみ、設定順で組み込みヘッダーより先に評価
 - `turnstile.required` - リリースモードでの Turnstile 必須化
 
@@ -675,7 +676,7 @@ go generate ./cmd/server
 
 ## Antigravity サポート
 
-Sub2API は [Antigravity](https://antigravity.so/) アカウントをサポートしています。認証後、Claude および Gemini モデル用の専用エンドポイントが利用可能になります。
+HeiGate は [Antigravity](https://antigravity.so/) アカウントをサポートしています。認証後、Claude および Gemini モデル用の専用エンドポイントが利用可能になります。
 
 ### 専用エンドポイント
 
@@ -729,21 +730,21 @@ sub2api/
 
 ## スター履歴
 
-<a href="https://star-history.dera.page/#Wei-Shaw/sub2api&Date">
+<a href="https://star-history.dera.page/#Heiheiaoo/HeiGate&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
-   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Wei-Shaw/sub2api&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Heiheiaoo/HeiGate&type=Date" />
  </picture>
 </a>
 
 ---
 
-## ライセンス
+## ライセンスと帰属
 
 本プロジェクトは [GNU Lesser General Public License v3.0](LICENSE)（またはそれ以降のバージョン）の下でライセンスされています。
 
-Copyright (c) 2026 Wesley Liddick
+HeiGate には [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) を基にした作品が含まれます。元の著作権表示はそれぞれの権利者に帰属します。詳細は [NOTICE](NOTICE) を参照してください。
 
 ---
 

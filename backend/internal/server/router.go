@@ -3,14 +3,18 @@ package server
 import (
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/desktopapi"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/server/routes"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
 	"github.com/gin-gonic/gin"
@@ -91,8 +95,43 @@ func SetupRouter(
 
 	// 注册路由
 	registerRoutes(r, handlers, jwtAuth, optionalJWTAuth, adminAuth, apiKeyAuth, auditLog, stepUpAuth, apiKeyService, subscriptionService, opsService, settingService, compositeResolver, cfg, redisClient)
+	registerDesktopRoutes(r)
 
 	return r
+}
+
+// registerDesktopRoutes mounts the local-only desktop API when explicitly
+// enabled. Keeping this behind an environment flag prevents the normal SaaS
+// deployment from creating an unauthenticated channel-management surface.
+func registerDesktopRoutes(r *gin.Engine) {
+	if os.Getenv("DESKTOP_API_ENABLED") != "true" && os.Getenv("DESKTOP_API_ENABLED") != "1" {
+		return
+	}
+	dataDir := setup.GetDataDir()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		log.Printf("desktop API disabled: create data directory failed: %v", err)
+		return
+	}
+	store, err := service.OpenDesktopChannelStore(filepath.Join(dataDir, "desktop.sqlite"))
+	if err != nil {
+		log.Printf("desktop API disabled: open local channel store failed: %v", err)
+		return
+	}
+	runner := service.NewDesktopChannelProbeRunner(store)
+	if err := runner.Start(context.Background()); err != nil {
+		log.Printf("desktop API runner startup failed: %v", err)
+	}
+	api := desktopapi.NewHandler(store, runner)
+	gatewayKey, err := desktopapi.LoadOrCreateGatewayKey(filepath.Join(dataDir, "gateway.key"))
+	if err != nil {
+		log.Printf("desktop API disabled: create gateway key failed: %v", err)
+		return
+	}
+	api = desktopapi.NewHandlerWithGatewayKey(store, runner, gatewayKey)
+	group := r.Group("/desktop/api", desktopapi.LoopbackOnly())
+	api.RegisterRoutes(group)
+	gateway := r.Group("", desktopapi.LoopbackOnly(), desktopapi.GatewayAuth(gatewayKey))
+	api.RegisterGatewayRoutes(gateway)
 }
 
 // registerRoutes 注册所有 HTTP 路由

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">HeiGate Logo</title>
+  <desc id="desc">HeiGate - Smart Local AI Router Transparent Logo</desc>
+  <defs>
+    <!-- Isometric HG Gradient (Vibrant Cyan-Blue-Violet) -->
+    <linearGradient id="hg-pure-grad" x1="100" y1="90" x2="420" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="35%" stop-color="#4f46e5"/>
+      <stop offset="75%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+
+    <!-- Secondary Accent Gradient -->
+    <linearGradient id="hg-h-grad" x1="120" y1="120" x2="240" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+
+    <linearGradient id="hg-g-grad" x1="280" y1="100" x2="420" y2="390" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="60%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+
+    <!-- Soft Drop Shadow -->
+    <filter id="hg-alpha-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#4f46e5" flood-opacity=".35"/>
+    </filter>
+  </defs>
+
+  <!-- NO background rect! Completely transparent alpha channel -->
+
+  <!-- Master Isometric HG Vector Glyph with Alpha Transparency -->
+  <g filter="url(#hg-alpha-glow)" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Isometric Letter H -->
+    <path d="M136 140V362" stroke="url(#hg-h-grad)" stroke-width="44"/>
+    <path d="M232 88V310" stroke="url(#hg-h-grad)" stroke-width="44"/>
+    <path d="M136 250H232" stroke="url(#hg-h-grad)" stroke-width="44"/>
+
+    <!-- Isometric Letter G -->
+    <path d="M400 148L288 84V332L400 396V252H332" stroke="url(#hg-g-grad)" stroke-width="44"/>
+
+    <!-- Core Optical Joint Highlight Rings -->
+    <circle cx="232" cy="199" r="7" fill="#ffffff"/>
+    <circle cx="332" cy="252" r="7" fill="#ffffff"/>
+  </g>
+</svg>

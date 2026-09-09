@@ -13,7 +13,7 @@
 *.dylib
 backend/bin/
 backend/server
-backend/sub2api
+backend/heigate
 backend/main
 
 # Go 测试二进制
@@ -141,6 +141,7 @@ docs/*
 !docs/COMPOSITE_GROUPS.md
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
+!docs/OPEN_SOURCE.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
@@ -155,5 +156,5 @@ output/
 
 # Vitest / Vite cache at repo root
 .vite/
-# 本地闭源插件开发目录及构建产物不进入 Sub2API 仓库
+# 本地闭源插件开发目录及构建产物不进入 HeiGate 仓库
 /plugins/

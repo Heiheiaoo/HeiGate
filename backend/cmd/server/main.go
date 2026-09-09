@@ -11,15 +11,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/desktopapi"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
@@ -59,10 +62,11 @@ func main() {
 	// Parse command line flags
 	setupMode := flag.Bool("setup", false, "Run setup wizard in CLI mode")
 	showVersion := flag.Bool("version", false, "Show version information")
+	desktopMode := flag.Bool("desktop", false, "Run the standalone local desktop gateway")
 	flag.Parse()
 
 	if *showVersion {
-		log.Printf("Sub2API %s (commit: %s, built: %s)\n", Version, Commit, Date)
+		log.Printf("HeiGate %s (commit: %s, built: %s)\n", Version, Commit, Date)
 		return
 	}
 
@@ -71,6 +75,14 @@ func main() {
 		if err := setup.RunCLI(); err != nil {
 			log.Fatalf("Setup failed: %v", err)
 		}
+		return
+	}
+
+	if *desktopMode {
+		_ = os.Setenv("DESKTOP_ONLY", "true")
+	}
+	if *desktopMode || desktopOnlyEnabled() {
+		runDesktopServer()
 		return
 	}
 
@@ -94,6 +106,81 @@ func main() {
 	runMainServer()
 }
 
+func desktopOnlyEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("DESKTOP_ONLY")))
+	return value == "true" || value == "1" || value == "yes"
+}
+
+func runDesktopServer() {
+	dataDir := setup.GetDataDir()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		log.Fatalf("Failed to create desktop data directory: %v", err)
+	}
+	store, err := service.OpenDesktopChannelStore(strings.TrimRight(dataDir, "/") + "/desktop.sqlite")
+	if err != nil {
+		log.Fatalf("Failed to open desktop channel store: %v", err)
+	}
+	defer store.Close()
+
+	// Perform initial automatic log pruning on startup
+	if del, err := store.AutoPruneLogs(context.Background()); err == nil && del > 0 {
+		log.Printf("Cleaned %d expired/overflow desktop request logs on startup", del)
+	}
+
+	// Periodically prune logs in background every 15 minutes
+	pruneCtx, pruneCancel := context.WithCancel(context.Background())
+	defer pruneCancel()
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pruneCtx.Done():
+				return
+			case <-ticker.C:
+				_, _ = store.AutoPruneLogs(pruneCtx)
+			}
+		}
+	}()
+
+	runner := service.NewDesktopChannelProbeRunner(store)
+	if err := runner.Start(context.Background()); err != nil {
+		log.Printf("Desktop probe runner started in degraded state: %v", err)
+	}
+	defer runner.Stop()
+	gatewayKey, err := desktopapi.LoadOrCreateGatewayKey(filepath.Join(dataDir, "gateway.key"))
+	if err != nil {
+		log.Fatalf("Failed to initialize desktop gateway key: %v", err)
+	}
+
+	r := gin.New()
+	r.Use(middleware.Recovery())
+	r.Use(middleware.CORS(config.CORSConfig{}))
+	r.Use(middleware.SecurityHeaders(config.CSPConfig{Enabled: true, Policy: config.DefaultCSPPolicy}, nil))
+	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok", "mode": "desktop"}) })
+	api := desktopapi.NewHandlerWithGatewayKey(store, runner, gatewayKey)
+	api.RegisterRoutes(r.Group("/desktop/api", desktopapi.LoopbackOnly()))
+	api.RegisterGatewayRoutes(r.Group("", desktopapi.LoopbackOnly(), desktopapi.GatewayAuth(gatewayKey)))
+	r.GET("/", func(c *gin.Context) { c.Redirect(http.StatusFound, "/desktop") })
+	if web.HasEmbeddedFrontend() {
+		r.Use(web.ServeEmbeddedFrontend())
+	}
+
+	host := strings.TrimSpace(os.Getenv("DESKTOP_SERVER_HOST"))
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := strings.TrimSpace(os.Getenv("DESKTOP_SERVER_PORT"))
+	if port == "" {
+		port = "8080"
+	}
+	addr := host + ":" + port
+	log.Printf("Desktop-only server started on http://%s/desktop", addr)
+	if err := http.ListenAndServe(addr, r); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("Failed to start desktop server: %v", err)
+	}
+}
+
 func runSetupServer() {
 	r := gin.New()
 	r.Use(middleware.Recovery())
@@ -112,7 +199,7 @@ func runSetupServer() {
 	// This allows users to run setup on a different address if needed
 	addr := config.GetServerAddress()
 	log.Printf("Setup wizard available at http://%s", addr)
-	log.Println("Complete the setup wizard to configure Sub2API")
+	log.Println("Complete the setup wizard to configure HeiGate")
 
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)

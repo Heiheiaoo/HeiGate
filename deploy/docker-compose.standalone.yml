@@ -1,7 +1,7 @@
 # =============================================================================
-# Sub2API Docker Compose - Standalone Configuration
+# HeiGate Docker Compose - Standalone Configuration
 # =============================================================================
-# This configuration runs only the Sub2API application.
+# This configuration runs only the HeiGate application.
 # PostgreSQL and Redis must be provided externally.
 #
 # Usage:
@@ -12,7 +12,10 @@
 
 services:
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ${HEIGATE_IMAGE:-heigate:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: sub2api
     restart: unless-stopped
     security_opt:
@@ -41,6 +44,8 @@ services:
       - SERVER_MODE=${SERVER_MODE:-release}
       - ENABLE_SERVER_TIMING=${ENABLE_SERVER_TIMING:-false}
       - RUN_MODE=${RUN_MODE:-standard}
+      - DESKTOP_API_ENABLED=${DESKTOP_API_ENABLED:-false}
+      - DESKTOP_ONLY=${DESKTOP_ONLY:-false}
       - UPDATE_GITHUB_TOKEN=${UPDATE_GITHUB_TOKEN:-}
 
       # =======================================================================
@@ -109,7 +114,7 @@ services:
       # Gateway Upstream, Scheduling & Image Configuration
       # =======================================================================
       # Gateway values come from Compose .env or the shell.
-      # Fallbacks mirror Sub2API backend defaults so omitted values preserve behavior.
+      # Fallbacks mirror HeiGate backend defaults so omitted values preserve behavior.
       - GATEWAY_FORCE_CODEX_CLI=${GATEWAY_FORCE_CODEX_CLI:-false}
       - GATEWAY_OPENAI_COMPACT_MODEL=${GATEWAY_OPENAI_COMPACT_MODEL:-gpt-5.4}
       - GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT=${GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT:-0}

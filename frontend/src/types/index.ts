@@ -1,5 +1,5 @@
 /**
- * Core Type Definitions for Sub2API Frontend
+ * Core Type Definitions for HeiGate Frontend
  */
 
 // ==================== Common Types ====================
