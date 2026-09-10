@@ -173,6 +173,21 @@ export async function duplicateDesktopChannel(id: number): Promise<DesktopApiCha
   }
 }
 
+export type DesktopTraceStep = {
+  index: number
+  channel_name: string
+  channel_id: number
+  endpoint: string
+  model: string
+  attempt: number
+  status_code: number
+  latency_ms: number
+  ttft_ms?: number
+  error?: string
+  raw_error?: string
+  succeeded: boolean
+}
+
 export type DesktopRequestLog = {
   id: number
   created_at: string
@@ -189,6 +204,13 @@ export type DesktopRequestLog = {
   is_failover: boolean
   failover_from: string
   error_message: string
+  upstream_model?: string
+  endpoint?: string
+  client_ip?: string
+  user_agent?: string
+  request_path?: string
+  finish_reason?: string
+  trace_json?: string
 }
 
 export async function listDesktopLogs(limit = 100): Promise<DesktopRequestLog[] | null> {
@@ -293,7 +315,7 @@ export type DesktopSystemInfo = {
   log_retention_days: number
   log_max_count: number
   logs_count: number
-  routing_strategy: 'priority' | 'round_robin' | 'latency'
+  routing_strategy: 'smart_quality' | 'priority' | 'round_robin' | 'latency'
 }
 
 export async function getDesktopSystemInfo(): Promise<DesktopSystemInfo | null> {
@@ -310,7 +332,7 @@ export async function getDesktopSystemInfo(): Promise<DesktopSystemInfo | null> 
 export async function updateDesktopSettings(settings: {
   log_retention_days?: number
   log_max_count?: number
-  routing_strategy?: 'priority' | 'round_robin' | 'latency'
+  routing_strategy?: 'smart_quality' | 'priority' | 'round_robin' | 'latency'
 }): Promise<boolean> {
   try {
     const response = await request('/settings', {

@@ -10,10 +10,11 @@ with every upstream release is not guaranteed.
 
 ## Licensing
 
-The repository is distributed under LGPL-3.0-or-later. Contributions are
+The repository is distributed under LGPL-3.0-or-later (see `LICENSE` for LGPL-3.0
+terms and `LICENSE.GPL` for underlying GPL-3.0 terms). Contributions are
 accepted under the same terms and require a Developer Certificate of Origin
 sign-off. Contributors must preserve applicable copyright and attribution
-notices.
+notices (see `NOTICE`).
 
 ## Branches And Releases
 

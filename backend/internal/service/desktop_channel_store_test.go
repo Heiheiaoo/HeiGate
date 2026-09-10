@@ -82,6 +82,13 @@ func TestDesktopChannelStoreLogs(t *testing.T) {
 		CompletionTokens: 50,
 		TotalTokens:      1074,
 		IsStream:         true,
+		UpstreamModel:    "glm-5.3-flash-free",
+		Endpoint:         "https://api.b.ai",
+		ClientIP:         "127.0.0.1",
+		UserAgent:        "Cline/3.0",
+		RequestPath:      "/v1/chat/completions",
+		FinishReason:     "stop",
+		TraceJSON:        `[{"step":1}]`,
 	}
 	if err := store.RecordLog(context.Background(), reqLog); err != nil {
 		t.Fatalf("failed to record log: %v", err)
@@ -94,7 +101,7 @@ func TestDesktopChannelStoreLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list logs: %v", err)
 	}
-	if len(logs) != 1 || logs[0].Model != "glm-5.3-flash" || logs[0].LatencyMs != 350 || logs[0].TtftMs != 220 || logs[0].PromptTokens != 1024 || logs[0].CompletionTokens != 50 || !logs[0].IsStream {
+	if len(logs) != 1 || logs[0].Model != "glm-5.3-flash" || logs[0].LatencyMs != 350 || logs[0].TtftMs != 220 || logs[0].PromptTokens != 1024 || logs[0].CompletionTokens != 50 || !logs[0].IsStream || logs[0].UpstreamModel != "glm-5.3-flash-free" || logs[0].Endpoint != "https://api.b.ai" || logs[0].ClientIP != "127.0.0.1" || logs[0].UserAgent != "Cline/3.0" || logs[0].RequestPath != "/v1/chat/completions" || logs[0].FinishReason != "stop" || logs[0].TraceJSON != `[{"step":1}]` {
 		t.Fatalf("unexpected logs: %#v", logs)
 	}
 

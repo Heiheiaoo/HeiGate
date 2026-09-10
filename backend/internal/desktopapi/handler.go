@@ -656,7 +656,10 @@ func (h *Handler) updateSettings(c *gin.Context) {
 	}
 	if input.RoutingStrategy != nil {
 		strategy := strings.TrimSpace(*input.RoutingStrategy)
-		if strategy != service.DesktopRoutePriority && strategy != service.DesktopRouteRoundRobin && strategy != service.DesktopRouteLatency {
+		if strategy == service.DesktopRoutePriority {
+			strategy = service.DesktopRouteSmartQuality
+		}
+		if strategy != service.DesktopRouteSmartQuality && strategy != service.DesktopRouteRoundRobin && strategy != service.DesktopRouteLatency {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid routing strategy"})
 			return
 		}
@@ -670,14 +673,20 @@ func (h *Handler) updateSettings(c *gin.Context) {
 
 func (h *Handler) routeStrategy(c *gin.Context) string {
 	if strategy := strings.TrimSpace(c.Query("strategy")); strategy != "" {
+		if strategy == service.DesktopRoutePriority {
+			return service.DesktopRouteSmartQuality
+		}
 		return strategy
 	}
-	value, err := h.store.GetSetting(c.Request.Context(), "routing_strategy", service.DesktopRoutePriority)
+	value, err := h.store.GetSetting(c.Request.Context(), "routing_strategy", service.DesktopRouteLatency)
 	if err != nil {
-		return service.DesktopRoutePriority
+		return service.DesktopRouteLatency
 	}
-	if value != service.DesktopRoutePriority && value != service.DesktopRouteRoundRobin && value != service.DesktopRouteLatency {
-		return service.DesktopRoutePriority
+	if value == service.DesktopRoutePriority {
+		return service.DesktopRouteSmartQuality
+	}
+	if value != service.DesktopRouteLatency && value != service.DesktopRouteSmartQuality && value != service.DesktopRouteRoundRobin {
+		return service.DesktopRouteLatency
 	}
 	return value
 }

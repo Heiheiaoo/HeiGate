@@ -36,6 +36,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
     private let windowFrameKey = "HeiGateMainWindowFrame"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let iconImage = NSImage(contentsOf: iconURL) {
+            NSApp.applicationIconImage = iconImage
+        }
+
         port = findAvailablePort()
         setupMainMenu()
         setupStatusItem()
@@ -265,9 +270,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         NSApp.mainMenu = mainMenu
     }
 
+    private func createStatusItemImage() -> NSImage {
+        let icon = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            // Outer Squircle Border (白色边框，系统模板自适应)
+            let inset: CGFloat = 1.0
+            let bRect = CGRect(x: inset, y: inset, width: rect.width - inset * 2, height: rect.height - inset * 2)
+            let bPath = NSBezierPath(roundedRect: NSRect(origin: bRect.origin, size: bRect.size), xRadius: 4.2, yRadius: 4.2)
+            bPath.lineWidth = 1.3
+            NSColor.black.setStroke()
+            bPath.stroke()
+
+            // Letter H
+            let hLeftX: CGFloat = 4.8
+            let hRightX: CGFloat = 7.6
+            let hTopY: CGFloat = 13.0
+            let hBotY: CGFloat = 5.2
+            let hMidY: CGFloat = 8.8
+
+            let hPath = NSBezierPath()
+            hPath.move(to: NSPoint(x: hLeftX, y: hBotY))
+            hPath.line(to: NSPoint(x: hLeftX, y: hTopY - 0.8))
+            hPath.move(to: NSPoint(x: hRightX, y: hBotY + 1.2))
+            hPath.line(to: NSPoint(x: hRightX, y: hTopY))
+            hPath.move(to: NSPoint(x: hLeftX, y: hMidY))
+            hPath.line(to: NSPoint(x: hRightX, y: hMidY))
+            hPath.lineWidth = 1.3
+            hPath.lineCapStyle = .round
+            hPath.stroke()
+
+            // Letter G
+            let gPath = NSBezierPath()
+            gPath.move(to: NSPoint(x: 13.2, y: 11.8))
+            gPath.line(to: NSPoint(x: 9.8, y: 13.4))
+            gPath.line(to: NSPoint(x: 9.8, y: 5.6))
+            gPath.line(to: NSPoint(x: 13.2, y: 3.8))
+            gPath.line(to: NSPoint(x: 13.2, y: 8.8))
+            gPath.line(to: NSPoint(x: 11.2, y: 8.8))
+            gPath.lineWidth = 1.3
+            gPath.lineCapStyle = .round
+            gPath.lineJoinStyle = .round
+            gPath.stroke()
+
+            return true
+        }
+        icon.isTemplate = true
+        return icon
+    }
+
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "HeiGate"
+        if let button = item.button {
+            button.image = createStatusItemImage()
+            button.imagePosition = .imageOnly
+            button.toolTip = "HeiGate 本地网关"
+        }
         let menu = NSMenu()
         menu.addItem(withTitle: "显示窗口", action: #selector(showWindow(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "重启本地网关", action: #selector(restartServer(_:)), keyEquivalent: "")

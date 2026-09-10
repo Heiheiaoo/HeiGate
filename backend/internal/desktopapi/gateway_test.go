@@ -3,6 +3,7 @@ package desktopapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -188,6 +189,41 @@ func TestStreamTokenTrackerAnthropicUsage(t *testing.T) {
 	require.True(t, tracker.hasExactTokens)
 	require.Equal(t, 50, tracker.promptTokens)
 	require.Equal(t, 28, tracker.completionTokens)
+}
+
+func TestStreamTokenTrackerSawDone(t *testing.T) {
+	// Case 1: OpenAI data: [DONE]
+	tracker1 := &streamTokenTracker{}
+	tracker1.Feed([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	require.True(t, tracker1.sawDone)
+	require.Equal(t, "stop", tracker1.finishReason)
+
+	// Case 2: Anthropic message_stop
+	tracker2 := &streamTokenTracker{}
+	tracker2.Feed([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	require.True(t, tracker2.sawDone)
+	require.Equal(t, "stop", tracker2.finishReason)
+}
+
+func TestParseUpstreamErrorMessage(t *testing.T) {
+	// OpenAI error json
+	err1 := parseUpstreamErrorMessage(`{"error":{"message":"Rate limit exceeded: 30 requests per minute"}}`)
+	require.Equal(t, "Rate limit exceeded: 30 requests per minute", err1)
+
+	// Generic error json
+	err2 := parseUpstreamErrorMessage(`{"message":"Unauthorized token"}`)
+	require.Equal(t, "Unauthorized token", err2)
+
+	// Plain text
+	err3 := parseUpstreamErrorMessage(`Service Unavailable`)
+	require.Equal(t, "Service Unavailable", err3)
+}
+
+func TestIsClientClosedConn(t *testing.T) {
+	require.True(t, isClientClosedConn(context.Canceled))
+	require.True(t, isClientClosedConn(errors.New("write: broken pipe")))
+	require.True(t, isClientClosedConn(errors.New("read: connection reset by peer")))
+	require.False(t, isClientClosedConn(errors.New("dial tcp: i/o timeout")))
 }
 
 func TestEstimatePromptTokens(t *testing.T) {

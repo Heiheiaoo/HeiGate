@@ -7,135 +7,132 @@
 [![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
 
-**Local-first macOS desktop AI API gateway with multi-provider routing, failover, usage management, and client integration.**
+**本地优先的 macOS 桌面 AI API 网关，提供多渠道路由、故障转移、用量管理和客户端集成。**
 
-English | [中文](README_CN.md) | [日本語](README_JA.md)
+中文 | [English](README_EN.md)
 
 </div>
 
-HeiGate is a local-first desktop AI API gateway for macOS. It stores data in a local SQLite database and includes channel health checks, model routing, request analytics, and Claude/Codex client configuration.
+HeiGate 是面向 macOS 的本地桌面 AI API 网关。数据保存在本地 SQLite 数据库中，提供渠道探活、模型路由、请求分析和 Claude/Codex 客户端配置。
 
 > [!IMPORTANT]
-> HeiGate is a derivative of [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api). It is not the official sub2api repository and is maintained independently. See [NOTICE](NOTICE) for attribution and licensing details.
+> HeiGate 基于 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 修改而来，不是 sub2api 官方仓库，由独立维护者维护。版权和许可说明见 [NOTICE](NOTICE)。
 
-## Quick Start
+## 快速开始
 
-### macOS desktop application
+### 安装已打包应用（推荐）
 
-```bash
-make build-desktop-macos
-open dist/desktop/HeiGate.app
-```
-
-### Install the packaged application
+从 GitHub Releases 页面下载最新的安装包：
 
 ```bash
 open HeiGate-macOS-arm64-*.dmg
 ```
 
-The GitHub Release page contains `.dmg`, `.zip`, and checksum files. The macOS package is currently built for Apple silicon.
+GitHub Release 页面提供 `.dmg`、`.zip` 和校验文件。当前安装包面向 Apple 芯片 Mac 构建。
 
-### Build from source
+### 从源码构建
 
 ```bash
 make build-desktop-macos
 open dist/desktop/HeiGate.app
 ```
 
-## Community
+## 开源社区
 
-- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-- Use the issue templates for reproducible bug reports and focused feature proposals.
-- Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
-- Community conduct is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
-- Release and compatibility expectations are documented in [docs/OPEN_SOURCE.md](docs/OPEN_SOURCE.md).
-
-## ⚠️ Important Notice
-
-Please read the following carefully before using this project:
-
-- **🚨 Terms of Service Risk**: Using this project may violate the terms of service of Anthropic and other upstream providers. Please review the relevant providers' user agreements before use; all risks arising from such use are borne solely by the user.
-- **⚖️ Compliant Use**: Use this project only in compliance with the laws and regulations of your country or region. Any unlawful use is strictly prohibited.
-- **📖 Disclaimer**: This project is provided for technical learning and research purposes only. The authors assume no liability for account bans, service interruptions, data loss, or any other direct or indirect damages resulting from the use of this project.
-- **🏷️ No Trademark Or Service Endorsement**: The LGPL license permits use under its terms, including commercial use. It does not grant rights to project names, logos, upstream accounts, hosted services, or provider relationships, and it does not imply endorsement by the maintainers.
-- **🤝 Independent Maintenance**: Unless explicitly stated otherwise, features, configuration examples, and links in this documentation describe HeiGate only and do not imply sponsorship, partnership, agency, or endorsement by any third party.
+- 提交 Pull Request 前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 报告问题或提议功能时，请使用 GitHub Issue 模板。
+- 安全漏洞请按 [SECURITY.md](SECURITY.md) 私下报告。
+- 社区行为遵循 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+- 发布与兼容性约定见 [docs/OPEN_SOURCE.md](docs/OPEN_SOURCE.md)。
 
 
-## Overview
+## ⚠️ 重要提醒
 
-HeiGate is a macOS desktop AI API gateway for managing local upstream channels and routing requests from coding clients. It keeps gateway credentials and request data on the local machine.
+使用本项目前，请务必仔细阅读以下内容：
 
-## Features
-
-- **Multi-Account Management** - Support multiple upstream account types (OAuth, API Key)
-- **Local API Keys** - Generate and manage local API keys for coding clients
-- **Usage Analytics** - Token-level usage tracking and request analysis
-- **Smart Scheduling** - Intelligent account selection with sticky sessions
-- **Concurrency Control** - Per-user and per-account concurrency limits
-- **Rate Limiting** - Configurable request and token rate limits
-- **Admin Dashboard** - Web interface for monitoring and management
-- **Desktop Packaging** - Automated GitHub Releases build `.dmg` and `.zip` packages for Apple silicon
+- **🚨 服务条款风险**：使用本项目可能违反 Anthropic 等上游服务商的服务条款。请在使用前仔细阅读相关服务商的用户协议，由此产生的一切风险由用户自行承担。
+- **⚖️ 合规使用**：请在符合您所在国家或地区法律法规的前提下使用本项目，严禁将其用于任何违法违规用途。
+- **📖 免责声明**：本项目仅供技术学习与研究使用，作者不对因使用本项目导致的账户封禁、服务中断、数据丢失或其他任何直接或间接损失承担责任。
+- **🏷️ 不授予商标或服务背书**：LGPL 许可证允许在其条款下使用本项目，包括商业使用；但不授予项目名称、Logo、上游账号、托管服务或服务商关系的任何权利，也不代表维护者背书。
+- **🤝 独立维护说明**：除明确标注外，本文档中的功能、配置和链接仅用于说明 HeiGate，不代表与任何第三方存在赞助、合作、代理或推荐关系。
 
 
-## Tech Stack
+## 项目概述
 
-| Component | Technology |
-|-----------|------------|
-| Backend | Go 1.27.0, Gin, Ent |
-| Frontend | Vue 3.4+, Vite 5+, TailwindCSS |
-| Database | SQLite (local desktop data) |
-| Desktop shell | macOS Cocoa + WebKit |
+HeiGate 是一个 macOS 桌面 AI API 网关，用于管理本地上游渠道并为编程客户端路由请求。网关凭据和请求数据默认保存在本机。
+
+## 核心功能
+
+- **多账号管理** - 支持多种上游账号类型（OAuth、API Key）
+- **本地 API Key** - 为编程客户端生成和管理本地 API Key
+- **请求分析** - Token 级别用量追踪和请求分析
+- **智能调度** - 智能账号选择，支持粘性会话
+- **并发控制** - 用户级和账号级并发限制
+- **速率限制** - 可配置的请求和 Token 速率限制
+- **管理后台** - Web 界面进行监控和管理
+- **桌面打包** - GitHub Actions 自动构建 Apple 芯片 `.dmg` 和 `.zip` 安装包
 
 
-## Antigravity Support
+## 技术栈
 
-HeiGate supports [Antigravity](https://antigravity.so/) accounts. After authorization, dedicated endpoints are available for Claude and Gemini models.
+| 组件 | 技术 |
+|------|------|
+| 后端 | Go 1.27.0, Gin, Ent |
+| 前端 | Vue 3.4+, Vite 5+, TailwindCSS |
+| 数据库 | SQLite（本地桌面数据） |
+| 桌面外壳 | macOS Cocoa + WebKit |
 
-### Dedicated Endpoints
+---
 
-| Endpoint | Model |
-|----------|-------|
-| `/antigravity/v1/messages` | Claude models |
-| `/antigravity/v1beta/` | Gemini models |
+## Antigravity 使用说明
 
-### Claude Code Configuration
+HeiGate 支持 [Antigravity](https://antigravity.so/) 账户，授权后可通过专用端点访问 Claude 和 Gemini 模型。
+
+### 专用端点
+
+| 端点 | 模型 |
+|------|------|
+| `/antigravity/v1/messages` | Claude 模型 |
+| `/antigravity/v1beta/` | Gemini 模型 |
+
+### Claude Code 配置示例
 
 ```bash
 export ANTHROPIC_BASE_URL="http://localhost:8080/antigravity"
 export ANTHROPIC_AUTH_TOKEN="sk-xxx"
 ```
 
-### Hybrid Scheduling Mode
+### 混合调度模式
 
-Antigravity accounts support optional **hybrid scheduling**. When enabled, the general endpoints `/v1/messages` and `/v1beta/` will also route requests to Antigravity accounts.
+Antigravity 账户支持可选的**混合调度**功能。开启后，通用端点 `/v1/messages` 和 `/v1beta/` 也会调度该账户。
 
-> **⚠️ Warning**: Anthropic Claude and Antigravity Claude **cannot be mixed within the same conversation context**. Use groups to isolate them properly.
+> **⚠️ 注意**：Anthropic Claude 和 Antigravity Claude **不能在同一上下文中混合使用**，请通过分组功能做好隔离。
 
 ---
 
-## Project Structure
+## 项目结构
 
 ```
 HeiGate/
-├── backend/                  # Go backend service
-│   ├── cmd/server/           # Application entry
-│   ├── internal/             # Internal modules
-│   │   ├── config/           # Configuration
-│   │   ├── model/            # Data models
-│   │   ├── service/          # Business logic
-│   │   ├── handler/          # HTTP handlers
-│   │   └── gateway/          # API gateway core
-│   └── resources/            # Static resources
+├── backend/                  # Go 后端服务
+│   ├── cmd/server/           # 应用入口
+│   ├── internal/             # 内部模块
+│   │   ├── config/           # 配置管理
+│   │   ├── model/            # 数据模型
+│   │   ├── service/          # 业务逻辑
+│   │   ├── handler/          # HTTP 处理器
+│   │   └── gateway/          # API 网关核心
+│   └── resources/            # 静态资源
 │
-├── frontend/                 # Vue 3 frontend
+├── frontend/                 # Vue 3 前端
 │   └── src/
-│       ├── api/              # API calls
-│       ├── stores/           # State management
-│       ├── views/            # Page components
-│       └── components/       # Reusable components
+│       ├── api/              # API 调用
+│       ├── stores/           # 状态管理
+│       ├── views/            # 页面组件
+│       └── components/       # 通用组件
 │
-├── desktop/macos/            # Native macOS application shell
-└── .github/workflows/        # Automated desktop release workflow
+├── desktop/macos/            # 原生 macOS 应用外壳
+└── .github/workflows/        # 自动桌面应用发布流程
 ```
 
 ## Star History
@@ -150,16 +147,16 @@ HeiGate/
 
 ---
 
-## License And Attribution
+## 许可证与归属
 
-This project is licensed under the [GNU Lesser General Public License v3.0](LICENSE) (or later).
+本项目基于 [GNU 宽通用公共许可证 v3.0](LICENSE)（或更高版本）授权。
 
-HeiGate contains work derived from [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api). Original copyright notices remain with their respective owners. See [NOTICE](NOTICE).
+HeiGate 包含基于 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 修改的作品。原始版权归各自权利人所有，详见 [NOTICE](NOTICE)。
 
 ---
 
 <div align="center">
 
-**If you find this project useful, please give it a star!**
+**如果觉得有用，请给个 Star 支持一下！**
 
 </div>

@@ -29,6 +29,7 @@ import {
   deleteCustomModelMapping,
   type DesktopApiChannel,
   type DesktopRequestLog,
+  type DesktopTraceStep,
   type DesktopSystemInfo,
   type DesktopClientStatus,
   type DesktopAnalyticsResult,
@@ -57,12 +58,12 @@ export type Channel = {
   lastError?: string
 }
 
-export type GlobalRouteStrategy = 'priority' | 'round_robin' | 'latency'
+export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin' | 'priority'
 
 const isDesktop = ref(typeof window !== 'undefined' && Boolean((window as any).webkit?.messageHandlers?.dragWindow))
 const savedSection = typeof localStorage !== 'undefined' ? (localStorage.getItem('heigate_active_section') as any) : null
 const activeSection = ref<'overview' | 'analytics' | 'channels' | 'models' | 'logs' | 'settings'>(
-  savedSection && ['overview', 'analytics', 'channels', 'models', 'logs', 'settings'].includes(savedSection) ? savedSection : 'channels'
+  savedSection && ['overview', 'analytics', 'channels', 'models', 'logs', 'settings'].includes(savedSection) ? savedSection : 'logs'
 )
 watch(activeSection, async (val) => {
   if (typeof localStorage !== 'undefined') {
@@ -93,7 +94,7 @@ const showApiKey = ref(false)
 const channelSearch = ref('')
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const protocolFilter = ref<'all' | 'anthropic' | 'openai-compatible' | 'openai-responses'>('all')
-const routingStrategy = ref<'priority' | 'round_robin' | 'latency'>('priority')
+const routingStrategy = ref<GlobalRouteStrategy>('latency')
 
 // Confirm Modal state for robust in-app confirmation (avoids WKWebView confirm suppression)
 const confirmModal = ref<{
@@ -192,28 +193,13 @@ const maxDailyTokens = computed(() => {
 })
 
 // Channel View Mode (Cards Grid vs Table List)
-const channelViewMode = ref<'grid' | 'list'>(
-  (typeof localStorage !== 'undefined' && (localStorage.getItem('heigate_channel_view_mode') as 'grid' | 'list')) || 'grid'
-)
+const channelViewMode = ref<'grid' | 'list'>('list')
 function setChannelViewMode(mode: 'grid' | 'list') {
   channelViewMode.value = mode
   try {
     localStorage.setItem('heigate_channel_view_mode', mode)
   } catch (err) {
     console.debug('Failed to persist view mode', err)
-  }
-}
-
-// Channel Sort Mode (Quality Latency First vs Manual Priority)
-const channelSortBy = ref<'quality' | 'priority'>(
-  (typeof localStorage !== 'undefined' && (localStorage.getItem('heigate_channel_sort_by') as 'quality' | 'priority')) || 'quality'
-)
-function setChannelSortBy(mode: 'quality' | 'priority') {
-  channelSortBy.value = mode
-  try {
-    localStorage.setItem('heigate_channel_sort_by', mode)
-  } catch (err) {
-    console.debug('Failed to persist sort mode', err)
   }
 }
 
@@ -716,20 +702,17 @@ async function handleLaunchCodex() {
 
 const sortedChannels = computed(() => {
   const list = [...filteredChannels.value]
-  if (channelSortBy.value === 'quality') {
-    return list.sort((a, b) => {
-      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
-      const statusWeight = (s: Channel['status']) => (s === 'healthy' ? 0 : s === 'degraded' ? 1 : 2)
-      const swA = statusWeight(a.status)
-      const swB = statusWeight(b.status)
-      if (swA !== swB) return swA - swB
-      const latA = a.latency != null && a.latency > 0 ? a.latency : 999999
-      const latB = b.latency != null && b.latency > 0 ? b.latency : 999999
-      if (latA !== latB) return latA - latB
-      return a.priority - b.priority
-    })
-  }
-  return list.sort((a, b) => a.priority - b.priority)
+  return list.sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
+    const statusWeight = (s: Channel['status']) => (s === 'healthy' ? 0 : s === 'degraded' ? 1 : 2)
+    const swA = statusWeight(a.status)
+    const swB = statusWeight(b.status)
+    if (swA !== swB) return swA - swB
+    const latA = a.latency != null && a.latency > 0 ? a.latency : 999999
+    const latB = b.latency != null && b.latency > 0 ? b.latency : 999999
+    if (latA !== latB) return latA - latB
+    return (a.name || '').localeCompare(b.name || '')
+  })
 })
 
 const enabledChannels = computed(() => channels.value.filter((channel) => channel.enabled))
@@ -1511,33 +1494,6 @@ async function saveEditChannel() {
   showEditChannel.value = false
   editingChannel.value = null
   showToast(`渠道“${name}”配置已保存`)
-}
-
-async function moveChannel(channel: Channel, direction: 'up' | 'down') {
-  const index = channels.value.indexOf(channel)
-  if (index < 0) return
-  if (direction === 'up' && index > 0) {
-    const prev = channels.value[index - 1]
-    channels.value.splice(index - 1, 2, channel, prev)
-  } else if (direction === 'down' && index < channels.value.length - 1) {
-    const next = channels.value[index + 1]
-    channels.value.splice(index, 2, next, channel)
-  } else {
-    return
-  }
-  channels.value.forEach((item, idx) => {
-    item.priority = idx + 1
-  })
-  if (desktopApiActive.value) {
-    await Promise.all(channels.value.map((item) => persistChannel(item)))
-  } else {
-    await saveChannels()
-  }
-  if (channelSortBy.value !== 'priority') {
-    showToast(`已${direction === 'up' ? '提升' : '降低'}“${channel.name}”优先级为 P${channel.priority} (切换至「手动优先」可查看优先级绝对顺序)`)
-  } else {
-    showToast(`已${direction === 'up' ? '提升' : '降低'}渠道“${channel.name}”的优先级 (P${channel.priority})`)
-  }
 }
 
 async function handleConfirmModalAction() {
@@ -2679,6 +2635,136 @@ function copyLogJson(log: DesktopRequestLog) {
   })
 }
 
+function copyErrorMessage(msg: string) {
+  navigator.clipboard.writeText(msg).then(() => {
+    showToast('已复制报错信息到剪贴板')
+  })
+}
+
+function parseTraceSteps(log: DesktopRequestLog): DesktopTraceStep[] {
+  if (log.trace_json) {
+    try {
+      const parsed = JSON.parse(log.trace_json)
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed
+      }
+    } catch {
+      // Fall back to the synthesized trace below for malformed historical data.
+    }
+  }
+  // Synthetic fallback for historical records or direct requests without trace_json
+  if (log.is_failover && log.failover_from) {
+    return [
+      {
+        index: 1,
+        channel_name: log.failover_from,
+        channel_id: 0,
+        endpoint: '',
+        model: log.model,
+        attempt: 1,
+        status_code: 502,
+        latency_ms: 0,
+        error: '前序供应商请求失败/超时/熔断，触发故障轮转',
+        succeeded: false,
+      },
+      {
+        index: 2,
+        channel_name: log.channel_name,
+        channel_id: log.channel_id,
+        endpoint: log.endpoint || '',
+        model: log.upstream_model || log.model,
+        attempt: 1,
+        status_code: log.status_code,
+        latency_ms: log.latency_ms,
+        ttft_ms: log.ttft_ms,
+        error: log.error_message,
+        succeeded: log.status_code >= 200 && log.status_code < 300,
+      }
+    ]
+  }
+  return [
+    {
+      index: 1,
+      channel_name: log.channel_name || '默认渠道',
+      channel_id: log.channel_id,
+      endpoint: log.endpoint || '',
+      model: log.upstream_model || log.model,
+      attempt: 1,
+      status_code: log.status_code,
+      latency_ms: log.latency_ms,
+      ttft_ms: log.ttft_ms,
+      error: log.error_message,
+      succeeded: log.status_code >= 200 && log.status_code < 300,
+    }
+  ]
+}
+
+function getLogDiagnostic(log: DesktopRequestLog): {
+  badge: 'success' | 'amber' | 'danger' | 'info'
+  codeText: string
+  title: string
+  message: string
+} {
+  if (log.status_code === 0) {
+    return {
+      badge: 'info',
+      codeText: '流式生成中',
+      title: 'SSE 长连接实时推流中',
+      message: '客户端已与本地网关建立连接，上游正在持续推流 Token 中。',
+    }
+  }
+  if (log.is_failover && log.status_code >= 200 && log.status_code < 300) {
+    return {
+      badge: 'amber',
+      codeText: '故障轮转 200',
+      title: '前序渠道熔断/故障，已平滑故障轮转成功',
+      message: `请求在前置渠道【${log.failover_from || '前序渠道'}】未能成功响应，HeiGate 自动毫秒级故障轮转至渠道【${log.channel_name}】并成功完成请求。客户端无感。`,
+    }
+  }
+  if (log.finish_reason === 'client_abort' || (log.status_code >= 200 && log.status_code < 300 && log.error_message?.includes('客户端'))) {
+    return {
+      badge: 'success',
+      codeText: '200 OK (完成)',
+      title: '流式生成完成 (客户端主动断开)',
+      message: `上游模型已成功生成 ${log.completion_tokens ?? 0} 个 Token。客户端（如 Cursor / Cline）在接收到所需内容或 [DONE] 后正常断开连接，全链路记录为 200 成功。`,
+    }
+  }
+  if (log.status_code >= 200 && log.status_code < 300) {
+    return {
+      badge: 'success',
+      codeText: `${log.status_code} OK`,
+      title: '请求执行成功',
+      message: `上游渠道【${log.channel_name}】响应正常，全链路耗时 ${log.latency_ms}ms，首字耗时 ${log.ttft_ms || log.latency_ms}ms。`,
+    }
+  }
+  if (log.status_code === 429) {
+    return {
+      badge: 'danger',
+      codeText: '429 限流',
+      title: '上游触发速率或配额限制',
+      message: log.error_message
+        ? `上游回包异常：${log.error_message}`
+        : `渠道【${log.channel_name}】触发并发或请求频率限制。建议添加备选渠道以启用自动轮转。`,
+    }
+  }
+  return {
+    badge: 'danger',
+    codeText: `${log.status_code} 异常`,
+    title: `上游请求异常 (HTTP ${log.status_code})`,
+    message: log.error_message
+      ? `上游返回明确错误：${log.error_message}`
+      : `请求未能成功完成 (HTTP ${log.status_code})，请检查渠道地址、API Key 或模型名称是否正确。`,
+  }
+}
+
+function calculateTokenSpeed(log: DesktopRequestLog): string {
+  if (log.completion_tokens && log.latency_ms && log.latency_ms > 0) {
+    const speed = (log.completion_tokens / (log.latency_ms / 1000)).toFixed(1)
+    return `${speed} t/s`
+  }
+  return '-'
+}
+
 function updateOverviewEvents() {
   events.value = desktopLogs.value.slice(0, 8).map((log) => ({
     time: formatLogTime(log.created_at),
@@ -2961,7 +3047,7 @@ async function refreshSystemInfo() {
   }
 }
 
-async function setRoutingStrategy(strategy: 'priority' | 'round_robin' | 'latency') {
+async function setRoutingStrategy(strategy: GlobalRouteStrategy) {
   const previous = routingStrategy.value
   routingStrategy.value = strategy
   if (desktopApiActive.value) {
@@ -3082,10 +3168,51 @@ function formatLogDateTime(isoString: string): string {
   }
 }
 
+function formatLastCheckTime(str?: string): string {
+  if (!str || str === '尚未探活' || str === '待探活' || str === '仅手动探活') return str || '尚未探活'
+  try {
+    const d = new Date(str)
+    if (isNaN(d.getTime())) return str
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const year = d.getFullYear()
+    const month = pad(d.getMonth() + 1)
+    const day = pad(d.getDate())
+    const hours = pad(d.getHours())
+    const minutes = pad(d.getMinutes())
+    const seconds = pad(d.getSeconds())
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+  } catch {
+    return str
+  }
+}
+
 function formatDurationPill(ms?: number): string {
   if (ms === undefined || ms === null || ms < 0) return '0 ms'
   if (ms < 1000) return `${ms} ms`
   return `${(ms / 1000).toFixed(1)} s`
+}
+
+function getCompactFailoverNodes(str?: string): string[] {
+  if (!str) return []
+  const parts = str.split(/\s*[→➔]\s*/)
+  return parts.map((part) => {
+    const s = part.trim()
+    const m = s.match(/^(.+?)\s*(?:响应|异常)?\s*\(([^)]+)\)$/)
+    if (m) {
+      const name = m[1].trim()
+      const reason = m[2].trim()
+      const codeMatch = reason.match(/^(\d{3})/)
+      if (codeMatch) {
+        return `${name} ${codeMatch[1]}`
+      }
+      return `${name} (${reason.slice(0, 8)})`
+    }
+    if (s.includes('重试成功')) {
+      const name = s.replace(/\s*首次失败.*/, '').trim()
+      return `${name} (重试)`
+    }
+    return s
+  })
 }
 
 async function copyGatewayUrl() {
@@ -3581,7 +3708,7 @@ function handleContextMenu(event: MouseEvent) {
               </div>
               <div class="m26-bento-stat">
                 <span class="m26-bento-text">
-                  {{ routingStrategy === 'priority' ? '优先级优先' : routingStrategy === 'latency' ? '最低延迟' : '轮询均衡' }}
+                  {{ (routingStrategy === 'smart_quality' || routingStrategy === 'priority') ? '智能综合质量' : routingStrategy === 'latency' ? '最低延迟' : '轮询均衡' }}
                 </span>
               </div>
               <div class="m26-bento-foot">
@@ -4117,21 +4244,6 @@ function handleContextMenu(event: MouseEvent) {
                 <span v-else class="m26-kbd">⌘K</span>
               </div>
 
-              <div class="m26-segmented">
-                <button
-                  class="m26-seg-btn"
-                  :class="{ active: channelSortBy === 'quality' }"
-                  @click="setChannelSortBy('quality')"
-                  title="智能质量模式：按健康度与低延迟优先"
-                >质量排序</button>
-                <button
-                  class="m26-seg-btn"
-                  :class="{ active: channelSortBy === 'priority' }"
-                  @click="setChannelSortBy('priority')"
-                  title="手动优先级模式：按 P1, P2... 升序"
-                >手动优先</button>
-              </div>
-
               <!-- View Switch -->
               <div class="m26-segmented">
                 <button
@@ -4157,16 +4269,6 @@ function handleContextMenu(event: MouseEvent) {
                     <line x1="2" y1="4" x2="14" y2="4" />
                     <line x1="2" y1="8" x2="14" y2="8" />
                     <line x1="2" y1="12" x2="14" y2="12" />
-                  </svg>
-                </button>
-                <button
-                  class="m26-seg-btn icon-only"
-                  @click="showShortcutsModal = true"
-                  title="键盘快捷键速查指南 (⌘/ 或 ?)"
-                >
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="1.5" y="3.5" width="13" height="9" rx="1.8" />
-                    <path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M5 9.5h6" />
                   </svg>
                 </button>
               </div>
@@ -4202,7 +4304,6 @@ function handleContextMenu(event: MouseEvent) {
               <!-- Card Header: Priority, Title, Toggle, Badges -->
               <div class="m26-card-header">
                 <div class="m26-card-title-group">
-                  <span class="m26-priority-badge">P{{ c.priority }}</span>
                   <h4 class="m26-card-name" :title="c.name">{{ c.name }}</h4>
                 </div>
 
@@ -4350,16 +4451,14 @@ function handleContextMenu(event: MouseEvent) {
             <table class="m26-table">
               <thead>
                 <tr>
-                  <th width="48">启停</th>
-                  <th width="60">优先</th>
-                  <th>渠道名称</th>
-                  <th>接口协议</th>
-                  <th>Base URL</th>
-                  <th>主模型</th>
-                  <th>健康状态</th>
-                  <th>延迟</th>
-                  <th>上次探活</th>
-                  <th width="200" class="text-right">操作</th>
+                  <th style="width: 160px;">渠道名称</th>
+                  <th style="width: 120px;">接口协议</th>
+                  <th style="width: 190px;">支持模型</th>
+                  <th style="width: 170px;">健康状态</th>
+                  <th style="width: 90px;">延迟</th>
+                  <th style="width: 165px;">上次探活</th>
+                  <th style="width: 65px; text-align: center;">启停</th>
+                  <th style="width: 220px;" class="text-right">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -4370,13 +4469,8 @@ function handleContextMenu(event: MouseEvent) {
                   @click="selectChannel(c)"
                 >
                   <td>
-                    <label class="m26-switch micro">
-                      <input type="checkbox" :checked="c.enabled" @change="toggleChannel(c)" />
-                      <span class="m26-slider"></span>
-                    </label>
+                    <span class="font-medium text-main truncate block" :title="c.name">{{ c.name }}</span>
                   </td>
-                  <td><span class="m26-priority-pill">P{{ c.priority }}</span></td>
-                  <td class="font-medium text-main">{{ c.name }}</td>
                   <td><span class="m26-proto-pill" :class="c.protocol">{{ c.protocol }}</span></td>
                   <td class="cursor-pointer" @click="openModelLatencyModal(c)" title="点击查看全部模型与测速">
                     <span class="m26-model-badge primary">
@@ -4399,8 +4493,14 @@ function handleContextMenu(event: MouseEvent) {
                       <span v-if="c.lastError && c.status !== 'healthy'" class="m26-status-err-tag">查看原因</span>
                     </div>
                   </td>
-                  <td class="font-mono">{{ c.latency ? `${c.latency}ms` : '—' }}</td>
-                  <td class="text-xs text-muted">{{ c.lastCheck }}</td>
+                  <td class="font-mono whitespace-nowrap">{{ c.latency ? `${c.latency}ms` : '—' }}</td>
+                  <td class="text-xs text-muted font-mono whitespace-nowrap">{{ formatLastCheckTime(c.lastCheck) }}</td>
+                  <td style="text-align: center;">
+                    <label class="m26-switch micro" :title="c.enabled ? '已启用（点击停用）' : '已停用（点击启用）'">
+                      <input type="checkbox" :checked="c.enabled" @change="toggleChannel(c)" />
+                      <span class="m26-slider"></span>
+                    </label>
+                  </td>
                   <td class="text-right">
                     <div class="m26-table-actions">
                       <button class="m26-btn-micro probe" :disabled="c.probing" @click="probeChannel(c)">探活</button>
@@ -4411,16 +4511,6 @@ function handleContextMenu(event: MouseEvent) {
                         title="查看报错原因与排查建议"
                       >
                         诊断
-                      </button>
-                      <button class="m26-btn-icon" @click="moveChannel(c, 'up')" title="提升优先级 (上移)">
-                        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M4 10l4-4 4 4" />
-                        </svg>
-                      </button>
-                      <button class="m26-btn-icon" @click="moveChannel(c, 'down')" title="降低优先级 (下移)">
-                        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M4 6l4 4 4-4" />
-                        </svg>
                       </button>
                       <button class="m26-btn-icon" @click="duplicateChannel(c)" title="复制副本">
                         <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -4696,14 +4786,14 @@ function handleContextMenu(event: MouseEvent) {
             <table class="m26-table font-mono text-xs">
               <thead>
                 <tr>
-                  <th width="145">请求时间</th>
-                  <th width="70">状态</th>
-                  <th style="min-width: 140px;">模型</th>
-                  <th style="min-width: 130px;">供应商 / 轮转</th>
-                  <th width="165">用时 / 首字</th>
-                  <th width="75">提示</th>
-                  <th width="75">补全</th>
-                  <th width="60" class="text-right">详情</th>
+                  <th style="width: 165px;" class="whitespace-nowrap">请求时间</th>
+                  <th style="width: 95px;" class="whitespace-nowrap">状态</th>
+                  <th style="width: 155px;" class="whitespace-nowrap">模型</th>
+                  <th style="width: 220px;" class="whitespace-nowrap">供应商 / 轮转</th>
+                  <th style="width: 130px;" class="whitespace-nowrap">用时 / 首字</th>
+                  <th style="width: 75px;" class="whitespace-nowrap">提示</th>
+                  <th style="width: 75px;" class="whitespace-nowrap">补全</th>
+                  <th style="width: 65px;" class="text-right whitespace-nowrap">详情</th>
                 </tr>
               </thead>
               <tbody>
@@ -4716,33 +4806,40 @@ function handleContextMenu(event: MouseEvent) {
                   title="点击查看请求与轮转详情"
                 >
                   <td class="text-muted whitespace-nowrap">{{ formatLogDateTime(log.created_at) }}</td>
-                  <td>
+                  <td class="whitespace-nowrap">
                     <span
                       class="m26-status-pill"
-                      :class="log.status_code === 0 ? 'status-streaming' : log.status_code >= 200 && log.status_code < 300 ? 'status-200' : log.status_code === 429 ? 'status-429' : 'status-err'"
+                      :class="log.status_code === 0 ? 'status-streaming' : log.is_failover && log.status_code >= 200 && log.status_code < 300 ? 'status-failover' : log.status_code >= 200 && log.status_code < 300 ? 'status-200' : log.status_code === 429 ? 'status-429' : 'status-err'"
                     >
-                      {{ log.status_code === 0 ? '传输中' : log.is_failover ? '轮转' : log.status_code }}
+                      {{ log.status_code === 0 ? '传输中' : log.is_failover && log.status_code >= 200 && log.status_code < 300 ? '轮转 200' : log.status_code >= 200 && log.status_code < 300 ? '200 OK' : log.status_code === 429 ? '429 限流' : (log.status_code + ' 异常') }}
                     </span>
                   </td>
                   <td>
-                    <span class="m26-model-badge" :title="log.model">
-                      <svg class="m26-model-badge-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="9" />
-                        <path d="M12 3a9 9 0 0 1 9 9 9 9 0 0 1-9 9 9 9 0 0 1-9-9 9 9 0 0 1 9-9z" />
-                        <path d="M12 7v10M7 12h10" />
-                      </svg>
-                      <span class="truncate max-w-[130px] font-mono">{{ log.model }}</span>
-                    </span>
+                    <div class="flex flex-col items-start w-fit">
+                      <span class="m26-model-badge" :title="log.model">
+                        <svg class="m26-model-badge-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                          <circle cx="12" cy="12" r="9" />
+                          <path d="M12 3a9 9 0 0 1 9 9 9 9 0 0 1-9 9 9 9 0 0 1-9-9 9 9 0 0 1 9-9z" />
+                          <path d="M12 7v10M7 12h10" />
+                        </svg>
+                        <span class="truncate max-w-[145px] font-mono">{{ log.model }}</span>
+                      </span>
+                      <span v-if="log.upstream_model && log.upstream_model !== log.model" class="text-[10px] text-slate-400 font-mono pl-1 pt-0.5 truncate max-w-[145px]" :title="'映射至上游: ' + log.upstream_model">
+                        ➔ {{ log.upstream_model }}
+                      </span>
+                    </div>
                   </td>
                   <td>
-                    <span v-if="log.is_failover && log.failover_from" class="text-amber flex items-center gap-1" :title="log.failover_from + ' ➔ ' + log.channel_name">
-                      <span class="truncate max-w-[80px]">{{ log.failover_from }}</span>
-                      <span>➔</span>
-                      <span class="font-medium truncate max-w-[80px]">{{ log.channel_name }}</span>
-                    </span>
-                    <span v-else class="text-main font-medium truncate max-w-[140px] block" :title="log.channel_name">{{ log.channel_name }}</span>
+                    <div v-if="log.is_failover && log.failover_from" class="m26-failover-flow" :title="log.failover_from + ' ➔ ' + log.channel_name">
+                      <template v-for="(node, nIdx) in getCompactFailoverNodes(log.failover_from)" :key="nIdx">
+                        <span class="m26-tag-failover-from">{{ node }}</span>
+                        <span class="m26-failover-arrow">➔</span>
+                      </template>
+                      <span class="m26-tag-failover-to">{{ log.channel_name }}</span>
+                    </div>
+                    <span v-else class="m26-channel-name-compact truncate block" :title="log.channel_name">{{ log.channel_name }}</span>
                   </td>
-                  <td>
+                  <td class="whitespace-nowrap">
                     <div class="flex items-center gap-1.5 flex-nowrap">
                       <span class="m26-pill-total" :title="'总响应耗时: ' + log.latency_ms + 'ms'">
                         {{ formatDurationPill(log.latency_ms) }}
@@ -4753,10 +4850,10 @@ function handleContextMenu(event: MouseEvent) {
                       <span v-if="log.is_stream" class="m26-pill-stream" title="SSE 流式传输">流</span>
                     </div>
                   </td>
-                  <td class="text-slate-600 font-mono text-xs">
+                  <td class="text-slate-600 font-mono text-xs whitespace-nowrap">
                     {{ log.prompt_tokens ?? 0 }}
                   </td>
-                  <td>
+                  <td class="whitespace-nowrap">
                     <div class="flex items-center gap-1 font-mono text-xs text-slate-800 font-medium">
                       <span v-if="log.status_code === 0" class="m26-token-pulse-dot" title="流式生成中..."></span>
                       <span>{{ log.completion_tokens ?? 0 }}</span>
@@ -4796,32 +4893,30 @@ function handleContextMenu(event: MouseEvent) {
               </div>
 
               <div class="m26-route-cards">
-                <!-- Card 1: Priority -->
+                <!-- Card 1: Smart Quality -->
                 <div
                   class="m26-route-card"
-                  :class="{ selected: routingStrategy === 'priority' }"
-                  @click="setRoutingStrategy('priority')"
+                  :class="{ selected: routingStrategy === 'smart_quality' || routingStrategy === 'priority' }"
+                  @click="setRoutingStrategy('smart_quality')"
                 >
                   <div class="m26-route-card-head">
-                    <div class="m26-route-type-badge priority">
+                    <div class="m26-route-type-badge smart_quality">
                       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                        <polygon points="12 2 2 7 12 12 22 7 12 2"/>
-                        <polyline points="2 17 12 22 22 17"/>
-                        <polyline points="2 12 12 17 22 12"/>
+                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
                       </svg>
                     </div>
                     <div class="m26-route-check-indicator">
-                      <svg v-if="routingStrategy === 'priority'" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3">
+                      <svg v-if="routingStrategy === 'smart_quality' || routingStrategy === 'priority'" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3">
                         <polyline points="20 6 9 17 4 12"/>
                       </svg>
                     </div>
                   </div>
                   <div class="m26-route-body">
                     <div class="m26-route-name-wrap">
-                      <span class="m26-route-name">优先级优先</span>
-                      <span class="m26-route-code-tag">Priority</span>
+                      <span class="m26-route-name">智能综合质量</span>
+                      <span class="m26-route-code-tag">Smart Quality</span>
                     </div>
-                    <p class="m26-route-desc">按通道序号 P1, P2... 顺序调度。当高优先级不可用或熔断时自动顺延。</p>
+                    <p class="m26-route-desc">综合就绪状态、实时延迟与历史稳定性动态评分，遇 429 限流或失败自动降权避让。</p>
                   </div>
                 </div>
 
@@ -4851,7 +4946,7 @@ function handleContextMenu(event: MouseEvent) {
                       <span class="m26-route-name">最低延迟优先</span>
                       <span class="m26-route-code-tag">Lowest Latency</span>
                     </div>
-                    <p class="m26-route-desc">实时选取探活延迟最低的可用通道发起调用，提供极致响应速度。</p>
+                    <p class="m26-route-desc">实时选取探活延迟最低的可用通道发起调用，提供极致响应速度与流畅体感。</p>
                   </div>
                 </div>
 
@@ -5333,21 +5428,9 @@ function handleContextMenu(event: MouseEvent) {
             </div>
           </div>
 
-          <div class="m26-form-row">
-            <div class="m26-form-group">
-              <label class="m26-label">Base URL (API 端点)</label>
-              <input v-model="editChannelUrl" type="text" class="m26-input" />
-            </div>
-            <div class="m26-form-group" style="max-width: 140px;">
-              <label class="m26-label">路由优先级</label>
-              <input
-                v-model.number="editChannelPriority"
-                type="number"
-                min="1"
-                class="m26-input"
-                placeholder="数字越小越优先"
-              />
-            </div>
+          <div class="m26-form-group">
+            <label class="m26-label">Base URL (API 端点)</label>
+            <input v-model="editChannelUrl" type="text" class="m26-input" />
           </div>
 
           <div class="m26-form-group">
@@ -6295,14 +6378,18 @@ function handleContextMenu(event: MouseEvent) {
           <div class="flex items-center gap-2">
             <div
               class="m26-diag-icon-badge"
-              :class="activeLogDetail.is_failover ? 'amber' : activeLogDetail.status_code >= 200 && activeLogDetail.status_code < 300 ? 'success' : 'danger'"
+              :class="getLogDiagnostic(activeLogDetail).badge"
             >
-              <svg v-if="activeLogDetail.status_code >= 200 && activeLogDetail.status_code < 300 && !activeLogDetail.is_failover" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <svg v-if="getLogDiagnostic(activeLogDetail).badge === 'success'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="20 6 9 17 4 12" />
               </svg>
-              <svg v-else-if="activeLogDetail.is_failover" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <svg v-else-if="getLogDiagnostic(activeLogDetail).badge === 'amber'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="23 4 23 10 17 10" />
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              <svg v-else-if="getLogDiagnostic(activeLogDetail).badge === 'info'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
               </svg>
               <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -6311,7 +6398,7 @@ function handleContextMenu(event: MouseEvent) {
             <div>
               <h3 class="m26-modal-title">请求流水详情 #{{ activeLogDetail.id }}</h3>
               <p class="m26-modal-subtitle">
-                {{ formatLogTime(activeLogDetail.created_at) }} · 网关路由明细
+                {{ formatLogTime(activeLogDetail.created_at) }} · 网关全链路诊断
               </p>
             </div>
           </div>
@@ -6319,86 +6406,169 @@ function handleContextMenu(event: MouseEvent) {
         </div>
 
         <div class="m26-modal-body m26-diagnostic-body">
-          <!-- Status Banner -->
+          <!-- 1. Status Banner -->
           <div
             class="m26-diag-card"
-            :class="activeLogDetail.is_failover ? 'advice' : activeLogDetail.status_code >= 200 && activeLogDetail.status_code < 300 ? 'advice' : 'danger'"
+            :class="getLogDiagnostic(activeLogDetail).badge"
           >
             <div class="m26-diag-card-title">
               <span
                 class="m26-diag-dot"
-                :class="activeLogDetail.is_failover ? 'amber' : activeLogDetail.status_code >= 200 && activeLogDetail.status_code < 300 ? 'success' : 'danger'"
+                :class="getLogDiagnostic(activeLogDetail).badge"
               ></span>
-              <span>请求执行状态</span>
+              <span>{{ getLogDiagnostic(activeLogDetail).title }}</span>
               <span
                 class="m26-diag-code-pill"
-                :class="{ 'code-success': activeLogDetail.status_code >= 200 && activeLogDetail.status_code < 300 }"
+                :class="'code-' + getLogDiagnostic(activeLogDetail).badge"
               >
-                {{ activeLogDetail.is_failover ? '故障轮转 (Failover)' : activeLogDetail.status_code }}
+                {{ getLogDiagnostic(activeLogDetail).codeText }}
               </span>
             </div>
             <div class="m26-diag-main-msg">
-              <span v-if="activeLogDetail.is_failover">
-                请求在前置渠道【{{ activeLogDetail.failover_from || '前序渠道' }}】未能响应，HeiGate 自动毫秒级故障轮转至渠道【{{ activeLogDetail.channel_name }}】并成功完成请求。
-              </span>
-              <span v-else-if="activeLogDetail.status_code >= 200 && activeLogDetail.status_code < 300">
-                请求成功完成，上游渠道【{{ activeLogDetail.channel_name }}】响应正常，全链路耗时 {{ activeLogDetail.latency_ms }}ms。
-              </span>
-              <span v-else>
-                请求未能成功完成 (HTTP {{ activeLogDetail.status_code }})，上游返回异常错误。
-              </span>
+              {{ getLogDiagnostic(activeLogDetail).message }}
             </div>
           </div>
 
-          <!-- Metadata Grid -->
-          <div class="m26-diag-meta-grid">
-            <div class="m26-diag-meta-item">
-              <span class="label">请求模型 (Model)</span>
-              <span class="value font-mono">{{ activeLogDetail.model || '通用模型' }}</span>
+          <!-- 2. Execution Trace Timeline (调用链路追踪) -->
+          <div class="m26-log-section">
+            <div class="m26-section-subtitle-bar">
+              <span class="m26-subtitle-tag">链路追踪</span>
+              <span class="m26-subtitle-title">多级重试与故障轮转链路 (Execution Trace)</span>
             </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">承载渠道 (Channel)</span>
-              <span class="value">{{ activeLogDetail.channel_name || '默认' }} (ID: {{ activeLogDetail.channel_id }})</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">全程耗时</span>
-              <span class="value font-mono">{{ activeLogDetail.latency_ms }} ms</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">首字耗时 (TTFT)</span>
-              <span class="value font-mono">{{ activeLogDetail.ttft_ms || activeLogDetail.latency_ms }} ms</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">提示词 Token (Prompt)</span>
-              <span class="value font-mono">{{ activeLogDetail.prompt_tokens ?? 0 }}</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">补全 Token (Completion)</span>
-              <span class="value font-mono">{{ activeLogDetail.completion_tokens ?? 0 }}</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">总计 Token (Total)</span>
-              <span class="value font-mono">{{ activeLogDetail.total_tokens ?? ((activeLogDetail.prompt_tokens || 0) + (activeLogDetail.completion_tokens || 0)) }}</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">传输类型</span>
-              <span class="value">{{ activeLogDetail.is_stream ? 'SSE 流式传输 (Stream)' : '单次阻塞响应' }}</span>
-            </div>
-            <div class="m26-diag-meta-item col-span-2">
-              <span class="label">故障转移路径</span>
-              <span class="value font-mono">{{ activeLogDetail.failover_from ? `${activeLogDetail.failover_from} ➔ ${activeLogDetail.channel_name}` : '直接路由 (无轮转)' }}</span>
+            <div class="m26-trace-timeline">
+              <div
+                v-for="step in parseTraceSteps(activeLogDetail)"
+                :key="step.index"
+                class="m26-trace-item"
+                :class="{ 'trace-item-success': step.succeeded, 'trace-item-fail': !step.succeeded }"
+              >
+                <div class="m26-trace-node">
+                  <span class="m26-trace-index">{{ step.index }}</span>
+                  <div class="m26-trace-line"></div>
+                </div>
+                <div class="m26-trace-card">
+                  <div class="m26-trace-header">
+                    <div class="flex items-center gap-2">
+                      <span class="m26-trace-channel-name">{{ step.channel_name || '未知渠道' }}</span>
+                      <span v-if="step.channel_id" class="m26-trace-id-badge">ID: {{ step.channel_id }}</span>
+                      <span v-if="step.attempt > 1" class="m26-trace-retry-badge">重试 #{{ step.attempt }}</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                      <span
+                        class="m26-trace-code-pill"
+                        :class="step.status_code >= 200 && step.status_code < 300 ? 'status-200' : step.status_code === 429 ? 'status-429' : 'status-err'"
+                      >
+                        {{ step.status_code ? `HTTP ${step.status_code}` : '超时/中断' }}
+                      </span>
+                      <span v-if="step.latency_ms > 0" class="m26-trace-latency">{{ step.latency_ms }}ms</span>
+                    </div>
+                  </div>
+                  <div class="m26-trace-body">
+                    <div class="m26-trace-spec-row">
+                      <span class="label">端点:</span>
+                      <span class="val font-mono truncate" :title="step.endpoint">{{ step.endpoint || '默认网关路由' }}</span>
+                    </div>
+                    <div class="m26-trace-spec-row">
+                      <span class="label">模型:</span>
+                      <span class="val font-mono">{{ step.model }}</span>
+                      <span v-if="step.ttft_ms" class="val-ttft">TTFT: {{ step.ttft_ms }}ms</span>
+                    </div>
+                    <div v-if="step.error || step.raw_error" class="m26-trace-error-box">
+                      <span class="error-icon">⚠️</span>
+                      <span class="font-mono text-xs">{{ step.error || step.raw_error }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
-          <!-- Error message if any -->
+          <!-- 3. Performance & Tokens Summary (吞吐性能) -->
+          <div class="m26-log-section">
+            <div class="m26-section-subtitle-bar">
+              <span class="m26-subtitle-tag">吞吐性能</span>
+              <span class="m26-subtitle-title">Token 用量与响应延迟</span>
+            </div>
+            <div class="m26-perf-grid">
+              <div class="m26-perf-card">
+                <span class="label">首字耗时 (TTFT)</span>
+                <span class="val font-mono">{{ activeLogDetail.ttft_ms || activeLogDetail.latency_ms }} <span class="unit">ms</span></span>
+              </div>
+              <div class="m26-perf-card">
+                <span class="label">全程总耗时</span>
+                <span class="val font-mono">{{ activeLogDetail.latency_ms }} <span class="unit">ms</span></span>
+              </div>
+              <div class="m26-perf-card">
+                <span class="label">生成速率</span>
+                <span class="val font-mono">{{ calculateTokenSpeed(activeLogDetail) }}</span>
+              </div>
+              <div class="m26-perf-card">
+                <span class="label">提示词 Token</span>
+                <span class="val font-mono">{{ activeLogDetail.prompt_tokens ?? 0 }}</span>
+              </div>
+              <div class="m26-perf-card">
+                <span class="label">补全 Token</span>
+                <span class="val font-mono text-emerald-600">{{ activeLogDetail.completion_tokens ?? 0 }}</span>
+              </div>
+              <div class="m26-perf-card">
+                <span class="label">总 Token</span>
+                <span class="val font-mono">{{ activeLogDetail.total_tokens ?? ((activeLogDetail.prompt_tokens || 0) + (activeLogDetail.completion_tokens || 0)) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. Environment & Request Specs (网络与网关环境) -->
+          <div class="m26-log-section">
+            <div class="m26-section-subtitle-bar">
+              <span class="m26-subtitle-tag">调用环境</span>
+              <span class="m26-subtitle-title">客户端与网关路由参数</span>
+            </div>
+            <div class="m26-diag-meta-grid">
+              <div class="m26-diag-meta-item">
+                <span class="label">客户端地址 (Client IP)</span>
+                <span class="value font-mono">{{ activeLogDetail.client_ip || '127.0.0.1 (本地)' }}</span>
+              </div>
+              <div class="m26-diag-meta-item">
+                <span class="label">请求接口 (Endpoint Path)</span>
+                <span class="value font-mono">{{ activeLogDetail.request_path || '/v1/chat/completions' }}</span>
+              </div>
+              <div class="m26-diag-meta-item">
+                <span class="label">请求模型 (Requested)</span>
+                <span class="value font-mono">{{ activeLogDetail.model || '通用模型' }}</span>
+              </div>
+              <div class="m26-diag-meta-item">
+                <span class="label">上游映射模型 (Upstream)</span>
+                <span class="value font-mono">{{ activeLogDetail.upstream_model || activeLogDetail.model || '通用模型' }}</span>
+              </div>
+              <div class="m26-diag-meta-item">
+                <span class="label">传输类型</span>
+                <span class="value">{{ activeLogDetail.is_stream ? 'SSE 流式传输 (Server-Sent Events)' : '同步阻塞传输 (Blocking)' }}</span>
+              </div>
+              <div class="m26-diag-meta-item">
+                <span class="label">结束状态 (Finish Reason)</span>
+                <span class="value font-mono">{{ activeLogDetail.finish_reason || (activeLogDetail.status_code === 200 ? 'stop' : 'unknown') }}</span>
+              </div>
+              <div class="m26-diag-meta-item col-span-2">
+                <span class="label">最终承载渠道</span>
+                <span class="value">{{ activeLogDetail.channel_name || '默认' }} (ID: {{ activeLogDetail.channel_id }}) · {{ activeLogDetail.endpoint || '默认地址' }}</span>
+              </div>
+              <div v-if="activeLogDetail.user_agent" class="m26-diag-meta-item col-span-2">
+                <span class="label">客户端软件 (User-Agent)</span>
+                <span class="value font-mono text-xs" :title="activeLogDetail.user_agent">{{ activeLogDetail.user_agent }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 5. Error message if any -->
           <div v-if="activeLogDetail.error_message" class="m26-diag-raw-section">
             <div class="m26-diag-raw-header">
-              <span class="label">上游异常报错回包</span>
+              <span class="label">上游异常报错回包 (Error Diagnostics)</span>
+              <button class="m26-text-btn" @click="copyErrorMessage(activeLogDetail.error_message)">复制报错</button>
             </div>
             <pre class="m26-diag-raw-code font-mono text-xs"><code>{{ activeLogDetail.error_message }}</code></pre>
           </div>
 
-          <!-- Full JSON View -->
+          <!-- 6. Full JSON View -->
           <div class="m26-diag-raw-section">
             <div class="m26-diag-raw-header">
               <span class="label">完整流水数据 (JSON)</span>
@@ -8033,12 +8203,13 @@ function handleContextMenu(event: MouseEvent) {
   border-radius: 8px;
 }
 .m26-ch-status-box {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
   font-weight: 500;
   cursor: help;
+  white-space: nowrap;
 }
 .m26-status-dot {
   width: 7px;
@@ -8110,6 +8281,7 @@ function handleContextMenu(event: MouseEvent) {
 .m26-btn-micro {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
   height: 26px;
   padding: 0 10px;
@@ -8122,6 +8294,8 @@ function handleContextMenu(event: MouseEvent) {
   color: var(--m26-text);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
   transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .m26-btn-micro:hover {
   background: #f8fafc;
@@ -8145,6 +8319,7 @@ function handleContextMenu(event: MouseEvent) {
   color: var(--m26-text-muted);
   cursor: pointer;
   transition: all 0.15s ease;
+  flex-shrink: 0;
 }
 .m26-btn-icon:hover {
   background: rgba(0, 0, 0, 0.05);
@@ -8203,27 +8378,33 @@ input:checked + .m26-slider:before {
   -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--m26-border);
   border-radius: 14px;
-  overflow: hidden;
+  overflow-x: auto;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.02);
 }
 .m26-table {
   width: 100%;
+  min-width: 1050px;
   border-collapse: collapse;
   text-align: left;
   font-size: 13px;
+  table-layout: fixed;
 }
 .m26-table th {
   background: #f8fafc;
-  padding: 10px 14px;
+  padding: 10px 12px;
   font-size: 11px;
   font-weight: 600;
   color: var(--m26-text-muted);
   border-bottom: 1px solid var(--m26-border);
+  white-space: nowrap;
 }
 .m26-table td {
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.04);
   color: var(--m26-text-secondary);
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .m26-table tr:hover td {
   background: #f1f5f9;
@@ -8232,15 +8413,17 @@ input:checked + .m26-slider:before {
 .m26-td-url {
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 11px;
-  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .m26-table-actions {
-  display: flex;
+  display: inline-flex;
+  align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* ==========================================================================
@@ -9210,9 +9393,15 @@ input:checked + .m26-slider:before {
   gap: 8px;
 }
 .m26-status-pill {
-  padding: 2px 6px;
-  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border-radius: 5px;
   font-weight: 600;
+  font-size: 11px;
+  line-height: 1.2;
 }
 .m26-status-pill.status-200 { background: rgba(5, 150, 105, 0.12); color: var(--m26-emerald); }
 .m26-status-pill.status-429 { background: rgba(217, 119, 6, 0.12); color: var(--m26-amber); }
@@ -9221,6 +9410,8 @@ input:checked + .m26-slider:before {
 .m26-model-badge {
   display: inline-flex;
   align-items: center;
+  width: fit-content;
+  max-width: 100%;
   gap: 5px;
   padding: 2px 8px;
   border-radius: 9999px;
@@ -9230,6 +9421,7 @@ input:checked + .m26-slider:before {
   font-size: 11px;
   font-weight: 600;
   line-height: 1.2;
+  white-space: nowrap;
 }
 .m26-model-badge-icon {
   flex-shrink: 0;
@@ -9409,9 +9601,10 @@ input:checked + .m26-slider:before {
   justify-content: center;
 }
 
+.m26-route-type-badge.smart_quality,
 .m26-route-type-badge.priority {
-  background: rgba(245, 158, 11, 0.1);
-  color: #d97706;
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
 }
 
 .m26-route-type-badge.latency {
@@ -10252,6 +10445,8 @@ input:checked + .m26-slider:before {
   color: var(--m26-rose);
   font-weight: 600;
   margin-left: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .m26-ch-status-box.has-error {
   cursor: pointer;
@@ -10696,8 +10891,8 @@ input:checked + .m26-slider:before {
 
 /* Log detail sheet */
 .m26-log-detail-sheet {
-  max-width: 640px;
-  width: 100%;
+  max-width: 720px;
+  width: 95%;
 }
 .m26-diag-icon-badge.success {
   background: rgba(5, 150, 105, 0.1);
@@ -10707,6 +10902,14 @@ input:checked + .m26-slider:before {
   background: rgba(217, 119, 6, 0.1);
   color: var(--m26-amber);
 }
+.m26-diag-icon-badge.info {
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+}
+.m26-diag-icon-badge.danger {
+  background: rgba(225, 29, 72, 0.1);
+  color: var(--m26-rose);
+}
 .m26-diag-dot.success {
   background: var(--m26-emerald);
   box-shadow: 0 0 6px rgba(5, 150, 105, 0.5);
@@ -10715,9 +10918,302 @@ input:checked + .m26-slider:before {
   background: var(--m26-amber);
   box-shadow: 0 0 6px rgba(217, 119, 6, 0.5);
 }
+.m26-diag-card.success {
+  background: rgba(16, 185, 129, 0.05);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+.m26-diag-card.amber {
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+}
+.m26-diag-card.info {
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+.m26-diag-card.danger {
+  background: rgba(225, 29, 72, 0.05);
+  border: 1px solid rgba(225, 29, 72, 0.2);
+}
 .m26-diag-code-pill.code-success {
   background: rgba(5, 150, 105, 0.12);
   color: var(--m26-emerald);
+}
+.m26-diag-code-pill.code-amber {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+.m26-diag-code-pill.code-info {
+  background: rgba(59, 130, 246, 0.14);
+  color: #2563eb;
+}
+.m26-diag-code-pill.code-danger {
+  background: rgba(225, 29, 72, 0.12);
+  color: var(--m26-rose);
+}
+
+/* Status pills & failover tags in table */
+.m26-status-pill.status-failover {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  font-weight: 700;
+}
+.m26-failover-flow {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.m26-failover-arrow {
+  color: #f59e0b;
+  font-size: 9px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.m26-tag-failover-from {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  background: rgba(225, 29, 72, 0.08);
+  color: #e11d48;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.m26-tag-failover-to {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  background: rgba(16, 185, 129, 0.1);
+  color: #059669;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.m26-channel-name-compact {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--m26-text);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Modal sections & subtitle bar */
+.m26-log-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.m26-section-subtitle-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.m26-subtitle-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  background: #e2e8f0;
+  color: #475569;
+  border-radius: 4px;
+}
+.m26-subtitle-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+
+/* Execution Trace Timeline */
+.m26-trace-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 4px 0;
+}
+.m26-trace-item {
+  display: flex;
+  gap: 12px;
+  position: relative;
+}
+.m26-trace-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 24px;
+  flex-shrink: 0;
+}
+.m26-trace-index {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: #e2e8f0;
+  color: #475569;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  z-index: 1;
+}
+.trace-item-success .m26-trace-index {
+  background: #10b981;
+  color: #ffffff;
+}
+.trace-item-fail .m26-trace-index {
+  background: #f43f5e;
+  color: #ffffff;
+}
+.m26-trace-line {
+  flex: 1;
+  width: 2px;
+  background: #e2e8f0;
+  min-height: 24px;
+}
+.m26-trace-item:last-child .m26-trace-line {
+  display: none;
+}
+.m26-trace-card {
+  flex: 1;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+}
+.trace-item-success .m26-trace-card {
+  border-left: 3px solid #10b981;
+}
+.trace-item-fail .m26-trace-card {
+  border-left: 3px solid #f43f5e;
+}
+.m26-trace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.m26-trace-channel-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1e293b;
+}
+.m26-trace-id-badge {
+  font-size: 10px;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.m26-trace-retry-badge {
+  font-size: 10px;
+  color: #d97706;
+  background: #fef3c7;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.m26-trace-code-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.m26-trace-latency {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  color: #64748b;
+}
+.m26-trace-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.m26-trace-spec-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #64748b;
+}
+.m26-trace-spec-row .label {
+  color: #94a3b8;
+  font-size: 11px;
+}
+.m26-trace-spec-row .val {
+  color: #334155;
+  font-size: 11px;
+}
+.m26-trace-spec-row .val-ttft {
+  font-size: 10px;
+  color: #0284c7;
+  background: #e0f2fe;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, monospace;
+}
+.m26-trace-error-box {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #fff1f2;
+  border: 1px solid #ffe4e6;
+  border-radius: 6px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #e11d48;
+  word-break: break-all;
+}
+
+/* Performance Grid */
+.m26-perf-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.m26-perf-card {
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid var(--m26-border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.m26-perf-card .label {
+  font-size: 10px;
+  color: var(--m26-text-muted);
+}
+.m26-perf-card .val {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--m26-text);
+}
+.m26-perf-card .unit {
+  font-size: 10px;
+  font-weight: normal;
+  color: #64748b;
 }
 
 /* ==========================================================================

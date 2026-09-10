@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS desktop_request_logs (
   error_message TEXT NOT NULL DEFAULT '',
   failover_from TEXT NOT NULL DEFAULT '',
   is_failover INTEGER NOT NULL DEFAULT 0,
+  upstream_model TEXT NOT NULL DEFAULT '',
+  endpoint TEXT NOT NULL DEFAULT '',
+  client_ip TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  request_path TEXT NOT NULL DEFAULT '',
+  finish_reason TEXT NOT NULL DEFAULT '',
+  trace_json TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_desktop_request_logs_created_at ON desktop_request_logs(created_at);
@@ -142,8 +149,8 @@ func (s *DesktopChannelStore) initialize(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, desktopChannelSchema); err != nil {
 		return fmt.Errorf("create desktop channel schema: %w", err)
 	}
-	// Keep existing desktop databases forward-compatible with the resilience
-	// and token metrics fields added after the initial desktop release.
+	// Keep existing desktop databases forward-compatible with the resilience,
+	// token metrics, and rich trace audit fields added after the initial desktop release.
 	for _, statement := range []string{
 		"ALTER TABLE desktop_channels ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_channels ADD COLUMN circuit_state TEXT NOT NULL DEFAULT 'closed'",
@@ -153,11 +160,29 @@ func (s *DesktopChannelStore) initialize(ctx context.Context) error {
 		"ALTER TABLE desktop_request_logs ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN is_stream INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE desktop_request_logs ADD COLUMN upstream_model TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE desktop_request_logs ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE desktop_request_logs ADD COLUMN client_ip TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE desktop_request_logs ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE desktop_request_logs ADD COLUMN request_path TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE desktop_request_logs ADD COLUMN finish_reason TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE desktop_request_logs ADD COLUMN trace_json TEXT NOT NULL DEFAULT ''",
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("migrate desktop channel schema: %w", err)
 		}
 	}
+
+	// Auto-repair legacy false-positive 502 logs where streaming completed tokens but was flagged context canceled
+	_, _ = s.db.ExecContext(ctx, `
+UPDATE desktop_request_logs
+SET status_code = 200,
+    finish_reason = 'stop',
+    error_message = '流式生成完成 (客户端在接收后断开连接)'
+WHERE status_code = 502
+  AND completion_tokens > 0
+  AND error_message LIKE '%context canceled%'`)
+
 	return nil
 }
 
@@ -358,6 +383,13 @@ type DesktopRequestLog struct {
 	ErrorMessage     string    `json:"error_message"`
 	FailoverFrom     string    `json:"failover_from"`
 	IsFailover       bool      `json:"is_failover"`
+	UpstreamModel    string    `json:"upstream_model,omitempty"`
+	Endpoint         string    `json:"endpoint,omitempty"`
+	ClientIP         string    `json:"client_ip,omitempty"`
+	UserAgent        string    `json:"user_agent,omitempty"`
+	RequestPath      string    `json:"request_path,omitempty"`
+	FinishReason     string    `json:"finish_reason,omitempty"`
+	TraceJSON        string    `json:"trace_json,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 
@@ -417,9 +449,18 @@ func (s *DesktopChannelStore) RecordLog(ctx context.Context, log *DesktopRequest
 	if log.TotalTokens == 0 && (log.PromptTokens > 0 || log.CompletionTokens > 0) {
 		log.TotalTokens = log.PromptTokens + log.CompletionTokens
 	}
-	query := `INSERT INTO desktop_request_logs (model, channel_name, status_code, latency_ms, ttft_ms, prompt_tokens, completion_tokens, total_tokens, is_stream, error_message, failover_from, is_failover, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	res, err := s.db.ExecContext(ctx, query, log.Model, log.ChannelName, log.StatusCode, log.LatencyMs, log.TtftMs, log.PromptTokens, log.CompletionTokens, log.TotalTokens, isStream, log.ErrorMessage, log.FailoverFrom, isFailover, formatDesktopTime(log.CreatedAt))
+	query := `INSERT INTO desktop_request_logs (
+		model, channel_name, status_code, latency_ms, ttft_ms, prompt_tokens,
+		completion_tokens, total_tokens, is_stream, error_message, failover_from,
+		is_failover, upstream_model, endpoint, client_ip, user_agent,
+		request_path, finish_reason, trace_json, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	res, err := s.db.ExecContext(ctx, query,
+		log.Model, log.ChannelName, log.StatusCode, log.LatencyMs, log.TtftMs, log.PromptTokens,
+		log.CompletionTokens, log.TotalTokens, isStream, log.ErrorMessage, log.FailoverFrom,
+		isFailover, log.UpstreamModel, log.Endpoint, log.ClientIP, log.UserAgent,
+		log.RequestPath, log.FinishReason, log.TraceJSON, formatDesktopTime(log.CreatedAt),
+	)
 	if err != nil {
 		return fmt.Errorf("record desktop request log: %w", err)
 	}
@@ -444,9 +485,17 @@ func (s *DesktopChannelStore) UpdateLog(ctx context.Context, log *DesktopRequest
 		log.TotalTokens = log.PromptTokens + log.CompletionTokens
 	}
 	query := `UPDATE desktop_request_logs
-SET channel_name = ?, status_code = ?, latency_ms = ?, ttft_ms = ?, prompt_tokens = ?, completion_tokens = ?, total_tokens = ?, is_stream = ?, error_message = ?, failover_from = ?, is_failover = ?
+SET channel_name = ?, status_code = ?, latency_ms = ?, ttft_ms = ?, prompt_tokens = ?,
+    completion_tokens = ?, total_tokens = ?, is_stream = ?, error_message = ?, failover_from = ?,
+    is_failover = ?, upstream_model = ?, endpoint = ?, client_ip = ?, user_agent = ?,
+    request_path = ?, finish_reason = ?, trace_json = ?
 WHERE id = ?`
-	_, err := s.db.ExecContext(ctx, query, log.ChannelName, log.StatusCode, log.LatencyMs, log.TtftMs, log.PromptTokens, log.CompletionTokens, log.TotalTokens, isStream, log.ErrorMessage, log.FailoverFrom, isFailover, log.ID)
+	_, err := s.db.ExecContext(ctx, query,
+		log.ChannelName, log.StatusCode, log.LatencyMs, log.TtftMs, log.PromptTokens,
+		log.CompletionTokens, log.TotalTokens, isStream, log.ErrorMessage, log.FailoverFrom,
+		isFailover, log.UpstreamModel, log.Endpoint, log.ClientIP, log.UserAgent,
+		log.RequestPath, log.FinishReason, log.TraceJSON, log.ID,
+	)
 	if err != nil {
 		return fmt.Errorf("update desktop request log: %w", err)
 	}
@@ -461,7 +510,13 @@ func (s *DesktopChannelStore) ListLogs(ctx context.Context, limit int) ([]*Deskt
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	query := `SELECT id, model, channel_name, status_code, latency_ms, ttft_ms, prompt_tokens, completion_tokens, total_tokens, is_stream, error_message, failover_from, is_failover, created_at
+	query := `SELECT id, model, channel_name, status_code, latency_ms, ttft_ms,
+       prompt_tokens, completion_tokens, total_tokens, is_stream,
+       error_message, failover_from, is_failover,
+       COALESCE(upstream_model, ''), COALESCE(endpoint, ''),
+       COALESCE(client_ip, ''), COALESCE(user_agent, ''),
+       COALESCE(request_path, ''), COALESCE(finish_reason, ''),
+       COALESCE(trace_json, ''), created_at
 FROM desktop_request_logs ORDER BY id DESC LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, query, limit)
 	if err != nil {
@@ -475,7 +530,13 @@ FROM desktop_request_logs ORDER BY id DESC LIMIT ?`
 		var isFailover int
 		var isStream int
 		var createdAt sql.NullString
-		if err := rows.Scan(&l.ID, &l.Model, &l.ChannelName, &l.StatusCode, &l.LatencyMs, &l.TtftMs, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &isStream, &l.ErrorMessage, &l.FailoverFrom, &isFailover, &createdAt); err != nil {
+		if err := rows.Scan(
+			&l.ID, &l.Model, &l.ChannelName, &l.StatusCode, &l.LatencyMs, &l.TtftMs,
+			&l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &isStream,
+			&l.ErrorMessage, &l.FailoverFrom, &isFailover,
+			&l.UpstreamModel, &l.Endpoint, &l.ClientIP, &l.UserAgent,
+			&l.RequestPath, &l.FinishReason, &l.TraceJSON, &createdAt,
+		); err != nil {
 			return nil, fmt.Errorf("scan desktop request log: %w", err)
 		}
 		l.IsFailover = isFailover != 0

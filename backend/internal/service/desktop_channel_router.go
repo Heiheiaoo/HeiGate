@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	DesktopRoutePriority   = "priority"
-	DesktopRouteLatency    = "latency"
-	DesktopRouteRoundRobin = "round_robin"
+	DesktopRoutePriority     = "priority"      // Legacy alias for smart_quality
+	DesktopRouteSmartQuality = "smart_quality" // Dynamic quality scoring
+	DesktopRouteLatency      = "latency"        // Lowest latency first
+	DesktopRouteRoundRobin   = "round_robin"    // Load balancing round robin
 )
 
 // DesktopChannelRouter resolves a model to enabled local channels and provides
@@ -167,12 +168,11 @@ func (r *DesktopChannelRouter) sortCandidates(channels []*DesktopChannel, model,
 		case DesktopRouteLatency:
 			return desktopLatency(channels[i]) < desktopLatency(channels[j])
 		case DesktopRouteRoundRobin:
-			return channels[i].Priority < channels[j].Priority
+			return desktopLatency(channels[i]) < desktopLatency(channels[j])
+		case DesktopRouteSmartQuality, DesktopRoutePriority:
+			fallthrough
 		default:
-			if channels[i].Priority == channels[j].Priority {
-				return desktopLatency(channels[i]) < desktopLatency(channels[j])
-			}
-			return channels[i].Priority < channels[j].Priority
+			return desktopQualityScore(channels[i]) > desktopQualityScore(channels[j])
 		}
 	})
 	if strategy == DesktopRouteRoundRobin && len(channels) > 1 {
@@ -183,6 +183,39 @@ func (r *DesktopChannelRouter) sortCandidates(channels []*DesktopChannel, model,
 		rotated := append(append([]*DesktopChannel{}, channels[start:]...), channels[:start]...)
 		copy(channels, rotated)
 	}
+}
+
+func desktopQualityScore(channel *DesktopChannel) int {
+	score := 0
+	switch channel.LastStatus {
+	case MonitorStatusOperational, "healthy":
+		score += 10000
+	case MonitorStatusDegraded:
+		score += 5000
+	case "unknown", "":
+		score += 3000
+	default:
+		score += 0
+	}
+
+	if channel.CircuitState == DesktopCircuitHalf {
+		score -= 2000
+	} else if channel.CircuitState == DesktopCircuitOpen {
+		score -= 8000
+	}
+
+	score -= channel.FailureCount * 1500
+
+	if strings.Contains(channel.LastError, "429") || strings.Contains(channel.LastError, "Too Many") {
+		score -= 3000
+	}
+
+	lat := desktopLatency(channel)
+	if lat < 1000000 {
+		score -= lat
+	}
+
+	return score
 }
 
 func desktopChannelSupportsModel(channel *DesktopChannel, model string) bool {

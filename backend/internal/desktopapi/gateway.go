@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -105,6 +106,61 @@ func (h *Handler) resolveModelAlias(ctx context.Context, requestedModel string) 
 	return requestedModel
 }
 
+// DesktopRequestTraceStep records a single attempt in the routing and failover process.
+type DesktopRequestTraceStep struct {
+	Index       int    `json:"index"`
+	ChannelName string `json:"channel_name"`
+	ChannelID   int64  `json:"channel_id"`
+	Endpoint    string `json:"endpoint"`
+	Model       string `json:"model"`
+	Attempt     int    `json:"attempt"`
+	StatusCode  int    `json:"status_code"`
+	LatencyMs   int    `json:"latency_ms"`
+	TtftMs      int    `json:"ttft_ms,omitempty"`
+	Error       string `json:"error,omitempty"`
+	RawError    string `json:"raw_error,omitempty"`
+	Succeeded   bool   `json:"succeeded"`
+}
+
+func parseUpstreamErrorMessage(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err == nil {
+		if errObj, ok := obj["error"].(map[string]any); ok {
+			if msg, ok := errObj["message"].(string); ok && strings.TrimSpace(msg) != "" {
+				return strings.TrimSpace(msg)
+			}
+		}
+		if msg, ok := obj["message"].(string); ok && strings.TrimSpace(msg) != "" {
+			return strings.TrimSpace(msg)
+		}
+		if msg, ok := obj["msg"].(string); ok && strings.TrimSpace(msg) != "" {
+			return strings.TrimSpace(msg)
+		}
+	}
+	if len(raw) > 200 {
+		return raw[:200] + "..."
+	}
+	return raw
+}
+
+func isClientClosedConn(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "client closed") ||
+		strings.Contains(s, "context canceled")
+}
+
 func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, desktopGatewayMaxBody+1))
 	if err != nil {
@@ -159,10 +215,15 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 	var upstream desktopGatewayResponse
 	var winningChannel *service.DesktopChannel
 	var failedAttempts []string
+	var traceSteps []DesktopRequestTraceStep
 	startOverall := time.Now()
 	var winningTtft int
 	initialPromptTokens := estimatePromptTokens(body)
 	isStreamRequest := bytes.Contains(body, []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`)) || strings.Contains(strings.ToLower(c.Request.Header.Get("Accept")), "text/event-stream")
+
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+	requestPath := c.Request.URL.Path
 
 	var requestLog *service.DesktopRequestLog
 	if h.store != nil {
@@ -176,6 +237,9 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 			CompletionTokens: 0,
 			TotalTokens:      initialPromptTokens,
 			IsStream:         isStreamRequest,
+			ClientIP:         clientIP,
+			UserAgent:        userAgent,
+			RequestPath:      requestPath,
 			CreatedAt:        time.Now().UTC(),
 		}
 		_ = h.store.RecordLog(context.Background(), requestLog)
@@ -194,25 +258,50 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
+			attemptStart := time.Now()
 			response, requestErr := forwardDesktopRequest(ctx, c.Request, body, channel, protocol, effectiveModel, upstreamModel)
+			attemptLatency := int(time.Since(attemptStart) / time.Millisecond)
+
+			step := DesktopRequestTraceStep{
+				Index:       len(traceSteps) + 1,
+				ChannelName: channel.Name,
+				ChannelID:   channel.ID,
+				Endpoint:    channel.Endpoint,
+				Model:       upstreamModel,
+				Attempt:     attempt + 1,
+				LatencyMs:   attemptLatency,
+			}
+
 			if requestErr != nil {
 				wrapped := &desktopRequestError{err: requestErr}
 				lastCandidateErr = wrapped
+				step.Error = requestErr.Error()
+				step.RawError = requestErr.Error()
+				traceSteps = append(traceSteps, step)
 				if attempt == 0 {
 					continue
 				}
-				failedAttempts = append(failedAttempts, fmt.Sprintf("%s 异常(%s, 重试1次未果)", channel.Name, service.DesktopFailureLabel(wrapped.FailureInfo())))
+				failedAttempts = append(failedAttempts, fmt.Sprintf("%s 异常(%s)", channel.Name, service.DesktopFailureLabel(wrapped.FailureInfo())))
 				return wrapped
 			}
 			if response.status < http.StatusOK || response.status >= http.StatusMultipleChoices {
-				_, _ = io.Copy(io.Discard, io.LimitReader(response.body, 4096))
+				errBytes, _ := io.ReadAll(io.LimitReader(response.body, 4096))
 				_ = response.body.Close()
-				upErr := &desktopUpstreamError{status: response.status, retryAfter: parseRetryAfter(response.header.Get("Retry-After"))}
+				rawErr := string(errBytes)
+				parsedErr := parseUpstreamErrorMessage(rawErr)
+				if parsedErr == "" {
+					parsedErr = fmt.Sprintf("HTTP %d", response.status)
+				}
+				upErr := &desktopUpstreamError{status: response.status, retryAfter: parseRetryAfter(response.header.Get("Retry-After")), message: parsedErr}
 				lastCandidateErr = upErr
+				step.StatusCode = response.status
+				step.Error = parsedErr
+				step.RawError = rawErr
+				traceSteps = append(traceSteps, step)
 				if attempt == 0 {
 					continue
 				}
-				failedAttempts = append(failedAttempts, fmt.Sprintf("%s 响应(%d, 重试1次未果)", channel.Name, response.status))
+				failedAttempts = append(failedAttempts, fmt.Sprintf("%s (%d: %s)", channel.Name, response.status, parsedErr))
 				return upErr
 			}
 			// Do not commit a 2xx response to the client until the upstream has
@@ -225,18 +314,29 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 				_ = response.body.Close()
 				streamErr := &desktopStreamStartError{err: readErr}
 				lastCandidateErr = streamErr
+				step.StatusCode = response.status
+				step.Error = fmt.Sprintf("传输首字节中断: %v", readErr)
+				step.RawError = readErr.Error()
+				traceSteps = append(traceSteps, step)
 				if attempt == 0 {
 					continue
 				}
-				failedAttempts = append(failedAttempts, fmt.Sprintf("%s 传输中断(重试1次未果)", channel.Name))
+				failedAttempts = append(failedAttempts, fmt.Sprintf("%s (传输中断)", channel.Name))
 				return streamErr
 			}
 			winningTtft = int(time.Since(startOverall) / time.Millisecond)
 			response.body = &prefixedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix[:n]), response.body), closer: response.body}
 			upstream = *response
 			winningChannel = channel
+			step.StatusCode = response.status
+			step.TtftMs = winningTtft
+			step.Succeeded = true
+			traceSteps = append(traceSteps, step)
+
 			if requestLog != nil && requestLog.ID > 0 {
 				requestLog.ChannelName = channel.Name
+				requestLog.UpstreamModel = upstreamModel
+				requestLog.Endpoint = channel.Endpoint
 				requestLog.TtftMs = winningTtft
 				requestLog.LatencyMs = winningTtft
 				if len(failedAttempts) > 0 || attempt > 0 {
@@ -247,6 +347,8 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 					}
 					requestLog.FailoverFrom = strings.Join(chain, " → ")
 				}
+				traceBytes, _ := json.Marshal(traceSteps)
+				requestLog.TraceJSON = string(traceBytes)
 				_ = h.store.UpdateLog(context.Background(), requestLog)
 			}
 			return nil
@@ -332,29 +434,67 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 						}
 						time.Sleep(100 * time.Millisecond)
 					}
+					fbStart := time.Now()
 					altResp, altErr := forwardDesktopRequest(c.Request.Context(), c.Request, body, altChan, protocol, effectiveModel, altModel)
-					if altErr == nil && altResp.status >= http.StatusOK && altResp.status < http.StatusMultipleChoices {
-						prefix := make([]byte, 4096)
-						n, rErr := altResp.body.Read(prefix)
-						if n > 0 || rErr == nil || rErr == io.EOF {
-							winningTtft = int(time.Since(startOverall) / time.Millisecond)
-							altResp.body = &prefixedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix[:n]), altResp.body), closer: altResp.body}
-							upstream = *altResp
-							winningChannel = altChan
-							winChan = altChan
-							failedAttempts = append(failedAttempts, fmt.Sprintf("%s 同模型供应商全部失败 -> 自动降级至备用模型 [%s](%s)", effectiveModel, altChan.Name, altModel))
-							routeErr = nil
-							if requestLog != nil && requestLog.ID > 0 {
-								requestLog.ChannelName = altChan.Name
-								requestLog.TtftMs = winningTtft
-								requestLog.LatencyMs = winningTtft
-								requestLog.IsFailover = true
-								requestLog.FailoverFrom = strings.Join(failedAttempts, " → ")
-								_ = h.store.UpdateLog(context.Background(), requestLog)
-							}
-							fallbackSucceeded = true
-							break
+					fbLatency := int(time.Since(fbStart) / time.Millisecond)
+					step := DesktopRequestTraceStep{
+						Index:       len(traceSteps) + 1,
+						ChannelName: altChan.Name,
+						ChannelID:   altChan.ID,
+						Endpoint:    altChan.Endpoint,
+						Model:       altModel,
+						Attempt:     fbAttempt + 1,
+						LatencyMs:   fbLatency,
+					}
+					if altErr != nil {
+						step.Error = altErr.Error()
+						step.RawError = altErr.Error()
+						traceSteps = append(traceSteps, step)
+						continue
+					}
+					if altResp.status < http.StatusOK || altResp.status >= http.StatusMultipleChoices {
+						errBytes, _ := io.ReadAll(io.LimitReader(altResp.body, 4096))
+						_ = altResp.body.Close()
+						rawErr := string(errBytes)
+						parsedErr := parseUpstreamErrorMessage(rawErr)
+						if parsedErr == "" {
+							parsedErr = fmt.Sprintf("HTTP %d", altResp.status)
 						}
+						step.StatusCode = altResp.status
+						step.Error = parsedErr
+						step.RawError = rawErr
+						traceSteps = append(traceSteps, step)
+						continue
+					}
+					prefix := make([]byte, 4096)
+					n, rErr := altResp.body.Read(prefix)
+					if n > 0 || rErr == nil || rErr == io.EOF {
+						winningTtft = int(time.Since(startOverall) / time.Millisecond)
+						altResp.body = &prefixedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix[:n]), altResp.body), closer: altResp.body}
+						upstream = *altResp
+						winningChannel = altChan
+						winChan = altChan
+						failedAttempts = append(failedAttempts, fmt.Sprintf("%s 降级至备用模型 [%s](%s)", effectiveModel, altChan.Name, altModel))
+						routeErr = nil
+						step.StatusCode = altResp.status
+						step.TtftMs = winningTtft
+						step.Succeeded = true
+						traceSteps = append(traceSteps, step)
+
+						if requestLog != nil && requestLog.ID > 0 {
+							requestLog.ChannelName = altChan.Name
+							requestLog.UpstreamModel = altModel
+							requestLog.Endpoint = altChan.Endpoint
+							requestLog.TtftMs = winningTtft
+							requestLog.LatencyMs = winningTtft
+							requestLog.IsFailover = true
+							requestLog.FailoverFrom = strings.Join(failedAttempts, " → ")
+							traceBytes, _ := json.Marshal(traceSteps)
+							requestLog.TraceJSON = string(traceBytes)
+							_ = h.store.UpdateLog(context.Background(), requestLog)
+						}
+						fallbackSucceeded = true
+						break
 					}
 				}
 				if fallbackSucceeded {
@@ -374,6 +514,7 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 		if len(failedAttempts) > 0 {
 			failoverDesc = strings.Join(failedAttempts, " → ")
 		}
+		traceBytes, _ := json.Marshal(traceSteps)
 		if requestLog != nil && requestLog.ID > 0 {
 			requestLog.ChannelName = "全渠道失败"
 			requestLog.StatusCode = http.StatusBadGateway
@@ -382,6 +523,7 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 			requestLog.ErrorMessage = routeErr.Error()
 			requestLog.FailoverFrom = failoverDesc
 			requestLog.IsFailover = len(failedAttempts) > 1
+			requestLog.TraceJSON = string(traceBytes)
 			_ = h.store.UpdateLog(context.Background(), requestLog)
 		} else if h.store != nil {
 			_ = h.store.RecordLog(context.Background(), &service.DesktopRequestLog{
@@ -394,9 +536,13 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 				CompletionTokens: 0,
 				TotalTokens:      initialPromptTokens,
 				IsStream:         isStreamRequest,
+				ClientIP:         clientIP,
+				UserAgent:        userAgent,
+				RequestPath:      requestPath,
 				ErrorMessage:     routeErr.Error(),
 				FailoverFrom:     failoverDesc,
 				IsFailover:       len(failedAttempts) > 1,
+				TraceJSON:        string(traceBytes),
 				CreatedAt:        time.Now().UTC(),
 			})
 		}
@@ -415,10 +561,13 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 	}
 
 	channelName := "未知渠道"
+	endpointUrl := ""
 	if winChan != nil {
 		channelName = winChan.Name
+		endpointUrl = winChan.Endpoint
 	} else if winningChannel != nil {
 		channelName = winningChannel.Name
+		endpointUrl = winningChannel.Endpoint
 	}
 
 	failoverFrom := ""
@@ -431,12 +580,15 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 
 	if requestLog != nil && requestLog.ID > 0 {
 		requestLog.ChannelName = channelName
+		requestLog.Endpoint = endpointUrl
 		requestLog.IsStream = isStream
 		requestLog.IsFailover = isFailover
 		requestLog.FailoverFrom = failoverFrom
 		if requestLog.TtftMs == 0 {
 			requestLog.TtftMs = winningTtft
 		}
+		traceBytes, _ := json.Marshal(traceSteps)
+		requestLog.TraceJSON = string(traceBytes)
 		_ = h.store.UpdateLog(context.Background(), requestLog)
 	}
 
@@ -503,8 +655,19 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 			break
 		}
 	}
+
+	if isStream && len(tracker.leftover) > 0 {
+		tracker.Feed([]byte("\n"))
+	}
+
+	isClientAbort := false
+	if streamErr != nil {
+		if c.Request.Context().Err() != nil || isClientClosedConn(streamErr) {
+			isClientAbort = true
+		}
+	}
+
 	if requestLog != nil {
-		requestLog.StatusCode = upstream.status
 		requestLog.LatencyMs = int(time.Since(startOverall) / time.Millisecond)
 		if isStream {
 			if tracker.promptTokens > 0 {
@@ -515,6 +678,27 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 				requestLog.TotalTokens = tracker.totalTokens
 			} else {
 				requestLog.TotalTokens = requestLog.PromptTokens + requestLog.CompletionTokens
+			}
+
+			if tracker.sawDone || tracker.finishReason != "" {
+				requestLog.StatusCode = upstream.status
+				requestLog.ErrorMessage = ""
+				if tracker.finishReason != "" {
+					requestLog.FinishReason = tracker.finishReason
+				} else {
+					requestLog.FinishReason = "stop"
+				}
+			} else if isClientAbort && tracker.completionTokens > 0 {
+				requestLog.StatusCode = http.StatusOK
+				requestLog.FinishReason = "client_abort"
+				requestLog.ErrorMessage = fmt.Sprintf("客户端在接收 %d 个 Token 后主动断开连接 (正常完成或停止生成)", tracker.completionTokens)
+			} else if streamErr != nil {
+				requestLog.StatusCode = http.StatusBadGateway
+				requestLog.FinishReason = "error"
+				requestLog.ErrorMessage = "流式传输中断: " + streamErr.Error()
+			} else {
+				requestLog.StatusCode = upstream.status
+				requestLog.FinishReason = "stop"
 			}
 		} else {
 			p, c, tot := extractNonStreamingTokens(nonStreamBuf.Bytes())
@@ -529,11 +713,19 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 			} else {
 				requestLog.TotalTokens = requestLog.PromptTokens + requestLog.CompletionTokens
 			}
+			if streamErr != nil {
+				requestLog.StatusCode = http.StatusBadGateway
+				requestLog.FinishReason = "error"
+				requestLog.ErrorMessage = "传输中断: " + streamErr.Error()
+			} else {
+				requestLog.StatusCode = upstream.status
+				requestLog.FinishReason = "stop"
+			}
 		}
-		if streamErr != nil {
-			requestLog.StatusCode = http.StatusBadGateway
-			requestLog.ErrorMessage = "stream interrupted: " + streamErr.Error()
-		}
+
+		traceBytes, _ := json.Marshal(traceSteps)
+		requestLog.TraceJSON = string(traceBytes)
+
 		if requestLog.ID > 0 {
 			_ = h.store.UpdateLog(context.Background(), requestLog)
 		} else if h.store != nil {
@@ -545,9 +737,13 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 type desktopUpstreamError struct {
 	status     int
 	retryAfter time.Duration
+	message    string
 }
 
 func (e *desktopUpstreamError) Error() string {
+	if e.message != "" {
+		return fmt.Sprintf("upstream returned HTTP %d: %s", e.status, e.message)
+	}
 	return fmt.Sprintf("upstream returned HTTP %d", e.status)
 }
 
@@ -984,6 +1180,8 @@ type streamTokenTracker struct {
 	hasExactTokens   bool
 	estimatedChars   int
 	leftover         string
+	sawDone          bool
+	finishReason     string
 }
 
 func (t *streamTokenTracker) Feed(chunk []byte) {
@@ -1000,13 +1198,37 @@ func (t *streamTokenTracker) Feed(chunk []byte) {
 			continue
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
+		if payload == "[DONE]" {
+			t.sawDone = true
+			continue
+		}
+		if payload == "" {
 			continue
 		}
 
 		var generic map[string]any
 		if err := json.Unmarshal([]byte(payload), &generic); err != nil {
 			continue
+		}
+
+		// Check for finish_reason in choices
+		if choices, ok := generic["choices"].([]any); ok && len(choices) > 0 {
+			if choice0, ok := choices[0].(map[string]any); ok {
+				if fr, ok := choice0["finish_reason"].(string); ok && fr != "" {
+					t.finishReason = fr
+					if fr == "stop" || fr == "length" || fr == "tool_calls" {
+						t.sawDone = true
+					}
+				}
+			}
+		}
+
+		// Anthropic message_stop
+		if typ, _ := generic["type"].(string); typ == "message_stop" {
+			t.sawDone = true
+			if t.finishReason == "" {
+				t.finishReason = "stop"
+			}
 		}
 
 		// 1. Standard OpenAI usage in chunk

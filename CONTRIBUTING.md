@@ -31,14 +31,16 @@ pnpm --dir frontend install --frozen-lockfile
 Run the standard checks:
 
 ```bash
-go test ./...
+# Run all checks via Makefile from the repository root:
+make test
+
+# Or run backend and frontend checks individually:
+go -C backend test ./...
 pnpm --dir frontend run lint:check
 pnpm --dir frontend run typecheck
 pnpm --dir frontend run test:run
 pnpm --dir frontend run build
 ```
-
-Run Go commands from `backend/` unless the command explicitly uses a path.
 
 ## Pull Requests
 
