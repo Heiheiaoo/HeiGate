@@ -27,15 +27,6 @@ make build-desktop-macos
 open dist/desktop/HeiGate.app
 ```
 
-### 本地桌面网关
-
-```bash
-make build-desktop
-DATA_DIR="$PWD/desktop-data" ./dist/desktop/heigate-desktop -desktop
-```
-
-打开 `http://127.0.0.1:8080/desktop`。
-
 ### 安装已打包应用
 
 ```bash
@@ -78,13 +69,13 @@ HeiGate 是一个 macOS 桌面 AI API 网关，用于管理本地上游渠道并
 ## 核心功能
 
 - **多账号管理** - 支持多种上游账号类型（OAuth、API Key）
-- **API Key 分发** - 为用户生成和管理 API Key
-- **精确计费** - Token 级别的用量追踪和成本计算
+- **本地 API Key** - 为编程客户端生成和管理本地 API Key
+- **请求分析** - Token 级别用量追踪和请求分析
 - **智能调度** - 智能账号选择，支持粘性会话
 - **并发控制** - 用户级和账号级并发限制
 - **速率限制** - 可配置的请求和 Token 速率限制
 - **管理后台** - Web 界面进行监控和管理
-- **外部系统集成** - 支持通过 iframe 嵌入外部系统（如工单等），扩展管理后台功能
+- **桌面打包** - GitHub Actions 自动构建 Apple 芯片 `.dmg` 和 `.zip` 安装包
 
 
 ## 技术栈

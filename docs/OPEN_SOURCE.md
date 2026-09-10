@@ -44,7 +44,7 @@ or an unsustainable support burden.
 
 ## Third-Party Services
 
-HeiGate integrates with external model and payment providers. Names and marks
-belong to their respective owners. Integrations do not imply endorsement, and
-operators remain responsible for provider terms, local law, data protection,
-and account security.
+HeiGate integrates with external model providers. Names and marks belong to
+their respective owners. Integrations do not imply endorsement, and operators
+remain responsible for provider terms, local law, data protection, and account
+security.

@@ -1147,16 +1147,16 @@ function generateGrokCodexFiles(baseUrl: string, apiKey: string): FileConfig[] {
   switch (shell) {
     case 'cmd':
       envPath = 'Command Prompt'
-      envContent = `set SUB2API_API_KEY=${apiKey}`
+      envContent = `set HEIGATE_API_KEY=${apiKey}`
       break
     case 'powershell':
     case 'windows':
       envPath = 'PowerShell'
-      envContent = `$env:SUB2API_API_KEY="${apiKey}"`
+      envContent = `$env:HEIGATE_API_KEY="${apiKey}"`
       break
     default:
       envPath = 'Terminal'
-      envContent = `export SUB2API_API_KEY="${apiKey}"`
+      envContent = `export HEIGATE_API_KEY="${apiKey}"`
   }
 
   const configContent = `# Codex CLI → HeiGate Grok group
@@ -1165,7 +1165,7 @@ function generateGrokCodexFiles(baseUrl: string, apiKey: string): FileConfig[] {
 # Text models only. Image/video: grok-imagine-image / grok-imagine-video on media endpoints.
 # Switch model: grok-4.5 | grok-4.3 | grok-build-0.1 | grok-4.20-multi-agent-0309 (text / web_search)
 
-model_provider = "sub2api"
+model_provider = "heigate"
 model = "${model}"
 model_catalog_json = "${escapeTomlBasicString(codexModelCatalogPath.value)}"
 # Optional:
@@ -1176,11 +1176,11 @@ model_catalog_json = "${escapeTomlBasicString(codexModelCatalogPath.value)}"
 # network_access = "enabled"
 # windows_wsl_setup_acknowledged = true
 
-[model_providers.sub2api]
+[model_providers.heigate]
 name = "HeiGate Grok"
 base_url = "${baseUrl}"
 # Prefer env_key (variable NAME). Do not combine with experimental_bearer_token.
-env_key = "SUB2API_API_KEY"
+env_key = "HEIGATE_API_KEY"
 # Fallback only if you cannot set env (discouraged — keeps secret on disk):
 # experimental_bearer_token = "${apiKey}"
 wire_api = "responses"
@@ -1236,20 +1236,20 @@ function generateRoutedCodexFiles(
   }
   const label = labels[platform]
   const envContent = isWindows
-    ? `$env:SUB2API_API_KEY="${apiKey}"`
-    : `export SUB2API_API_KEY="${apiKey}"`
+    ? `$env:HEIGATE_API_KEY="${apiKey}"`
+    : `export HEIGATE_API_KEY="${apiKey}"`
 
   const configContent = `# Codex CLI -> HeiGate ${label} group
-model_provider = "sub2api"
+model_provider = "heigate"
 model = "${model}"
 review_model = "${model}"
 disable_response_storage = true
 model_catalog_json = "${escapeTomlBasicString(codexModelCatalogPath.value)}"
 
-[model_providers.sub2api]
+[model_providers.heigate]
 name = "HeiGate ${label}"
 base_url = "${baseUrl}"
-env_key = "SUB2API_API_KEY"
+env_key = "HEIGATE_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = false`
