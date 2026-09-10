@@ -79,11 +79,8 @@ func userHomeDir() string {
 	if u, err := user.Current(); err == nil && u.HomeDir != "" && filepath.IsAbs(u.HomeDir) {
 		return u.HomeDir
 	}
-	if username := os.Getenv("USER"); username != "" {
-		candidate := filepath.Join("/Users", username)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
+	if username := os.Getenv("USER"); username != "" && username != "." && username != ".." && !strings.ContainsAny(username, `/\`) {
+		return filepath.Join("/Users", username)
 	}
 	if _, err := os.Stat("/Users/heihei"); err == nil {
 		return "/Users/heihei"
@@ -308,13 +305,13 @@ func (h *Handler) writeClaudeDesktopConfig(ctx context.Context, baseURL string, 
 	}
 
 	gatewayProfile := map[string]any{
-		"coworkEgressAllowedHosts":    []string{"*"},
+		"coworkEgressAllowedHosts":     []string{"*"},
 		"disableDeploymentModeChooser": true,
-		"inferenceProvider":           "gateway",
-		"inferenceGatewayBaseUrl":     baseURL,
-		"inferenceGatewayApiKey":      h.key,
-		"inferenceGatewayAuthScheme":  "bearer",
-		"inferenceModels":             infModels,
+		"inferenceProvider":            "gateway",
+		"inferenceGatewayBaseUrl":      baseURL,
+		"inferenceGatewayApiKey":       h.key,
+		"inferenceGatewayAuthScheme":   "bearer",
+		"inferenceModels":              infModels,
 	}
 
 	profileBytes, err := json.MarshalIndent(gatewayProfile, "", "  ")
@@ -343,8 +340,8 @@ func (h *Handler) writeClaudeDesktopConfig(ctx context.Context, baseURL string, 
 	}
 	for _, targetDir := range targetDirs {
 		_ = os.MkdirAll(targetDir, 0o755)
-			_ = os.WriteFile(filepath.Join(targetDir, heigateClaudeProfileUUID+".json"), profileBytes, 0o600)
-			_ = os.WriteFile(filepath.Join(targetDir, "heigate-gateway.json"), profileBytes, 0o600)
+		_ = os.WriteFile(filepath.Join(targetDir, heigateClaudeProfileUUID+".json"), profileBytes, 0o600)
+		_ = os.WriteFile(filepath.Join(targetDir, "heigate-gateway.json"), profileBytes, 0o600)
 		_ = os.WriteFile(filepath.Join(targetDir, "_meta.json"), metaBytes, 0o644)
 	}
 
@@ -465,7 +462,7 @@ func (h *Handler) writeCodexConfig(baseURL string, models []string, defaultModel
 	configPath := filepath.Join(codexDir, "config.toml")
 	var existingLines []string
 	if data, err := os.ReadFile(configPath); err == nil {
-		_ = os.WriteFile(configPath+".bak.heigate", data, 0o600)
+		_ = os.WriteFile(configPath+".bak.heigate", data, 0o600) //nolint:gosec // The desktop app writes only inside the local user's ~/.codex directory.
 		existingLines = strings.Split(string(data), "\n")
 	}
 
@@ -517,7 +514,7 @@ func (h *Handler) writeCodexConfig(baseURL string, models []string, defaultModel
 	}
 
 	finalContent := strings.Join(append(headerLines, newLines...), "\n")
-	if err := os.WriteFile(configPath, []byte(finalContent), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(finalContent), 0o600); err != nil { //nolint:gosec // The desktop app writes only inside the local user's ~/.codex directory.
 		return fmt.Errorf("写入 config.toml 失败: %w", err)
 	}
 

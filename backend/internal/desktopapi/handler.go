@@ -610,7 +610,7 @@ func (h *Handler) systemInfo(c *gin.Context) {
 	}
 	dbPath := filepath.Join(dataDir, "desktop.sqlite")
 	var dbSize int64
-	if stat, err := os.Stat(dbPath); err == nil {
+	if stat, err := os.Stat(dbPath); err == nil { //nolint:gosec // dbPath is local-only and is never accepted from a request.
 		dbSize = stat.Size()
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{

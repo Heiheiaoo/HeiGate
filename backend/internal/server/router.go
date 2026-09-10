@@ -121,13 +121,12 @@ func registerDesktopRoutes(r *gin.Engine) {
 	if err := runner.Start(context.Background()); err != nil {
 		log.Printf("desktop API runner startup failed: %v", err)
 	}
-	api := desktopapi.NewHandler(store, runner)
 	gatewayKey, err := desktopapi.LoadOrCreateGatewayKey(filepath.Join(dataDir, "gateway.key"))
 	if err != nil {
 		log.Printf("desktop API disabled: create gateway key failed: %v", err)
 		return
 	}
-	api = desktopapi.NewHandlerWithGatewayKey(store, runner, gatewayKey)
+	api := desktopapi.NewHandlerWithGatewayKey(store, runner, gatewayKey)
 	group := r.Group("/desktop/api", desktopapi.LoopbackOnly())
 	api.RegisterRoutes(group)
 	gateway := r.Group("", desktopapi.LoopbackOnly(), desktopapi.GatewayAuth(gatewayKey))

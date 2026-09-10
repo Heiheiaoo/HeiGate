@@ -452,7 +452,7 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 		c.Header("X-HeiGate-Failover", failoverFrom)
 	}
 	c.Status(upstream.status)
-	defer upstream.body.Close()
+	defer func() { _ = upstream.body.Close() }()
 	flusher, isFlusher := c.Writer.(http.Flusher)
 	buf := make([]byte, 4096)
 	var streamErr error
@@ -484,7 +484,7 @@ func (h *Handler) forward(c *gin.Context, protocol desktopGatewayProtocol) {
 				}
 			} else {
 				if nonStreamBuf.Len() < 64*1024 {
-					nonStreamBuf.Write(buf[:n])
+					_, _ = nonStreamBuf.Write(buf[:n])
 				}
 			}
 
@@ -858,8 +858,8 @@ func forwardDesktopRequest(ctx context.Context, inbound *http.Request, body []by
 		// Streaming SSE response
 		pr, pw := io.Pipe()
 		go func() {
-			defer response.Body.Close()
-			defer pw.Close()
+			defer func() { _ = response.Body.Close() }()
+			defer func() { _ = pw.Close() }()
 
 			scanner := bufio.NewScanner(response.Body)
 			state := apicompat.NewChatCompletionsToAnthropicStreamState(anthropicReq.Model)
@@ -913,9 +913,10 @@ func forwardDesktopRequest(ctx context.Context, inbound *http.Request, body []by
 
 	// Case B: Direct forwarding
 	path := "/v1/chat/completions"
-	if protocol == desktopGatewayProtocolAnthropic {
+	switch protocol {
+	case desktopGatewayProtocolAnthropic:
 		path = "/v1/messages"
-	} else if protocol == desktopGatewayProtocolResponses {
+	case desktopGatewayProtocolResponses:
 		path = "/v1/responses"
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(channel.Endpoint), "/")

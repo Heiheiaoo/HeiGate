@@ -178,7 +178,7 @@ FROM desktop_channels ORDER BY priority ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list desktop channels: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	channels := make([]*DesktopChannel, 0)
 	for rows.Next() {
@@ -467,7 +467,7 @@ FROM desktop_request_logs ORDER BY id DESC LIMIT ?`
 	if err != nil {
 		return nil, fmt.Errorf("list desktop request logs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var logs []*DesktopRequestLog
 	for rows.Next() {
@@ -777,7 +777,7 @@ ORDER BY day ASC`
 	if err != nil {
 		return nil, fmt.Errorf("query analytics daily trends: %w", err)
 	}
-	defer dailyRows.Close()
+	defer func() { _ = dailyRows.Close() }()
 
 	for dailyRows.Next() {
 		var d DailyAnalyticsTrend
@@ -810,7 +810,7 @@ ORDER BY model, cnt DESC`
 	topChannels := make(map[string]string)
 	channelRows, err := s.db.QueryContext(ctx, topChannelQuery, topChanArgs...)
 	if err == nil {
-		defer channelRows.Close()
+		defer func() { _ = channelRows.Close() }()
 		for channelRows.Next() {
 			var m, ch string
 			var count int64
@@ -845,7 +845,7 @@ ORDER BY COUNT(1) DESC`
 	if err != nil {
 		return nil, fmt.Errorf("query analytics model stats: %w", err)
 	}
-	defer modelRows.Close()
+	defer func() { _ = modelRows.Close() }()
 
 	for modelRows.Next() {
 		var m ModelAnalyticsStat
@@ -890,7 +890,7 @@ ORDER BY COUNT(1) DESC`
 
 	chRows, err := s.db.QueryContext(ctx, chanStatsQuery, chanArgs...)
 	if err == nil {
-		defer chRows.Close()
+		defer func() { _ = chRows.Close() }()
 		for chRows.Next() {
 			var ch ChannelAnalyticsStat
 			if err := chRows.Scan(

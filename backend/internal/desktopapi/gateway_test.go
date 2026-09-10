@@ -99,7 +99,11 @@ func TestForwardDesktopRequestTranslatesAnthropicStreamingToOpenAISSE(t *testing
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/chat/completions", r.URL.Path)
 		w.Header().Set("Content-Type", "text/event-stream")
-		flusher := w.(http.Flusher)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "expected streaming response writer", http.StatusInternalServerError)
+			return
+		}
 		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")
 		flusher.Flush()
 		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"},\"finish_reason\":\"stop\"}]}\n\n")
@@ -136,7 +140,7 @@ func TestForwardDesktopRequestTranslatesAnthropicStreamingToOpenAISSE(t *testing
 func TestGatewayModelsReturnsEnabledUniqueModels(t *testing.T) {
 	store, err := service.OpenDesktopChannelStore(":memory:")
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	channel := &service.DesktopChannel{
 		Name: "local", Provider: service.MonitorProviderOpenAI, APIMode: service.MonitorAPIModeResponses,
 		Endpoint: "https://example.com", APIKey: "secret", PrimaryModel: "gpt-test", ExtraModels: []string{"gpt-test", "claude-test"}, Enabled: true,
@@ -196,7 +200,7 @@ func TestStreamLogsSSE(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store, err := service.OpenDesktopChannelStore("file:desktop_stream_test?mode=memory&cache=shared")
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	runner := service.NewDesktopChannelProbeRunner(store)
 	h := NewHandlerWithGatewayKey(store, runner, "test-key")
@@ -215,7 +219,7 @@ func TestStreamLogsSSE(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")

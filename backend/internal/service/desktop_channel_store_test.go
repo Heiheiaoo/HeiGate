@@ -14,7 +14,7 @@ func TestDesktopChannelStoreCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestDesktopChannelStoreLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestDesktopChannelStoreSubscribeLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestDesktopChannelStorePruneAndAutoPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -258,7 +258,7 @@ func TestDesktopChannelStoreGetAnalytics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)

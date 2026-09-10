@@ -169,12 +169,13 @@ func (r *DesktopChannelProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*
 	var totalLatency int
 	var firstErr string
 	for _, r := range results {
-		if r.Status == MonitorStatusOperational {
+		switch r.Status {
+		case MonitorStatusOperational:
 			okCount++
 			if r.LatencyMs != nil {
 				totalLatency += *r.LatencyMs
 			}
-		} else if r.Status == MonitorStatusDegraded {
+		case MonitorStatusDegraded:
 			degradedCount++
 			if r.LatencyMs != nil {
 				totalLatency += *r.LatencyMs
@@ -182,7 +183,7 @@ func (r *DesktopChannelProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*
 			if firstErr == "" && r.Message != "" {
 				firstErr = fmt.Sprintf("[%s] %s", r.Model, r.Message)
 			}
-		} else {
+		default:
 			errCount++
 			if firstErr == "" && r.Message != "" {
 				firstErr = fmt.Sprintf("[%s] %s", r.Model, r.Message)

@@ -120,7 +120,7 @@ func runDesktopServer() {
 	if err != nil {
 		log.Fatalf("Failed to open desktop channel store: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Perform initial automatic log pruning on startup
 	if del, err := store.AutoPruneLogs(context.Background()); err == nil && del > 0 {

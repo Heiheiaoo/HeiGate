@@ -92,15 +92,16 @@ var (
 // CanonicalModelKey computes a clean, lowercased alphanumeric key used to group
 // aliases of the same base model together across providers.
 // Examples:
-//   "qwen3.8-flash"        -> "qwen38flash"
-//   "qwen3.8-flash-free"   -> "qwen38flash"
-//   "qwen-3.8-flash"       -> "qwen38flash"
-//   "Qwen/Qwen3.8-Flash"   -> "qwen38flash"
-//   "Qwen3.8-Flash-Next"   -> "qwen38flash"
-//   "glm-5.3-flash"        -> "glm53flash"
-//   "glm-5.3-flash-free"   -> "glm53flash"
-//   "z-ai/glm-5.3-free"    -> "glm53" (or matches glm53flash via alias map)
-//   "deepseek-v4-flash-0731" -> "deepseekv4flash"
+//
+//	"qwen3.8-flash"        -> "qwen38flash"
+//	"qwen3.8-flash-free"   -> "qwen38flash"
+//	"qwen-3.8-flash"       -> "qwen38flash"
+//	"Qwen/Qwen3.8-Flash"   -> "qwen38flash"
+//	"Qwen3.8-Flash-Next"   -> "qwen38flash"
+//	"glm-5.3-flash"        -> "glm53flash"
+//	"glm-5.3-flash-free"   -> "glm53flash"
+//	"z-ai/glm-5.3-free"    -> "glm53" (or matches glm53flash via alias map)
+//	"deepseek-v4-flash-0731" -> "deepseekv4flash"
 func CanonicalModelKey(raw string) string {
 	cleaned := CleanModelName(raw)
 	return punctuationCleaner.ReplaceAllString(strings.ToLower(cleaned), "")
@@ -135,10 +136,11 @@ func CleanModelName(raw string) string {
 
 // KnownEquivalencePairs maps alternative keys to their canonical equivalents.
 // For example, in many free aggregators:
-//   "glm53" <=> "glm53flash" (e.g. z-ai/glm-5.3-free vs glm-5.3-flash)
-//   "deepseekchat" <=> "deepseekv3"
-//   "deepseekreasoner" <=> "deepseekr1"
-//   "qwen38flash" <=> "qwen38flashnext"
+//
+//	"glm53" <=> "glm53flash" (e.g. z-ai/glm-5.3-free vs glm-5.3-flash)
+//	"deepseekchat" <=> "deepseekv3"
+//	"deepseekreasoner" <=> "deepseekr1"
+//	"qwen38flash" <=> "qwen38flashnext"
 var knownEquivalenceGroups = [][]string{
 	{"glm53", "glm53flash"},
 	{"glm4", "glm4flash", "glm4air"},

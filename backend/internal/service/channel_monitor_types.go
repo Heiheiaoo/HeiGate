@@ -134,12 +134,12 @@ type ChannelMonitorUpdateParams struct {
 
 // CheckResult 单个模型一次检测的结果。
 type CheckResult struct {
-	Model         string                       `json:"model"`
-	Status        string                       `json:"status"` // operational / degraded / failed / error
-	LatencyMs     *int                         `json:"latency_ms,omitempty"`
-	PingLatencyMs *int                         `json:"ping_latency_ms,omitempty"`
-	Message       string                       `json:"message,omitempty"`
-	CheckedAt     time.Time                    `json:"checked_at"`
+	Model         string    `json:"model"`
+	Status        string    `json:"status"` // operational / degraded / failed / error
+	LatencyMs     *int      `json:"latency_ms,omitempty"`
+	PingLatencyMs *int      `json:"ping_latency_ms,omitempty"`
+	Message       string    `json:"message,omitempty"`
+	CheckedAt     time.Time `json:"checked_at"`
 	// Quota 配额模式附带快照（quota 模式唯一数据；quota_probe 挂在主模型行）。
 	Quota *domain.MonitorQuotaSnapshot `json:"quota,omitempty"`
 }

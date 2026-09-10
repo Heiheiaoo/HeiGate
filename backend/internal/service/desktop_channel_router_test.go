@@ -15,7 +15,7 @@ func TestDesktopChannelRouterFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestDesktopChannelRouterCooldownAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestDesktopChannelRouterCanonicalMatching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	store, err := NewDesktopChannelStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestDesktopChannelRouterCanonicalMatching(t *testing.T) {
 	expectedModels := map[string]string{
 		"Nexus": "glm-5.3-flash-free",
 		"B.AI":  "glm-5.3-flash",
-		"芝公益站": "z-ai/glm-5.3-free",
+		"芝公益站":  "z-ai/glm-5.3-free",
 	}
 	for _, c := range candidates {
 		target, _, ok := FindChannelModelForRequest(c, "glm-5.3-flash")
