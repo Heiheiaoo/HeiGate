@@ -70,7 +70,7 @@ Use concise Conventional Commit-style subjects where practical:
 
 - `feat: add latency-aware desktop routing`
 - `fix: preserve API key when editing a channel`
-- `docs: clarify Docker secret setup`
+- `docs: clarify desktop release setup`
 - `test: cover desktop failover behavior`
 
 ## Review Standards

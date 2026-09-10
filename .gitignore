@@ -54,7 +54,6 @@ pnpm-debug.log*
 .env.*.local
 *.env
 !.env.example
-docker-compose.override.yml
 
 # ===================
 # IDE / 编辑器
@@ -110,15 +109,12 @@ backend/data/
 # 本地配置文件（包含敏感信息）
 # ===================
 backend/config.yaml
-deploy/config.yaml
 backend/.installed
 
 # ===================
 # 其他
 # ===================
 tests
-!deploy/tests/
-!deploy/tests/**
 CLAUDE.md
 .claude
 scripts
@@ -129,7 +125,6 @@ scripts
 code-reviews/
 AGENTS.md
 backend/cmd/server/server
-deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*

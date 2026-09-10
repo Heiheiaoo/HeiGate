@@ -22,6 +22,8 @@ notices.
 - Breaking changes must be called out in release notes with a migration path.
 - Database and configuration migrations should be backwards-aware and tested.
 - Security releases may contain limited details until a fix is available.
+- GitHub Releases publish the signed-off source tag as a macOS Apple silicon
+  desktop package (`.dmg` and `.zip`); Docker images are not published.
 
 ## Compatibility Policy
 
@@ -30,8 +32,8 @@ and plugin contracts are compatibility surfaces. Changes to these surfaces
 should be additive when possible. Deprecations should be documented before
 removal.
 
-Desktop mode and server mode share code but have different trust and storage
-boundaries. A change must be tested in each affected mode.
+The supported distribution is the macOS desktop application. Desktop mode uses
+local SQLite storage and must be tested on the supported macOS architecture.
 
 ## Maintenance Decisions
 

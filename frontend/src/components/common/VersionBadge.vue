@@ -652,8 +652,6 @@ import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
 
 const GITHUB_REPO = 'Heiheiaoo/HeiGate'
-// GHCR image published by the release workflow (tags carry no "v" prefix).
-const DOCKER_IMAGE = 'ghcr.io/heiheiaoo/heigate'
 
 const { t } = useI18n()
 
@@ -698,37 +696,22 @@ const rollbackError = ref('')
 
 const { copied, copyToClipboard } = useClipboard()
 
-// Manual rollback methods differ by deployment: script installs use install.sh,
-// docker deployments pin the image tag instead
-const manualTab = ref<'script' | 'docker'>('script')
+// Desktop releases are installed from their GitHub release page.
+const manualTab = ref<'release'>('release')
 
 const manualTabs = computed(() => [
-  { key: 'script' as const, label: t('version.deployScript') },
-  { key: 'docker' as const, label: t('version.deployDocker') }
+  { key: 'release' as const, label: t('version.releasePage') }
 ])
 
 const scriptRollbackCommand = computed(() => {
   if (!selectedRollbackVersion.value) return ''
   const tag = `v${selectedRollbackVersion.value}`
-  return `curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/${tag}/deploy/install.sh | sudo bash -s -- rollback ${tag}`
+  return `https://github.com/${GITHUB_REPO}/releases/tag/${tag}`
 })
 
-const dockerRollbackCommand = computed(() => {
-  if (!selectedRollbackVersion.value) return ''
-  return [
-    `# ${t('version.dockerEditCompose')}`,
-    `image: ${DOCKER_IMAGE}:${selectedRollbackVersion.value}`,
-    '',
-    `# ${t('version.dockerRecreate')}`,
-    'docker compose up -d'
-  ].join('\n')
-})
+const activeManualCommand = computed(() => scriptRollbackCommand.value)
 
-const activeManualCommand = computed(() =>
-  manualTab.value === 'docker' ? dockerRollbackCommand.value : scriptRollbackCommand.value
-)
-
-// Only show update check for release builds (binary/docker deployment)
+// Only show update check for packaged release builds.
 const isReleaseBuild = computed(() => buildType.value === 'release')
 
 function toggleDropdown() {
@@ -779,7 +762,7 @@ function resetRollbackState() {
   rollbackVersionsError.value = ''
   selectedRollbackVersion.value = ''
   rollbackError.value = ''
-  manualTab.value = 'script'
+  manualTab.value = 'release'
 }
 
 async function toggleRollbackPanel() {

@@ -88,7 +88,7 @@ func main() {
 
 	// Check if setup is needed
 	if setup.NeedsSetup() {
-		// Check if auto-setup is enabled (for Docker deployment)
+		// Check if environment-based auto-setup is enabled.
 		if setup.AutoSetupEnabled() {
 			log.Println("Auto setup mode enabled...")
 			if err := setup.AutoSetupFromEnv(); err != nil {

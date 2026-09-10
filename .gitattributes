@@ -17,6 +17,3 @@ backend/migrations/*.sql text eol=lf
 # YAML/YML 配置文件
 *.yaml text eol=lf
 *.yml text eol=lf
-
-# Dockerfile
-Dockerfile text eol=lf

@@ -30,25 +30,18 @@ build-frontend:
 # first; runtime data is kept outside the repository through DATA_DIR.
 build-desktop: build-frontend
 	@mkdir -p dist/desktop
-	@if command -v go >/dev/null 2>&1; then \
-		cd backend && CGO_ENABLED=0 go build -tags embed -trimpath -ldflags="-s -w" -o ../dist/desktop/heigate-desktop ./cmd/server; \
-	elif command -v docker >/dev/null 2>&1; then \
-		docker run --rm -v "$(PWD)":/src -v /tmp/heigate-go-cache:/go -w /src/backend \
-			-e GOTOOLCHAIN=auto -e GOMAXPROCS=1 -e GOOS=linux -e GOARCH=arm64 -e CGO_ENABLED=0 golang:1.26-bookworm \
-			go build -tags embed -trimpath -ldflags="-s -w" -o /src/dist/desktop/heigate-desktop ./cmd/server; \
-	else \
-		echo "需要 Go 1.27+ 或 Docker 才能编译桌面服务" >&2; exit 1; \
-	fi
+	@command -v go >/dev/null 2>&1 || (echo "需要安装 Go 1.27+ 才能编译桌面服务" >&2; exit 1)
+	@cd backend && CGO_ENABLED=0 go build -tags embed -trimpath -ldflags="-s -w" -o ../dist/desktop/heigate-desktop ./cmd/server
 
 # Build a double-clickable macOS ARM64 application bundle.
 build-desktop-macos: build-frontend
 	@mkdir -p dist/desktop/HeiGate.app/Contents/MacOS dist/desktop/HeiGate.app/Contents/Resources
-	@docker run --rm -v "$(PWD)":/src -v /tmp/heigate-go-cache:/go -w /src/backend \
-		-e GOTOOLCHAIN=auto -e GOMAXPROCS=1 -e GOOS=darwin -e GOARCH=arm64 -e CGO_ENABLED=0 golang:1.26-bookworm \
-		go build -tags embed -trimpath -ldflags="-s -w" -o "/src/dist/desktop/HeiGate.app/Contents/MacOS/heigate-desktop-bin" ./cmd/server
-	@cp desktop/macos/Info.plist dist/desktop/HeiGate.app/Contents/Info.plist
+	@command -v go >/dev/null 2>&1 || (echo "需要安装 Go 1.27+ 才能编译 macOS 桌面应用" >&2; exit 1)
+	@command -v swiftc >/dev/null 2>&1 || (echo "需要安装 Xcode Command Line Tools 才能编译 macOS 桌面应用" >&2; exit 1)
+	@cd backend && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags embed -trimpath -ldflags="-s -w" -o "../dist/desktop/HeiGate.app/Contents/MacOS/heigate-desktop-bin" ./cmd/server
+	@VERSION="$${VERSION:-$$(tr -d '\r\n' < backend/cmd/server/VERSION)}"; sed "s/<string>0\.1\.0<\/string>/<string>$${VERSION}<\/string>/g" desktop/macos/Info.plist > dist/desktop/HeiGate.app/Contents/Info.plist
 	@cp desktop/macos/AppIcon.icns dist/desktop/HeiGate.app/Contents/Resources/AppIcon.icns
-	@swiftc -O -framework Cocoa -framework WebKit desktop/macos/HeiGateDesktop.swift -o dist/desktop/HeiGate.app/Contents/MacOS/HeiGate
+	@swiftc -target arm64-apple-macos12.0 -O -framework Cocoa -framework WebKit desktop/macos/HeiGateDesktop.swift -o dist/desktop/HeiGate.app/Contents/MacOS/HeiGate
 	@chmod +x dist/desktop/HeiGate.app/Contents/MacOS/HeiGate dist/desktop/HeiGate.app/Contents/MacOS/heigate-desktop-bin
 
 # 运行测试（后端 + 前端）

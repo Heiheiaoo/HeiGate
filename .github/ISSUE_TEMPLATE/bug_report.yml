@@ -13,8 +13,6 @@ body:
       options:
         - Desktop application
         - Desktop gateway binary
-        - Docker Compose
-        - Standalone server
         - Development environment
         - Other
     validations:

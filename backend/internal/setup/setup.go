@@ -40,22 +40,22 @@ func setupDefaultAdminConcurrency() int {
 }
 
 // GetDataDir returns the data directory for storing config and lock files.
-// Priority: DATA_DIR env > /app/data (if exists and writable) > current directory
+// Priority: DATA_DIR env > /app/data (if exists and writable) > current directory.
 func GetDataDir() string {
 	// Check DATA_DIR environment variable first
 	if dir := os.Getenv("DATA_DIR"); dir != "" {
 		return dir
 	}
 
-	// Check if /app/data exists and is writable (Docker environment)
-	dockerDataDir := "/app/data"
-	if info, err := os.Stat(dockerDataDir); err == nil && info.IsDir() {
+	// Keep compatibility with an externally managed application data directory.
+	dataDir := "/app/data"
+	if info, err := os.Stat(dataDir); err == nil && info.IsDir() {
 		// Try to check if writable by creating a temp file
-		testFile := dockerDataDir + "/.write_test"
+		testFile := dataDir + "/.write_test"
 		if f, err := os.Create(testFile); err == nil {
 			_ = f.Close()
 			_ = os.Remove(testFile)
-			return dockerDataDir
+			return dataDir
 		}
 	}
 
@@ -535,7 +535,7 @@ func generateSecret(length int) (string, error) {
 }
 
 // =============================================================================
-// Auto Setup for Docker Deployment
+// Environment-based automatic setup
 // =============================================================================
 
 // AutoSetupEnabled checks if auto setup is enabled via environment variable
@@ -563,12 +563,12 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 }
 
 // AutoSetupFromEnv performs automatic setup using environment variables
-// This is designed for Docker deployment where all config is passed via env vars
+// This is designed for environments where all configuration is passed via env vars.
 func AutoSetupFromEnv() error {
 	logger.LegacyPrintf("setup", "%s", "Auto setup enabled, configuring from environment variables...")
 	logger.LegacyPrintf("setup", "Data directory: %s", GetDataDir())
 
-	// Get timezone from TZ or TIMEZONE env var (TZ is standard for Docker)
+	// Get timezone from TZ or TIMEZONE env var.
 	tz := getEnvOrDefault("TZ", "")
 	if tz == "" {
 		tz = getEnvOrDefault("TIMEZONE", "Asia/Shanghai")
