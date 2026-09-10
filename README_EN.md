@@ -82,29 +82,21 @@ HeiGate is a macOS desktop AI API gateway for managing local upstream channels a
 | Desktop shell | macOS Cocoa + WebKit |
 
 
-## Antigravity Support
-
-HeiGate supports [Antigravity](https://antigravity.so/) accounts. After authorization, dedicated endpoints are available for Claude and Gemini models.
-
-### Dedicated Endpoints
-
-| Endpoint | Model |
-|----------|-------|
-| `/antigravity/v1/messages` | Claude models |
-| `/antigravity/v1beta/` | Gemini models |
+## Client Configuration
+ 
+Once the HeiGate desktop application is running locally (default port `8080`), it can be used directly as a standard Anthropic / OpenAI proxy for developer tools:
 
 ### Claude Code Configuration
 
 ```bash
-export ANTHROPIC_BASE_URL="http://localhost:8080/antigravity"
-export ANTHROPIC_AUTH_TOKEN="sk-xxx"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_AUTH_TOKEN="sk-xxx" # Local API key generated in HeiGate
 ```
 
-### Hybrid Scheduling Mode
+### OpenAI Compatible Clients (Cursor, VS Code Extensions, etc.)
 
-Antigravity accounts support optional **hybrid scheduling**. When enabled, the general endpoints `/v1/messages` and `/v1beta/` will also route requests to Antigravity accounts.
-
-> **⚠️ Warning**: Anthropic Claude and Antigravity Claude **cannot be mixed within the same conversation context**. Use groups to isolate them properly.
+- **API Base URL**: `http://127.0.0.1:8080/v1`
+- **API Key**: Local API key generated in HeiGate
 
 ---
 
