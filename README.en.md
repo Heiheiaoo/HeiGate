@@ -1,0 +1,130 @@
+<div align="center">
+
+<img src="assets/logo.svg" alt="HeiGate" width="120" />
+
+# HeiGate
+
+**An AI API gateway that runs on your own Mac. Multi-channel routing, automatic failover, usage tracking — your data never leaves the machine.**
+
+[![CI](https://github.com/Heiheiaoo/heigate/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/heigate/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8.svg)](https://go.dev/)
+[![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)](https://vuejs.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+[中文](README.md) | English
+
+</div>
+
+## What it does
+
+If you juggle several AI API endpoints — official keys, a relay, a local Ollama — HeiGate puts them behind one local address. Your coding tools point at `http://127.0.0.1:8080` and it handles the rest:
+
+- **Multi-channel routing** — pick a channel by latency, a quality score, or round robin
+- **Automatic failover** — when a channel errors, rate-limits, or times out, the request moves to the next one; repeated failures trip a circuit breaker with a cooldown
+- **Protocol translation** — talk to an OpenAI-compatible upstream with an Anthropic client; requests and responses (including streaming) are converted on the fly
+- **Health probes** — each model periodically gets a tiny arithmetic question, which proves the key, endpoint, and model name actually work together
+- **Usage tracking** — every request records its channel, model, tokens, time to first token, and failover chain locally, with daily/model/channel rollups
+- **Client integration** — point the Claude desktop app or Codex at HeiGate with one click
+
+Everything lives in a SQLite file under `~/Library/Application Support/HeiGate`. Nothing is uploaded. The gateway listens on loopback only.
+
+## Install
+
+Download the `.dmg` from [Releases](https://github.com/Heiheiaoo/heigate/releases) and drag it to Applications. Builds target Apple silicon (arm64).
+
+The bundle is not signed or notarised, so macOS will block the first launch: go to System Settings → Privacy & Security and choose "Open Anyway". Verify your download first:
+
+```bash
+shasum -a 256 -c checksums.txt
+```
+
+## Connect your tools
+
+Start HeiGate, add a channel in the UI, then use the client integration page to configure the Claude desktop app or Codex automatically. Manual setup works with any tool.
+
+The gateway key shown in the UI authenticates clients. It is stored at `~/Library/Application Support/HeiGate/gateway.key` with `0600` permissions.
+
+**Claude Code**
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_AUTH_TOKEN="<gateway key from the UI>"
+```
+
+**OpenAI-compatible clients** (Cursor, VS Code extensions, and so on)
+
+- Base URL: `http://127.0.0.1:8080/v1`
+- API key: `<gateway key from the UI>`
+
+The gateway exposes `POST /v1/messages`, `POST /v1/chat/completions`, `POST /v1/responses`, and `GET /v1/models`.
+
+## Build from source
+
+You need Go 1.27+, Node 22+, and pnpm 9+. Building the `.app` also requires the Xcode Command Line Tools.
+
+```bash
+make app     # build dist/HeiGate.app
+open dist/HeiGate.app
+
+make run     # run from source with data in ./desktop-data
+make test    # backend and frontend tests
+make help    # list every target
+```
+
+For development it is easier to run the two halves separately:
+
+```bash
+make run                          # terminal 1: gateway on 8080
+pnpm --dir frontend run dev       # terminal 2: Vite on 5273, proxying to 8080
+```
+
+## Configuration
+
+You normally don't need any. When you do, use environment variables:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `HEIGATE_HOST` | `127.0.0.1` | Listen address. **Setting a non-loopback address disables the local-only protections and is not recommended** |
+| `HEIGATE_PORT` | `8080` | Listen port |
+| `DATA_DIR` | `~/Library/Application Support/HeiGate` | Where the database and gateway key are stored |
+
+## Security design
+
+HeiGate opens an HTTP port on your machine, so it takes precautions:
+
+- Only loopback connections are accepted
+- The `Host` header must name the local machine, which defeats DNS rebinding
+- The management API checks `Origin` and `Sec-Fetch-Site`, and every write additionally requires a custom request header — a browser cannot add custom headers to a cross-origin "simple" request, so other web pages cannot forge actions on your behalf
+- Gateway endpoints require key authentication
+- Channel credentials are masked in API responses unless explicitly requested
+- A strict CSP; the UI loads nothing from the network
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Layout
+
+```
+cmd/heigate         entry point: wires routes and starts the HTTP server
+internal/api        local management API and gateway endpoints
+internal/channel    channel storage (SQLite), routing and failover, probe scheduling, model-name normalisation
+internal/probe      upstream health checks
+internal/protocol   Anthropic ↔ OpenAI translation, including streaming
+internal/middleware local-only guards, CSP, authentication
+internal/web        embeds the compiled UI
+frontend            Vue 3 interface
+desktop/macos       native Cocoa + WebKit shell
+```
+
+## Notes
+
+- Follow the terms of whichever AI providers you use. Relay or shared endpoints may violate some providers' agreements; that risk is yours to assess.
+- This project only routes requests locally. It ships no API credits and no accounts.
+- The project name and logo are unaffiliated with any provider and imply no endorsement.
+
+## Acknowledgements
+
+HeiGate is written independently. While designing the channel scheduling, failover, and probing approach for a local gateway, I studied the architecture of [sub2api](https://github.com/Wei-Shaw/sub2api) — thanks to that project for the ideas.
+
+## License
+
+[MIT](LICENSE) © 2026 Heiheiaoo

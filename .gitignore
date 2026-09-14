@@ -1,0 +1,45 @@
+# ---- Build outputs ----
+/dist/
+/frontend/dist/
+/internal/web/dist/*
+!/internal/web/dist/.keep
+/desktop/macos/HeiGate
+/desktop/macos/*.app
+*.dmg
+*.zip
+
+# ---- Go ----
+*.test
+*.out
+coverage.html
+/bin/
+
+# ---- Node ----
+node_modules/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*
+frontend/coverage/
+.vite/
+
+# ---- Runtime data (never commit) ----
+/desktop-data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+gateway.key
+.env
+.env.*
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# ---- Local notes ----
+/docs-local/
+CLAUDE.md
+AGENTS.md

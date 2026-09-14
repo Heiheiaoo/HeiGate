@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to package (for example v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  package:
+    name: Package for macOS (Apple silicon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the app bundle
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          make app VERSION="$VERSION"
+
+      - name: Create the archives and checksums
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          cd dist
+          ditto -c -k --keepParent HeiGate.app "HeiGate-macOS-arm64-${VERSION}.zip"
+          hdiutil create -volname HeiGate -srcfolder HeiGate.app -ov -format UDZO "HeiGate-macOS-arm64-${VERSION}.dmg"
+          shasum -a 256 HeiGate-macOS-arm64-*.zip HeiGate-macOS-arm64-*.dmg > checksums.txt
+          cat checksums.txt
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          body: |
+            HeiGate for macOS on Apple silicon (arm64).
+
+            The bundle is not code-signed or notarised. On first launch macOS
+            will ask for confirmation: open System Settings > Privacy &
+            Security and choose "Open Anyway".
+
+            Verify your download against `checksums.txt` before running it.
+          files: |
+            dist/HeiGate-macOS-arm64-*.zip
+            dist/HeiGate-macOS-arm64-*.dmg
+            dist/checksums.txt
