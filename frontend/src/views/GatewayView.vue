@@ -10,6 +10,8 @@ import {
   fetchUpstreamModels as apiFetchUpstreamModels,
   getChannel,
   getGatewayKey,
+  injectionCheck,
+  type ModelInjectionResult,
   getSystemInfo,
   listChannels,
   listLogs,
@@ -56,6 +58,10 @@ export type Channel = {
   circuitState?: 'closed' | 'open' | 'half_open'
   cooldownUntil?: string | null
   lastError?: string
+  injectionState?: 'unknown' | 'clean' | 'suspected' | 'detected' | 'error'
+  injectionTokens?: number | null
+  injectionContent?: string
+  injectionCheckedAt?: string | null
 }
 
 export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
@@ -1333,6 +1339,10 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     circuitState: item.circuitState,
     cooldownUntil: item.cooldownUntil,
     lastError: item.lastError,
+    injectionState: item.injectionState ?? 'unknown',
+    injectionTokens: item.injectionTokens ?? null,
+    injectionContent: item.injectionContent ?? '',
+    injectionCheckedAt: item.injectionCheckedAt ?? null,
   }
 }
 
@@ -1359,6 +1369,10 @@ function toDesktopChannel(channel: Channel): ApiChannel {
     failureCount: channel.failureCount ?? 0,
     circuitState: channel.circuitState ?? 'closed',
     cooldownUntil: channel.cooldownUntil ?? null,
+    injectionState: channel.injectionState ?? 'unknown',
+    injectionTokens: channel.injectionTokens ?? null,
+    injectionContent: channel.injectionContent ?? '',
+    injectionCheckedAt: channel.injectionCheckedAt ?? null,
   }
 }
 
@@ -1458,6 +1472,78 @@ async function duplicateChannel(channel: Channel) {
   channels.value.push(copy)
   await saveChannels()
   showToast(`已成功复制渠道“${channel.name}”`)
+}
+
+// ---- 注入检测 ----
+const showInjectionModal = ref(false)
+const injectionChannel = ref<Channel | null>(null)
+const isCheckingInjection = ref(false)
+const injectionResults = ref<ModelInjectionResult[]>([])
+
+function modelInjectionLabel(r: ModelInjectionResult): string {
+  switch (r.state) {
+    case 'clean': return '无注入'
+    case 'suspected': return `疑似 ${r.prompt_tokens}tok`
+    case 'detected': return `注入 ${r.prompt_tokens}tok`
+    case 'error': return '失败'
+    default: return '未知'
+  }
+}
+
+function injectionStateLabel(c: Channel): string {
+  switch (c.injectionState) {
+    case 'clean': return '无注入'
+    case 'suspected': return `疑似 ${c.injectionTokens ?? '?'}tok`
+    case 'detected': return `注入 ${c.injectionTokens ?? '?'}tok`
+    case 'error': return '检测失败'
+    default: return '未检测'
+  }
+}
+
+function openInjectionModal(channel: Channel) {
+  injectionChannel.value = channel
+  // Seed the list from the persisted primary-model result so the modal is not
+  // empty before a check runs.
+  if (channel.injectionState && channel.injectionState !== 'unknown') {
+    injectionResults.value = [{
+      model: channel.primaryModel || channel.modelNames?.[0] || '(主模型)',
+      state: channel.injectionState,
+      prompt_tokens: channel.injectionTokens ?? 0,
+      content: channel.injectionContent,
+      checked_at: channel.injectionCheckedAt ?? '',
+    }]
+  } else {
+    injectionResults.value = []
+  }
+  showInjectionModal.value = true
+}
+
+async function runInjectionCheck(all: boolean) {
+  const channel = injectionChannel.value
+  if (!channel || !channel.gatewayId || isCheckingInjection.value) return
+  isCheckingInjection.value = true
+  const results = await injectionCheck(channel.gatewayId, all)
+  isCheckingInjection.value = false
+  if (!results) {
+    showToast('注入检测请求失败，请检查网关状态')
+    return
+  }
+  injectionResults.value = results
+
+  const primary = results.find((r) => r.model === channel.primaryModel) ?? results[0]
+  if (primary) {
+    channel.injectionState = primary.state
+    channel.injectionTokens = primary.prompt_tokens
+    channel.injectionContent = primary.content || primary.message || ''
+    channel.injectionCheckedAt = primary.checked_at
+  }
+
+  const injected = results.filter((r) => r.state === 'detected').length
+  const suspected = results.filter((r) => r.state === 'suspected').length
+  if (injected > 0) showToast(`检测到 ${injected} 个模型有注入${suspected ? `，${suspected} 个疑似` : ''}`)
+  else if (suspected > 0) showToast(`${suspected} 个模型疑似轻度注入`)
+  else if (results.every((r) => r.state === 'clean')) showToast(`全部 ${results.length} 个模型均无注入`)
+  else showToast('注入检测完成，部分模型未能检测')
 }
 
 async function openEditChannel(channel: Channel) {
@@ -4509,7 +4595,8 @@ function handleContextMenu(event: MouseEvent) {
                 <tr>
                   <th style="width: 160px;">渠道名称</th>
                   <th style="width: 110px;">接口协议</th>
-                  <th style="width: 190px;">支持模型</th>
+                  <th style="width: 95px;">注入</th>
+                  <th style="width: 185px;">支持模型</th>
                   <th style="width: 170px;">健康状态</th>
                   <th style="width: 80px;">首字</th>
                   <th style="width: 165px;">上次探活</th>
@@ -4528,6 +4615,16 @@ function handleContextMenu(event: MouseEvent) {
                     <span class="font-medium text-main truncate block" :title="c.name">{{ c.name }}</span>
                   </td>
                   <td><span class="m26-proto-pill" :class="c.protocol">{{ protocolShortLabel(c.protocol) }}</span></td>
+                  <td>
+                    <button
+                      class="m26-inject-pill"
+                      :class="c.injectionState ?? 'unknown'"
+                      :title="c.injectionCheckedAt ? `上次检测: ${c.injectionCheckedAt.slice(0, 19).replace('T', ' ')}` : '点击检测该渠道是否被上游注入系统提示'"
+                      @click.stop="openInjectionModal(c)"
+                    >
+                      {{ injectionStateLabel(c) }}
+                    </button>
+                  </td>
                   <td class="cursor-pointer" @click="openModelLatencyModal(c)" title="点击查看全部模型与测速">
                     <span class="m26-model-badge primary">
                       <span class="badge-icon">⚡</span>
@@ -5344,6 +5441,74 @@ function handleContextMenu(event: MouseEvent) {
 
     <!-- Hidden Input for Import -->
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
+
+    <!-- MODAL: INJECTION CHECK -->
+    <div v-if="showInjectionModal" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
+      <div class="m26-modal-sheet m26-inject-sheet">
+        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+          <h3 class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
+          <button class="m26-close-btn" data-no-drag @click="showInjectionModal = false">✕</button>
+        </div>
+
+        <div class="m26-modal-body">
+          <div class="m26-inject-summary">
+            <span class="m26-inject-pill" :class="injectionChannel?.injectionState ?? 'unknown'">
+              {{ injectionStateLabel(injectionChannel!) }}
+            </span>
+            <span class="m26-inject-meta">
+              {{ injectionChannel?.injectionCheckedAt
+                ? `上次检测: ${injectionChannel.injectionCheckedAt.slice(0, 19).replace('T', ' ')}`
+                : '尚未检测过' }}
+            </span>
+          </div>
+          <p class="m26-inject-desc">
+            检测方法：向上游发送一条 1 token 的提问，比对上游返回的 prompt_tokens 与正常模板开销（约 20-80）。
+            膨胀即说明有服务器端注入的系统提示。内容提取依赖模型配合，拒绝复述不代表没有注入。
+            注入通常是站点级行为，只查主模型即可；若要确认该站是否按模型区别对待，可检测全部模型。
+          </p>
+
+          <div v-if="injectionResults.length" class="m26-inject-list">
+            <div
+              v-for="r in injectionResults"
+              :key="r.model"
+              class="m26-inject-row"
+              :class="{ expanded: r.content && (r.state === 'detected' || r.state === 'suspected') }"
+            >
+              <div class="m26-inject-row-head">
+                <span class="m26-inject-model" :title="r.model">{{ r.model }}</span>
+                <span class="m26-inject-pill" :class="r.state">{{ modelInjectionLabel(r) }}</span>
+              </div>
+              <pre
+                v-if="r.content && (r.state === 'detected' || r.state === 'suspected')"
+                class="m26-inject-content"
+              >{{ r.content }}</pre>
+              <div v-else-if="r.state === 'clean'" class="m26-inject-row-note">
+                输入 token 数 {{ r.prompt_tokens }}，在正常范围内。
+              </div>
+              <div v-else-if="r.message" class="m26-inject-row-note">{{ r.message }}</div>
+            </div>
+          </div>
+          <div v-else class="m26-inject-empty">尚未检测。</div>
+
+          <div class="m26-inject-actions">
+            <button
+              class="m26-btn-micro"
+              :disabled="isCheckingInjection"
+              @click="runInjectionCheck(false)"
+            >
+              {{ isCheckingInjection ? '检测中...' : '检测主模型' }}
+            </button>
+            <button
+              class="m26-btn-micro probe"
+              :disabled="isCheckingInjection"
+              @click="runInjectionCheck(true)"
+            >
+              {{ isCheckingInjection ? '检测中 (全部模型可能需数分钟)...' : '检测全部模型' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- MODAL: ADD CHANNEL -->
     <div v-if="showAddChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
@@ -8189,6 +8354,123 @@ function handleContextMenu(event: MouseEvent) {
 .m26-proto-pill.openai-responses {
   background: rgba(37, 99, 235, 0.12);
   color: #2563eb;
+}
+.m26-inject-pill {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.m26-inject-pill.unknown {
+  background: rgba(100, 116, 139, 0.12);
+  color: #64748b;
+}
+.m26-inject-pill.clean {
+  background: rgba(5, 150, 105, 0.12);
+  color: #059669;
+}
+.m26-inject-pill.suspected {
+  background: rgba(217, 119, 6, 0.14);
+  color: #b45309;
+}
+.m26-inject-pill.detected {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+.m26-inject-pill.error {
+  background: rgba(100, 116, 139, 0.12);
+  color: #94a3b8;
+}
+.m26-inject-sheet {
+  max-width: 720px;
+}
+.m26-inject-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.m26-inject-summary .m26-inject-pill {
+  cursor: default;
+  font-size: 11px;
+}
+.m26-inject-meta {
+  font-size: 12px;
+  color: var(--m26-text-secondary);
+}
+.m26-inject-desc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--m26-text-secondary);
+  margin: 0 0 12px;
+}
+.m26-inject-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+  margin-bottom: 12px;
+}
+.m26-inject-row {
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.m26-inject-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.m26-inject-model {
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: var(--m26-text-main, #0f172a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m26-inject-row-head .m26-inject-pill {
+  cursor: default;
+  flex-shrink: 0;
+}
+.m26-inject-row-note {
+  font-size: 11.5px;
+  color: var(--m26-text-secondary);
+  margin-top: 6px;
+}
+.m26-inject-row .m26-inject-content {
+  margin-top: 8px;
+  max-height: 240px;
+}
+.m26-inject-content {
+  max-height: 320px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 6px 0 0;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.m26-inject-empty {
+  font-size: 12px;
+  color: var(--m26-text-secondary);
+  padding: 16px 0;
+}
+.m26-inject-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .m26-interval-pill {
   font-size: 10px;

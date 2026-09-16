@@ -18,6 +18,10 @@ export type ApiChannel = {
   failureCount: number
   circuitState: 'closed' | 'open' | 'half_open'
   cooldownUntil: string | null
+  injectionState: 'unknown' | 'clean' | 'suspected' | 'detected' | 'error'
+  injectionTokens: number | null
+  injectionContent: string
+  injectionCheckedAt: string | null
 }
 
 type ApiRecord = Record<string, unknown>
@@ -52,6 +56,10 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
     failureCount: Number(record.failure_count ?? 0),
     circuitState: record.circuit_state === 'open' || record.circuit_state === 'half_open' ? record.circuit_state : 'closed',
     cooldownUntil: record.cooldown_until ? String(record.cooldown_until) : null,
+    injectionState: ['clean', 'suspected', 'detected', 'error'].includes(String(record.injection_state)) ? record.injection_state as ApiChannel['injectionState'] : 'unknown',
+    injectionTokens: record.injection_tokens == null ? null : Number(record.injection_tokens),
+    injectionContent: String(record.injection_content ?? ''),
+    injectionCheckedAt: record.injection_checked_at ? String(record.injection_checked_at) : null,
   }
 }
 
@@ -170,6 +178,30 @@ export async function probeChannelDetails(id: number, modelName?: string): Promi
       pingLatencyMs: item.ping_latency_ms ?? item.PingLatencyMs ?? null,
       message: item.message || item.Message || '',
     }))
+  } catch {
+    return null
+  }
+}
+
+export type ModelInjectionResult = {
+  model: string
+  state: 'clean' | 'suspected' | 'detected' | 'error'
+  prompt_tokens: number
+  content?: string
+  message?: string
+  checked_at: string
+}
+
+// Checks the primary model, or every model the channel lists when all is true.
+// The call is synchronous and a full sweep runs one request per model (plus an
+// extraction for injected ones), hence the long deadlines.
+export async function injectionCheck(id: number, all = false): Promise<ModelInjectionResult[] | null> {
+  try {
+    const query = all ? '?all=1' : ''
+    const response = await request(`/channels/${id}/injection-check${query}`, { method: 'POST' }, all ? 540_000 : 200_000)
+    if (!response.ok) return null
+    const payload = await response.json() as { data?: { results?: ModelInjectionResult[] } }
+    return payload.data?.results ?? []
   } catch {
     return null
   }

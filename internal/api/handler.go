@@ -65,6 +65,7 @@ func (h *Handler) RegisterRoutes(group *gin.RouterGroup) {
 	group.PUT("/channels/:id", h.update)
 	group.DELETE("/channels/:id", h.remove)
 	group.POST("/channels/:id/probe", h.probe)
+	group.POST("/channels/:id/injection-check", h.injectionCheck)
 	group.POST("/channels/:id/duplicate", h.duplicate)
 	group.POST("/channels/upstream-models", h.fetchUpstreamModels)
 	group.GET("/models", h.models)
@@ -214,6 +215,58 @@ func (h *Handler) remove(c *gin.Context) {
 	}
 	h.runner.Unschedule(id)
 	c.Status(http.StatusNoContent)
+}
+
+// injectionCheck measures the channel's server-side prompt injection: it sends
+// a one-token message, compares the upstream-reported prompt tokens against
+// normal template overhead, and asks the model to reveal injected content when
+// inflated. By default only the primary model is checked; ?all=1 checks every
+// model the channel lists, which shows whether a station injects per-model.
+// The primary model's result is persisted for the channel list column.
+func (h *Handler) injectionCheck(c *gin.Context) {
+	id, ok := channelID(c)
+	if !ok {
+		return
+	}
+	ch, err := h.store.Get(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	models := []string{ch.PrimaryModel}
+	checkAll := c.Query("all") == "1" || c.Query("all") == "true"
+	if checkAll {
+		models = append(models, ch.ExtraModels...)
+	}
+
+	timeout := 3 * time.Minute
+	if checkAll {
+		timeout = 8 * time.Minute
+	}
+	checkCtx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
+
+	reports := probe.CheckInjectionModels(checkCtx, probe.Config{
+		Provider: ch.Provider,
+		APIMode:  ch.APIMode,
+		Endpoint: ch.Endpoint,
+		APIKey:   ch.APIKey,
+	}, models)
+
+	// The channel column reflects the primary model, the one real traffic uses
+	// first; per-model results are returned live rather than persisted.
+	for _, report := range reports {
+		if report.Model != ch.PrimaryModel {
+			continue
+		}
+		if err := h.store.SetInjection(c.Request.Context(), id, report.State, report.PromptTokens, report.Content); err != nil {
+			writeError(c, err)
+			return
+		}
+		break
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"results": reports}})
 }
 
 func (h *Handler) probe(c *gin.Context) {

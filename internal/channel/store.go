@@ -18,27 +18,31 @@ import (
 // Channel is the local-only channel record used by the desktop gateway.
 // It deliberately has no user, group, billing, or cloud-sync fields.
 type Channel struct {
-	ID                int64      `json:"id"`
-	Name              string     `json:"name"`
-	Provider          string     `json:"provider"`
-	APIMode           string     `json:"api_mode"`
-	Endpoint          string     `json:"endpoint"`
-	APIKey            string     `json:"api_key"`
-	PrimaryModel      string     `json:"primary_model"`
-	ExtraModels       []string   `json:"extra_models"`
-	Enabled           bool       `json:"enabled"`
-	IntervalSeconds   int        `json:"interval_seconds"`
-	LastStatus        string     `json:"last_status"`
-	LastLatencyMs     *int       `json:"last_latency_ms"`
-	LastTTFTMs        *int       `json:"last_ttft_ms"`
-	LastPingLatencyMs *int       `json:"last_ping_latency_ms"`
-	LastError         string     `json:"last_error"`
-	LastCheckedAt     *time.Time `json:"last_checked_at"`
-	FailureCount      int        `json:"failure_count"`
-	CircuitState      string     `json:"circuit_state"`
-	CooldownUntil     *time.Time `json:"cooldown_until"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ID                 int64      `json:"id"`
+	Name               string     `json:"name"`
+	Provider           string     `json:"provider"`
+	APIMode            string     `json:"api_mode"`
+	Endpoint           string     `json:"endpoint"`
+	APIKey             string     `json:"api_key"`
+	PrimaryModel       string     `json:"primary_model"`
+	ExtraModels        []string   `json:"extra_models"`
+	Enabled            bool       `json:"enabled"`
+	IntervalSeconds    int        `json:"interval_seconds"`
+	LastStatus         string     `json:"last_status"`
+	LastLatencyMs      *int       `json:"last_latency_ms"`
+	LastTTFTMs         *int       `json:"last_ttft_ms"`
+	LastPingLatencyMs  *int       `json:"last_ping_latency_ms"`
+	LastError          string     `json:"last_error"`
+	LastCheckedAt      *time.Time `json:"last_checked_at"`
+	FailureCount       int        `json:"failure_count"`
+	CircuitState       string     `json:"circuit_state"`
+	CooldownUntil      *time.Time `json:"cooldown_until"`
+	InjectionState     string     `json:"injection_state"`
+	InjectionTokens    *int       `json:"injection_tokens"`
+	InjectionContent   string     `json:"injection_content"`
+	InjectionCheckedAt *time.Time `json:"injection_checked_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // LogEvent represents a real-time event for desktop request logs.
@@ -77,6 +81,10 @@ CREATE TABLE IF NOT EXISTS desktop_channels (
   failure_count INTEGER NOT NULL DEFAULT 0,
   circuit_state TEXT NOT NULL DEFAULT 'closed',
   cooldown_until TEXT,
+  injection_state TEXT NOT NULL DEFAULT 'unknown',
+  injection_tokens INTEGER,
+  injection_content TEXT NOT NULL DEFAULT '',
+  injection_checked_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -157,6 +165,10 @@ func (s *Store) initialize(ctx context.Context) error {
 		"ALTER TABLE desktop_channels ADD COLUMN circuit_state TEXT NOT NULL DEFAULT 'closed'",
 		"ALTER TABLE desktop_channels ADD COLUMN cooldown_until TEXT",
 		"ALTER TABLE desktop_channels ADD COLUMN last_ttft_ms INTEGER",
+		"ALTER TABLE desktop_channels ADD COLUMN injection_state TEXT NOT NULL DEFAULT 'unknown'",
+		"ALTER TABLE desktop_channels ADD COLUMN injection_tokens INTEGER",
+		"ALTER TABLE desktop_channels ADD COLUMN injection_content TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE desktop_channels ADD COLUMN injection_checked_at TEXT",
 		"ALTER TABLE desktop_request_logs ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0",
@@ -206,7 +218,9 @@ func (s *Store) List(ctx context.Context) ([]*Channel, error) {
 SELECT id, name, provider, api_mode, endpoint, api_key, primary_model,
        extra_models_json, enabled, interval_seconds, last_status,
        last_latency_ms, last_ttft_ms, last_ping_latency_ms, last_error, last_checked_at,
-       failure_count, circuit_state, cooldown_until, created_at, updated_at
+       failure_count, circuit_state, cooldown_until,
+       injection_state, injection_tokens, injection_content, injection_checked_at,
+       created_at, updated_at
 FROM desktop_channels ORDER BY id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list desktop channels: %w", err)
@@ -232,7 +246,9 @@ func (s *Store) Get(ctx context.Context, id int64) (*Channel, error) {
 SELECT id, name, provider, api_mode, endpoint, api_key, primary_model,
        extra_models_json, enabled, interval_seconds, last_status,
        last_latency_ms, last_ttft_ms, last_ping_latency_ms, last_error, last_checked_at,
-       failure_count, circuit_state, cooldown_until, created_at, updated_at
+       failure_count, circuit_state, cooldown_until,
+       injection_state, injection_tokens, injection_content, injection_checked_at,
+       created_at, updated_at
 FROM desktop_channels WHERE id = ?`, id)
 	channel, err := scanChannel(row)
 	if err != nil {
@@ -275,14 +291,17 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
 		channel.PrimaryModel, string(extraModels), channel.Enabled, channel.IntervalSeconds,
 		channel.LastStatus, channel.LastLatencyMs, channel.LastTTFTMs, channel.LastPingLatencyMs,
 		channel.LastError, nullableTime(channel.LastCheckedAt), channel.FailureCount, channel.CircuitState,
-		nullableTime(channel.CooldownUntil), channel.CreatedAt.UTC().Format(time.RFC3339Nano), channel.UpdatedAt.UTC().Format(time.RFC3339Nano)}
+		nullableTime(channel.CooldownUntil), channel.InjectionState, nullableInt(channel.InjectionTokens),
+		channel.InjectionContent, nullableTime(channel.InjectionCheckedAt),
+		channel.CreatedAt.UTC().Format(time.RFC3339Nano), channel.UpdatedAt.UTC().Format(time.RFC3339Nano)}
 	if channel.ID == 0 {
 		result, err := s.db.ExecContext(ctx, `INSERT INTO desktop_channels
  (name, provider, api_mode, endpoint, api_key, primary_model, extra_models_json,
   enabled, interval_seconds, last_status, last_latency_ms, last_ttft_ms,
   last_ping_latency_ms, last_error, last_checked_at, failure_count, circuit_state,
-  cooldown_until, created_at, updated_at)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
+  cooldown_until, injection_state, injection_tokens, injection_content, injection_checked_at,
+  created_at, updated_at)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
 		if err != nil {
 			return fmt.Errorf("insert desktop channel: %w", err)
 		}
@@ -294,7 +313,8 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
  name=?, provider=?, api_mode=?, endpoint=?, api_key=?, primary_model=?, extra_models_json=?,
  enabled=?, interval_seconds=?, last_status=?, last_latency_ms=?, last_ttft_ms=?,
  last_ping_latency_ms=?, last_error=?, last_checked_at=?, failure_count=?, circuit_state=?,
- cooldown_until=?, created_at=?, updated_at=?
+ cooldown_until=?, injection_state=?, injection_tokens=?, injection_content=?, injection_checked_at=?,
+ created_at=?, updated_at=?
  WHERE id=?`, args...); err != nil {
 		return fmt.Errorf("update desktop channel: %w", err)
 	}
@@ -330,6 +350,28 @@ func (s *Store) UpdateRuntime(ctx context.Context, id int64, mutate func(*Channe
 	return s.Save(ctx, fresh)
 }
 
+// SetInjection persists an injection-check result. A focused UPDATE so it
+// never races a concurrent channel edit.
+func (s *Store) SetInjection(ctx context.Context, id int64, state string, tokens int, content string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE desktop_channels
+SET injection_state = ?, injection_tokens = ?, injection_content = ?, injection_checked_at = ?, updated_at = ?
+WHERE id = ?`,
+		state, nullableInt(&tokens), content, time.Now().UTC().Format(time.RFC3339Nano),
+		time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return fmt.Errorf("save injection result: %w", err)
+	}
+	return nil
+}
+
+func nullableInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
 func (s *Store) Delete(ctx context.Context, id int64) error {
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM desktop_channels WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete desktop channel: %w", err)
@@ -356,13 +398,14 @@ func scanChannel(scanner rowScanner) (*Channel, error) {
 	var channel Channel
 	var modelsJSON string
 	var enabled int
-	var lastLatency, lastTTFT, lastPing sql.NullInt64
-	var lastChecked, cooldownUntil, createdAt, updatedAt sql.NullString
+	var lastLatency, lastTTFT, lastPing, injectTokens sql.NullInt64
+	var lastChecked, cooldownUntil, injectChecked, createdAt, updatedAt sql.NullString
 	if err := scanner.Scan(&channel.ID, &channel.Name, &channel.Provider, &channel.APIMode,
 		&channel.Endpoint, &channel.APIKey, &channel.PrimaryModel, &modelsJSON, &enabled,
 		&channel.IntervalSeconds, &channel.LastStatus, &lastLatency, &lastTTFT,
 		&lastPing, &channel.LastError, &lastChecked, &channel.FailureCount, &channel.CircuitState,
-		&cooldownUntil, &createdAt, &updatedAt); err != nil {
+		&cooldownUntil, &channel.InjectionState, &injectTokens, &channel.InjectionContent, &injectChecked,
+		&createdAt, &updatedAt); err != nil {
 		return nil, fmt.Errorf("scan desktop channel: %w", err)
 	}
 	channel.Enabled = enabled != 0
@@ -381,6 +424,11 @@ func scanChannel(scanner rowScanner) (*Channel, error) {
 		value := int(lastPing.Int64)
 		channel.LastPingLatencyMs = &value
 	}
+	if injectTokens.Valid {
+		value := int(injectTokens.Int64)
+		channel.InjectionTokens = &value
+	}
+	channel.InjectionCheckedAt = parseTime(injectChecked)
 	channel.LastCheckedAt = parseTime(lastChecked)
 	channel.CooldownUntil = parseTime(cooldownUntil)
 	if channel.CircuitState == "" {
