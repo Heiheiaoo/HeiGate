@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	RoutePriority     = "priority"      // Legacy alias for smart_quality
 	RouteSmartQuality = "smart_quality" // Dynamic quality scoring
 	RouteLatency      = "latency"       // Lowest latency first
 	RouteRoundRobin   = "round_robin"   // Load balancing round robin
@@ -73,7 +72,11 @@ func (r *Router) CandidatesMatching(ctx context.Context, model, strategy string,
 			// Lazy half-open recovery: the first request after the cooldown is
 			// allowed through as a probe instead of requiring a timer goroutine.
 			channel.CircuitState = CircuitHalfOpen
-			_ = r.store.Save(context.Background(), channel)
+			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
+				if fresh.CircuitState == CircuitOpen {
+					fresh.CircuitState = CircuitHalfOpen
+				}
+			})
 		}
 		if channel.CircuitState == CircuitHalfOpen {
 			healthy = append(healthy, channel)
@@ -141,7 +144,9 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 			channel.CooldownUntil = nil
 			channel.LastLatencyMs = &latency
 			channel.LastCheckedAt = timePtr(time.Now().UTC())
-			_ = r.store.Save(context.Background(), channel)
+			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
+				copyRuntimeState(fresh, channel)
+			})
 			return channel, nil
 		}
 		lastErr = err
@@ -159,7 +164,9 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 		}
 		channel.LastLatencyMs = &latency
 		channel.LastCheckedAt = timePtr(time.Now().UTC())
-		_ = r.store.Save(context.Background(), channel)
+		_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
+			copyRuntimeState(fresh, channel)
+		})
 	}
 	return nil, fmt.Errorf("all desktop channels failed for model %q: %w", model, lastErr)
 }
@@ -168,10 +175,10 @@ func (r *Router) sortCandidates(channels []*Channel, model, strategy string) {
 	sort.SliceStable(channels, func(i, j int) bool {
 		switch strategy {
 		case RouteLatency:
-			return latencyOf(channels[i]) < latencyOf(channels[j])
+			return responsivenessOf(channels[i]) < responsivenessOf(channels[j])
 		case RouteRoundRobin:
-			return latencyOf(channels[i]) < latencyOf(channels[j])
-		case RouteSmartQuality, RoutePriority:
+			return responsivenessOf(channels[i]) < responsivenessOf(channels[j])
+		case RouteSmartQuality:
 			fallthrough
 		default:
 			return qualityScore(channels[i]) > qualityScore(channels[j])
@@ -212,7 +219,7 @@ func qualityScore(channel *Channel) int {
 		score -= 3000
 	}
 
-	lat := latencyOf(channel)
+	lat := responsivenessOf(channel)
 	if lat < 1000000 {
 		score -= lat
 	}
@@ -232,4 +239,14 @@ func latencyOf(channel *Channel) int {
 		return int(^uint(0) >> 1)
 	}
 	return *channel.LastLatencyMs
+}
+
+// responsivenessOf is the routing sort key: time to first token when the probe
+// measured it, total latency otherwise. Clients consume streams, so the wait
+// they feel is the first token, not the end of generation.
+func responsivenessOf(channel *Channel) int {
+	if channel.LastTTFTMs != nil && *channel.LastTTFTMs > 0 {
+		return *channel.LastTTFTMs
+	}
+	return latencyOf(channel)
 }

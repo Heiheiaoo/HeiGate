@@ -121,14 +121,7 @@ func run(host string, port int) error {
 	handler.SetGatewayBaseURL(baseURL)
 
 	gin.SetMode(gin.ReleaseMode)
-	router := gin.New()
-	router.Use(middleware.Recovery(), middleware.SecurityHeaders())
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "version": version})
-	})
-	handler.RegisterRoutes(router.Group("/api", middleware.SameOriginOnly()))
-	handler.RegisterGatewayRoutes(router.Group("", middleware.LoopbackOnly(), middleware.BearerAuth(gatewayKey)))
-	router.NoRoute(web.Handler())
+	router := newRouter(handler, gatewayKey)
 
 	server := &http.Server{
 		Handler:           router,
@@ -171,6 +164,23 @@ func run(host string, port int) error {
 		slog.Warn("forced shutdown", "error", err)
 	}
 	return nil
+}
+
+// newRouter wires the HTTP surface: the health endpoint the desktop shell
+// polls, the local management API, and the gateway endpoints.
+func newRouter(handler *api.Handler, gatewayKey string) *gin.Engine {
+	router := gin.New()
+	router.Use(middleware.Recovery(), middleware.SecurityHeaders())
+	router.GET("/health", func(c *gin.Context) {
+		// The macOS shell polls this endpoint and requires mode=="desktop" so a
+		// different local service bound to the same port is not mistaken for
+		// the gateway. Dropping this field hangs app startup until it times out.
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "mode": "desktop", "version": version})
+	})
+	handler.RegisterRoutes(router.Group("/api", middleware.SameOriginOnly()))
+	handler.RegisterGatewayRoutes(router.Group("", middleware.LoopbackOnly(), middleware.BearerAuth(gatewayKey)))
+	router.NoRoute(web.Handler())
+	return router
 }
 
 func pruneLoop(ctx context.Context, store *channel.Store) {

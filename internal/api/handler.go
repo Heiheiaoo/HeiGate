@@ -110,7 +110,6 @@ type channelRequest struct {
 	ExtraModels     []string `json:"extra_models"`
 	Enabled         *bool    `json:"enabled"`
 	IntervalSeconds *int     `json:"interval_seconds"`
-	Priority        int      `json:"priority"`
 }
 
 func (h *Handler) list(c *gin.Context) {
@@ -158,6 +157,7 @@ func (h *Handler) create(c *gin.Context) {
 		return
 	}
 	h.runner.Schedule(ch)
+	h.runner.ProbeOnce(ch)
 	c.JSON(http.StatusCreated, gin.H{"data": sanitizeChannel(ch)})
 }
 
@@ -188,9 +188,13 @@ func (h *Handler) update(c *gin.Context) {
 	ch.CreatedAt = existing.CreatedAt
 	ch.LastStatus = existing.LastStatus
 	ch.LastLatencyMs = existing.LastLatencyMs
+	ch.LastTTFTMs = existing.LastTTFTMs
 	ch.LastPingLatencyMs = existing.LastPingLatencyMs
 	ch.LastError = existing.LastError
 	ch.LastCheckedAt = existing.LastCheckedAt
+	ch.FailureCount = existing.FailureCount
+	ch.CircuitState = existing.CircuitState
+	ch.CooldownUntil = existing.CooldownUntil
 	if err := h.store.Save(c.Request.Context(), ch); err != nil {
 		writeError(c, err)
 		return
@@ -369,15 +373,11 @@ func requestToChannel(input channelRequest) (*channel.Channel, error) {
 		Name: input.Name, Provider: input.Provider, APIMode: apiMode,
 		Endpoint: endpoint, APIKey: input.APIKey,
 		PrimaryModel: input.PrimaryModel, ExtraModels: input.ExtraModels, Enabled: enabled,
-		Priority: input.Priority,
 	}
 	if input.IntervalSeconds != nil {
 		ch.IntervalSeconds = *input.IntervalSeconds
 	} else {
 		ch.IntervalSeconds = 300
-	}
-	if ch.Priority == 0 {
-		ch.Priority = 1
 	}
 	if err := probe.ValidateInterval(ch.IntervalSeconds); err != nil {
 		return nil, err
@@ -452,6 +452,7 @@ func (h *Handler) duplicate(c *gin.Context) {
 		return
 	}
 	h.runner.Schedule(&dup)
+	h.runner.ProbeOnce(&dup)
 	c.JSON(http.StatusCreated, gin.H{"data": sanitizeChannel(&dup)})
 }
 
@@ -644,9 +645,6 @@ func (h *Handler) updateSettings(c *gin.Context) {
 	}
 	if input.RoutingStrategy != nil {
 		strategy := strings.TrimSpace(*input.RoutingStrategy)
-		if strategy == channel.RoutePriority {
-			strategy = channel.RouteSmartQuality
-		}
 		if strategy != channel.RouteSmartQuality && strategy != channel.RouteRoundRobin && strategy != channel.RouteLatency {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid routing strategy"})
 			return
@@ -661,17 +659,11 @@ func (h *Handler) updateSettings(c *gin.Context) {
 
 func (h *Handler) routeStrategy(c *gin.Context) string {
 	if strategy := strings.TrimSpace(c.Query("strategy")); strategy != "" {
-		if strategy == channel.RoutePriority {
-			return channel.RouteSmartQuality
-		}
 		return strategy
 	}
 	value, err := h.store.GetSetting(c.Request.Context(), "routing_strategy", channel.RouteLatency)
 	if err != nil {
 		return channel.RouteLatency
-	}
-	if value == channel.RoutePriority {
-		return channel.RouteSmartQuality
 	}
 	if value != channel.RouteLatency && value != channel.RouteSmartQuality && value != channel.RouteRoundRobin {
 		return channel.RouteLatency

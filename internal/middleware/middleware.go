@@ -5,6 +5,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"log/slog"
 	"net"
 	"net/http"
@@ -137,7 +138,7 @@ func BearerAuth(key string) gin.HandlerFunc {
 				provided = strings.TrimSpace(auth[7:])
 			}
 		}
-		if provided == "" || provided != key {
+		if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(key)) != 1 {
 			c.Header("WWW-Authenticate", `Bearer realm="HeiGate"`)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"type":  "error",

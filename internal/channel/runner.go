@@ -72,6 +72,22 @@ func (r *ProbeRunner) Schedule(channel *Channel) {
 	go r.runScheduled(ctx, channel.ID, interval)
 }
 
+// ProbeOnce runs a single probe in the background, independent of the timer
+// set up by Schedule. A newly created channel would otherwise show "unknown"
+// until its first interval elapses, and a manual-only channel (interval 0)
+// has no timer at all, so it would never be probed without this.
+func (r *ProbeRunner) ProbeOnce(channel *Channel) {
+	if r == nil || channel == nil || channel.ID == 0 || !channel.Enabled {
+		return
+	}
+	if channel.IntervalSeconds > 0 {
+		// Schedule already fires an immediate probe; a second one would just
+		// duplicate upstream traffic.
+		return
+	}
+	go r.runOne(r.ctx, channel.ID)
+}
+
 func (r *ProbeRunner) Unschedule(id int64) {
 	if r == nil {
 		return
@@ -134,7 +150,7 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		return nil, nil
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, probe.RequestTimeout+probe.PingTimeout+probe.ScheduleBuffer)
+	probeCtx, cancel := context.WithTimeout(ctx, probe.RunBudget())
 	defer cancel()
 	results, probeErr := probe.Run(probeCtx, probe.Config{
 		Provider:     channel.Provider,
@@ -156,9 +172,12 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 			channel.CircuitState = CircuitOpen
 		}
 		channel.LastLatencyMs = nil
+		channel.LastTTFTMs = nil
 		channel.LastPingLatencyMs = nil
 		channel.LastCheckedAt = timePtr(time.Now().UTC())
-		if err := r.store.Save(context.Background(), channel); err != nil {
+		if err := r.store.UpdateRuntime(context.Background(), id, func(fresh *Channel) {
+			copyRuntimeState(fresh, channel)
+		}); err != nil {
 			slog.Warn("desktop channel probe result save failed", "channel_id", id, "error", err)
 		}
 		return nil, probeErr
@@ -168,7 +187,7 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 	}
 
 	var okCount, degradedCount, errCount int
-	var totalLatency int
+	var totalLatency, totalTTFT int
 	var firstErr string
 	for _, r := range results {
 		switch r.Status {
@@ -177,10 +196,16 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 			if r.LatencyMs != nil {
 				totalLatency += *r.LatencyMs
 			}
+			if r.TTFTMs != nil {
+				totalTTFT += *r.TTFTMs
+			}
 		case probe.StatusDegraded:
 			degradedCount++
 			if r.LatencyMs != nil {
 				totalLatency += *r.LatencyMs
+			}
+			if r.TTFTMs != nil {
+				totalTTFT += *r.TTFTMs
 			}
 			if firstErr == "" && r.Message != "" {
 				firstErr = fmt.Sprintf("[%s] %s", r.Model, r.Message)
@@ -204,6 +229,17 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		channel.LastError = firstErr
 		channel.FailureCount++
 		channel.LastLatencyMs = nil
+		channel.LastTTFTMs = nil
+		// Same bookkeeping as the transport-failure path above and the forward
+		// path in Router.RouteCandidates: without it a channel whose probes all
+		// fail keeps a closed circuit and no cooldown forever, so it stays a
+		// routing candidate and is retried on every request.
+		cooldown := FailureCooldown(FailureInfo{Class: FailureProvider}, channel.FailureCount)
+		until := time.Now().UTC().Add(cooldown)
+		channel.CooldownUntil = &until
+		if channel.FailureCount >= 3 {
+			channel.CircuitState = CircuitOpen
+		}
 	} else if errCount > 0 || degradedCount > 0 {
 		channel.LastStatus = probe.StatusDegraded
 		if errCount > 0 {
@@ -214,6 +250,10 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		if okCount+degradedCount > 0 {
 			avgLatency := totalLatency / (okCount + degradedCount)
 			channel.LastLatencyMs = &avgLatency
+			if totalTTFT > 0 {
+				avgTTFT := totalTTFT / (okCount + degradedCount)
+				channel.LastTTFTMs = &avgTTFT
+			}
 		}
 	} else {
 		channel.LastStatus = probe.StatusOperational
@@ -224,9 +264,15 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		if okCount > 0 {
 			avgLatency := totalLatency / okCount
 			channel.LastLatencyMs = &avgLatency
+			if totalTTFT > 0 {
+				avgTTFT := totalTTFT / okCount
+				channel.LastTTFTMs = &avgTTFT
+			}
 		}
 	}
-	if err := r.store.Save(context.Background(), channel); err != nil {
+	if err := r.store.UpdateRuntime(context.Background(), id, func(fresh *Channel) {
+		copyRuntimeState(fresh, channel)
+	}); err != nil {
 		slog.Warn("desktop channel probe result save failed", "channel_id", id, "error", err)
 	}
 	return results, nil

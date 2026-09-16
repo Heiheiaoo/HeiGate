@@ -3,12 +3,14 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +25,55 @@ func answerFromPrompt(t *testing.T, prompt string) string {
 	a, _ := strconv.Atoi(m[1])
 	b, _ := strconv.Atoi(m[2])
 	return strconv.Itoa(a + b)
+}
+
+// writeSSE emits server-sent-event frames and the OpenAI [DONE] sentinel.
+func writeSSE(w http.ResponseWriter, events ...string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	for _, e := range events {
+		_, _ = io.WriteString(w, "data: "+e+"\n\n")
+	}
+	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+}
+
+func chatDelta(content string) string {
+	return fmt.Sprintf(`{"choices":[{"delta":{"content":%s}}]}`, mustJSON(content))
+}
+
+func chatReasoningDelta(thinking string) string {
+	return fmt.Sprintf(`{"choices":[{"delta":{"reasoning_content":%s}}]}`, mustJSON(thinking))
+}
+
+func anthropicTextDelta(text string) string {
+	return fmt.Sprintf(`{"type":"content_block_delta","delta":{"type":"text_delta","text":%s}}`, mustJSON(text))
+}
+
+func anthropicThinkingDelta(thinking string) string {
+	return fmt.Sprintf(`{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":%s}}`, mustJSON(thinking))
+}
+
+func responsesTextDelta(text string) string {
+	return fmt.Sprintf(`{"type":"response.output_text.delta","delta":%s}`, mustJSON(text))
+}
+
+func mustJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+func chatPrompt(t *testing.T, r *http.Request) string {
+	t.Helper()
+	var req struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+	require.NotEmpty(t, req.Messages)
+	return req.Messages[0].Content
 }
 
 func TestNormalizeEndpoint(t *testing.T) {
@@ -90,25 +141,19 @@ func TestAnswerMatches(t *testing.T) {
 }
 
 func TestRunOpenAIChatOperational(t *testing.T) {
+	// Two models are probed concurrently, so the handler runs on two goroutines.
+	var mu sync.Mutex
 	var gotAuth, gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			return
 		}
+		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
-		var req struct {
-			Model    string `json:"model"`
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		require.Len(t, req.Messages, 1)
-		answer := answerFromPrompt(t, req.Messages[0].Content)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"`+answer+`"}}]}`)
+		mu.Unlock()
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		writeSSE(w, chatDelta(answer))
 	}))
 	defer server.Close()
 
@@ -123,6 +168,8 @@ func TestRunOpenAIChatOperational(t *testing.T) {
 		require.Equal(t, StatusOperational, res.Status, res.Message)
 		require.NotNil(t, res.LatencyMs)
 		require.NotNil(t, res.PingLatencyMs)
+		require.NotNil(t, res.TTFTMs, "streaming probe must measure time to first token")
+		require.LessOrEqual(t, *res.TTFTMs, *res.LatencyMs)
 	}
 }
 
@@ -134,14 +181,8 @@ func TestRunAnthropicOperational(t *testing.T) {
 		require.Equal(t, "/v1/messages", r.URL.Path)
 		require.Equal(t, "sk-ant", r.Header.Get("x-api-key"))
 		require.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
-		var req struct {
-			Messages []struct {
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		answer := answerFromPrompt(t, req.Messages[0].Content)
-		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"Sure! `+answer+`"}]}`)
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		writeSSE(w, anthropicTextDelta("Sure! "+answer))
 	}))
 	defer server.Close()
 
@@ -149,6 +190,7 @@ func TestRunAnthropicOperational(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
+	require.NotNil(t, results[0].TTFTMs)
 }
 
 func TestRunResponsesOperational(t *testing.T) {
@@ -162,27 +204,140 @@ func TestRunResponsesOperational(t *testing.T) {
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		answer := answerFromPrompt(t, req.Input)
-		_, _ = io.WriteString(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"`+answer+`"}]}]}`)
+		writeSSE(w, responsesTextDelta(answer))
 	}))
 	defer server.Close()
 
 	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, APIMode: APIModeResponses, Endpoint: server.URL, PrimaryModel: "gpt-x"})
 	require.NoError(t, err)
 	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
+	require.NotNil(t, results[0].TTFTMs)
 }
 
-func TestRunWrongAnswerIsFailed(t *testing.T) {
+// TTFT must be the first visible text token, not the first reasoning token:
+// reasoning streams out immediately but the client still sees nothing.
+func TestRunTTFTSkipsReasoningDeltas(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			return
 		}
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"I cannot do math."}}]}`)
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+chatReasoningDelta("thinking about it...")+"\n\n")
+		time.Sleep(120 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: "+chatDelta(answer)+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
+	require.NotNil(t, results[0].TTFTMs)
+	require.GreaterOrEqual(t, *results[0].TTFTMs, 100, "TTFT should skip the reasoning phase")
+}
+
+// A model that answers entirely inside thinking has no text token; the TTFT
+// falls back to the first reasoning delta so the metric is still comparable.
+func TestRunTTFTFallsBackToReasoningOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		writeSSE(w, chatReasoningDelta("The answer is "+answer))
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status, "reasoning content must still be scanned for the answer")
+	require.NotNil(t, results[0].TTFTMs, "reasoning-only streams still report a TTFT")
+}
+
+func TestRunAnthropicThinkingFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		writeSSE(w, anthropicThinkingDelta("Answer: "+answer))
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderAnthropic, Endpoint: server.URL, APIKey: "sk-ant", PrimaryModel: "claude-x"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
+	require.NotNil(t, results[0].TTFTMs)
+}
+
+// Answer correctness is a soft signal: generation is capped and the probe stops
+// at the first content delta, so a truncated or chatty answer is normal. A
+// channel that streams content is usable, and the mismatch is only a note.
+func TestRunWrongAnswerStaysOperationalWithNote(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		writeSSE(w, chatDelta("I cannot do math."))
+	}))
+	defer server.Close()
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status)
+	require.Contains(t, results[0].Message, "answer not verified")
+}
+
+// A 2xx that streams nothing at all is the failure worth catching.
+func TestRunEmptyStreamIsFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{}}]}`)
 	}))
 	defer server.Close()
 	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
 	require.NoError(t, err)
 	require.Equal(t, StatusFailed, results[0].Status)
-	require.Contains(t, results[0].Message, "unexpected answer")
+	require.Contains(t, results[0].Message, "no content")
+}
+
+// The probe must stop reading at the first content delta: the rest of the
+// stream costs upstream tokens and, on a slow model, tens of seconds.
+func TestRunStopsAtFirstContentDelta(t *testing.T) {
+	var wroteAll bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		flusher, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+chatDelta("8")+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		// The probe should be gone before these land.
+		time.Sleep(300 * time.Millisecond)
+		for i := 0; i < 50; i++ {
+			if _, err := io.WriteString(w, "data: "+chatDelta("more")+"\n\n"); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		wroteAll = true
+	}))
+	defer server.Close()
+
+	start := time.Now()
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
+	require.Less(t, elapsed, 250*time.Millisecond, "probe should return at the first content delta, not read the whole stream")
+	require.False(t, wroteAll, "handler should not have finished writing the tail")
 }
 
 func TestRunHTTPErrorIsErrorAndRedacted(t *testing.T) {
@@ -218,14 +373,9 @@ func TestRunSlowAnswerIsDegraded(t *testing.T) {
 		if r.Method == http.MethodHead {
 			return
 		}
-		var req struct {
-			Messages []struct {
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		answer := answerFromPrompt(t, chatPrompt(t, r))
 		time.Sleep(60 * time.Millisecond)
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"`+answerFromPrompt(t, req.Messages[0].Content)+`"}}]}`)
+		writeSSE(w, chatDelta(answer))
 	}))
 	defer server.Close()
 	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
@@ -239,10 +389,145 @@ func TestRunRejectsInvalidConfig(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidProvider)
 }
 
-func TestExtractTextHandlesContentParts(t *testing.T) {
-	cfg := Config{Provider: ProviderOpenAI, APIMode: APIModeChatCompletions}
-	got := extractText(cfg, []byte(`{"choices":[{"message":{"content":[{"type":"text","text":"12"},{"type":"text","text":"3"}]}}]}`))
+func TestContentToTextHandlesParts(t *testing.T) {
+	got := contentToText([]byte(`[{"type":"text","text":"12"},{"type":"text","text":"3"}]`))
 	require.Equal(t, "123", got)
-	got = extractText(cfg, []byte(`{"choices":[{"message":{"content":"","reasoning_content":"thinking... 77"}}]}`))
-	require.Equal(t, "thinking... 77", got)
+	got = contentToText([]byte(`"plain"`))
+	require.Equal(t, "plain", got)
+	require.Equal(t, "", contentToText(nil))
+}
+
+// A shared upstream may drop the first request and answer the second; the probe
+// should not report the channel as failed on that single bad sample.
+func TestRunRetriesEmptyAnswerThenSucceeds(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls++
+		if calls == 1 {
+			writeSSE(w, `{"choices":[{"delta":{}}]}`)
+			return
+		}
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		writeSSE(w, chatDelta(answer))
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status)
+	require.Equal(t, 2, calls, "should have retried once after the empty answer")
+}
+
+func TestRunRetriesServerErrorThenSucceeds(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":"do request failed"}`)
+			return
+		}
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		writeSSE(w, chatDelta(answer))
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status)
+	require.Equal(t, 2, calls)
+}
+
+// A 4xx is deterministic (bad key, unknown model), so retrying only wastes time.
+func TestRunDoesNotRetryClientError(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"model not found"}`)
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusError, results[0].Status)
+	require.Equal(t, 1, calls, "4xx should not be retried")
+}
+
+// Retries stop at the limit: a persistently broken channel still reports failed.
+func TestRunStopsRetryingAfterLimit(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls++
+		writeSSE(w, `{"choices":[{"delta":{}}]}`)
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, results[0].Status)
+	require.Equal(t, probeRetries+1, calls)
+}
+
+// ProbeNow imposes RunBudget as the outer deadline. If that budget cannot fit a
+// first attempt plus every retry, the deadline silently truncates the retries
+// and a transient failure is reported as a hard one.
+func TestRunBudgetFitsEveryAttempt(t *testing.T) {
+	need := RequestTimeout + probeRetries*RetryTimeout
+	require.GreaterOrEqual(t, RunBudget(), need,
+		"RunBudget must cover the first attempt plus all retries")
+}
+
+func TestRunUsesFullRetryAllowance(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls++
+		time.Sleep(200 * time.Millisecond)
+		writeSSE(w, `{"choices":[{"delta":{}}]}`)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), RunBudget())
+	defer cancel()
+
+	results, err := Run(ctx, Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, probeRetries+1, calls, "all attempts should run within RunBudget")
+	require.Equal(t, StatusFailed, results[0].Status)
+}
+
+// Some OpenAI-compatible upstreams (PM among them) emit the thinking deltas
+// under "reasoning" instead of the common "reasoning_content"; the probe must
+// still see them, both for answer matching and the TTFT fallback.
+func TestRunReadsNonstandardReasoningField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		answer := answerFromPrompt(t, chatPrompt(t, r))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+fmt.Sprintf(`{"choices":[{"delta":{"content":"","reasoning":"The sum is %s."}}]}`, answer)+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
+	require.NotNil(t, results[0].TTFTMs, "reasoning-only streams still report a TTFT")
 }

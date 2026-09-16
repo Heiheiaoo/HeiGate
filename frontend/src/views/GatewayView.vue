@@ -41,8 +41,8 @@ export type Channel = {
   protocol: 'anthropic' | 'openai-compatible' | 'openai-responses'
   status: 'healthy' | 'degraded' | 'offline' | 'unknown'
   latency: number | null
+  ttft: number | null
   models: number
-  priority: number
   lastCheck: string
   accent: string
   enabled: boolean
@@ -58,7 +58,7 @@ export type Channel = {
   lastError?: string
 }
 
-export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin' | 'priority'
+export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
 
 const isDesktop = ref(typeof window !== 'undefined' && Boolean((window as any).webkit?.messageHandlers?.dragWindow))
 const savedSection = typeof localStorage !== 'undefined' ? (localStorage.getItem('heigate_active_section') as any) : null
@@ -111,6 +111,7 @@ const activeModelLatencyChannel = ref<Channel | null>(null)
 const modelSearchQuery = ref('')
 const modelLatencies = ref<Record<string, {
   latency: number | null
+  ttft?: number | null
   probing?: boolean
   status?: string
   error?: string | null
@@ -162,10 +163,24 @@ function formatAnalyticsTokens(val: number): string {
   return val.toLocaleString()
 }
 
+// 所有延迟展示一律用秒（0.33s / 2.42s / 23.9s），不再出现毫秒。
+function formatLatencySec(ms: number | null | undefined): string {
+  if (ms == null || isNaN(ms) || ms <= 0) return '—'
+  const sec = ms / 1000
+  return (sec >= 10 ? sec.toFixed(1) : sec.toFixed(2)) + 's'
+}
+
 function formatAnalyticsLatency(ms: number): string {
   if (!ms || isNaN(ms) || ms <= 0) return '-'
-  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's'
-  return Math.round(ms) + 'ms'
+  const sec = ms / 1000
+  return (sec >= 10 ? sec.toFixed(1) : sec.toFixed(2)) + 's'
+}
+
+// 协议 pill 的短标签：完整枚举值（如 OPENAI-COMPATIBLE）在表格列里放不下。
+function protocolShortLabel(protocol: Channel['protocol']): string {
+  if (protocol === 'anthropic') return 'Anthropic'
+  if (protocol === 'openai-responses') return 'Responses'
+  return 'OpenAI Chat'
 }
 
 function getLatencyTagClass(ms: number): string {
@@ -243,7 +258,6 @@ const editChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const editChannelEnabled = ref(true)
 const editChannelProbePreset = ref<number>(0)
 const editChannelProbeCustom = ref<number>(60)
-const editChannelPriority = ref<number>(1)
 const editChannelModelText = ref('')
 const isFetchingEditModels = ref(false)
 const showEditKey = ref(false)
@@ -395,7 +409,7 @@ function getModelHealth(modelName: string): ModelHealthInfo {
 
   const healthy = matchingChannels.find((c) => c.status === 'healthy')
   if (healthy) {
-    const lat = healthy.latency ? `${healthy.latency}ms` : ''
+    const lat = healthy.latency ? formatLatencySec(healthy.latency) : ''
     return {
       status: 'healthy',
       statusClass: 'is-healthy',
@@ -411,7 +425,7 @@ function getModelHealth(modelName: string): ModelHealthInfo {
       status: 'degraded',
       statusClass: 'is-degraded',
       channelName: degraded.name,
-      latencyText: degraded.latency ? `${degraded.latency}ms` : '',
+      latencyText: degraded.latency ? formatLatencySec(degraded.latency) : '',
       tooltip: `${degraded.name}: 响应延迟较高`,
     }
   }
@@ -708,8 +722,9 @@ const sortedChannels = computed(() => {
     const swA = statusWeight(a.status)
     const swB = statusWeight(b.status)
     if (swA !== swB) return swA - swB
-    const latA = a.latency != null && a.latency > 0 ? a.latency : 999999
-    const latB = b.latency != null && b.latency > 0 ? b.latency : 999999
+    const resp = (c: Channel) => (c.ttft != null && c.ttft > 0 ? c.ttft : (c.latency != null && c.latency > 0 ? c.latency : 999999))
+    const latA = resp(a)
+    const latB = resp(b)
     if (latA !== latB) return latA - latB
     return (a.name || '').localeCompare(b.name || '')
   })
@@ -954,7 +969,7 @@ const models = computed(() => {
       providers: data.providers,
       channelDetails: data.channelDetails,
       avgLatency: avgLat,
-      latency: avgLat != null ? `${avgLat}ms` : '—',
+      latency: formatLatencySec(avgLat),
     })
   })
 
@@ -1278,8 +1293,8 @@ function statusLabel(c: Channel) {
 }
 
 function getStatusTooltip(c: Channel): string {
-  if (c.status === 'healthy') return `渠道与主模型探活正常 (响应耗时: ${c.latency ?? '—'}ms)`
-  if (c.status === 'degraded') return `模型正常返回，但时延较高 (${c.latency}ms)`
+  if (c.status === 'healthy') return `渠道与主模型探活正常 (响应耗时: ${formatLatencySec(c.latency)})`
+  if (c.status === 'degraded') return `模型正常返回，但时延较高 (${formatLatencySec(c.latency)})`
   if (c.status === 'unknown') return '渠道新建，尚未发起过探活检测'
   if (c.lastError) return `探活失败具体报错：\n${c.lastError}`
   return '渠道离线或网络无法连接'
@@ -1303,8 +1318,8 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     protocol: item.provider,
     status: item.status,
     latency: item.latency,
+    ttft: item.ttft ?? null,
     models: modelNames.length,
-    priority: item.priority,
     lastCheck: item.lastCheck,
     accent: item.provider === 'anthropic' ? '#f59e0b' : item.provider === 'openai-responses' ? '#3b82f6' : '#10b981',
     enabled: item.enabled,
@@ -1335,9 +1350,9 @@ function toDesktopChannel(channel: Channel): ApiChannel {
     extraModels: extras,
     enabled: channel.enabled,
     intervalSeconds: channel.probeInterval,
-    priority: channel.priority,
     status: channel.status,
     latency: channel.latency,
+    ttft: channel.ttft ?? null,
     pingLatency: null,
     lastError: '',
     lastCheck: channel.lastCheck,
@@ -1361,7 +1376,9 @@ async function persistChannel(channel: Channel) {
     return
   }
   const saved = await updateChannel(toDesktopChannel(channel))
-  if (!saved) gatewayApiActive.value = false
+  // 单次失败只提示，不切换到本地存储模式：一旦切换，后续编辑会写进本地，
+  // 下次 refreshChannels 拉取服务端数据时这些编辑会被静默丢弃。
+  if (!saved) showToast(`渠道“${channel.name}”保存失败，请检查网关状态后重试`)
 }
 
 async function probeChannel(channel: Channel) {
@@ -1369,7 +1386,18 @@ async function probeChannel(channel: Channel) {
   channel.probing = true
   if (gatewayApiActive.value && channel.gatewayId) {
     const details = await probeChannelDetails(channel.gatewayId)
-    if (details && details.length > 0) {
+    if (details === null) {
+      channel.probing = false
+      showToast(`渠道“${channel.name}”探活请求失败，请检查网关状态`)
+      return
+    }
+    if (details.length === 0) {
+      // 同渠道已有探活在飞行中: 后端返回空结果而不是排队等待。
+      channel.probing = false
+      showToast(`渠道“${channel.name}”已有探活正在进行，请稍候刷新查看`)
+      return
+    }
+    if (details.length > 0) {
       for (const res of details) {
         const key = getModelKey(channel, res.model)
         const isOk = res.status === 'operational' || res.status === 'degraded' || res.status === 'healthy'
@@ -1377,6 +1405,7 @@ async function probeChannel(channel: Channel) {
         const errMsg = hasErr ? (res.message || '模型调用异常') : null
         modelLatencies.value[key] = {
           latency: res.latencyMs ?? null,
+          ttft: res.ttftMs ?? null,
           probing: false,
           status: res.status,
           error: errMsg,
@@ -1413,6 +1442,9 @@ async function duplicateChannel(channel: Channel) {
       showToast(`已成功复制渠道“${channel.name}”`)
       return
     }
+    // 服务端复制失败：不要落到本地 push——那份副本不在服务端，下次刷新即消失。
+    showToast(`复制渠道“${channel.name}”失败，请检查网关状态后重试`)
+    return
   }
   const copy: Channel = {
     ...channel,
@@ -1420,8 +1452,8 @@ async function duplicateChannel(channel: Channel) {
     gatewayId: undefined,
     status: 'offline',
     latency: null,
+    ttft: null,
     lastCheck: '尚未探活',
-    priority: channels.value.length + 1,
   }
   channels.value.push(copy)
   await saveChannels()
@@ -1444,7 +1476,6 @@ async function openEditChannel(channel: Channel) {
   editChannelKey.value = rawKey
   editChannelProtocol.value = channel.protocol
   editChannelEnabled.value = channel.enabled
-  editChannelPriority.value = channel.priority ?? 1
   showEditKey.value = true
   const interval = channel.probeInterval ?? 0
   if (interval === 0 || interval === 300 || interval === 900 || interval === 1800) {
@@ -1479,7 +1510,6 @@ async function saveEditChannel() {
   target.protocol = editChannelProtocol.value
   target.enabled = editChannelEnabled.value
   target.probeInterval = interval
-  target.priority = Math.max(1, Math.floor(Number(editChannelPriority.value) || 1))
   target.modelNames = modelNames
   target.models = target.modelNames.length
   target.accent = target.protocol === 'anthropic' ? '#f59e0b' : target.protocol === 'openai-responses' ? '#3b82f6' : '#10b981'
@@ -1652,9 +1682,9 @@ function getModelLatencyDisplay(channel: Channel, modelName: string): string {
   }
   const key = getModelKey(channel, modelName)
   const entry = modelLatencies.value[key]
-  if (entry?.latency != null) return `${entry.latency}ms`
+  if (entry?.latency != null) return formatLatencySec(entry.latency)
   if (channel.latency != null && channel.status !== 'offline') {
-    return `${channel.latency}ms`
+    return formatLatencySec(channel.latency)
   }
   return '待测速'
 }
@@ -1682,7 +1712,7 @@ function getModelTooltip(channel: Channel, modelName: string): string {
     return `测速异常：${getModelErrorMessage(channel, modelName)} (点击查看详情与诊断)`
   }
   if (entry?.latency != null) {
-    return `模型工作正常，真实对话端到端响应耗时 ${entry.latency}ms`
+    return `模型工作正常，真实对话端到端响应耗时 ${formatLatencySec(entry.latency)}`
   }
   return '该模型响应就绪，点击可在弹窗中进行单个真实测速'
 }
@@ -1709,20 +1739,22 @@ function getModelSortScore(channel: Channel, modelName: string): { rank: number;
   }
 
   // 3. 已测出有效延迟的模型 (Rank 1 正常 / Rank 2 稍慢，按实际延迟从小到大排序)
-  if (entry?.latency != null && entry.latency > 0) {
-    if (entry.status === 'degraded' || entry.latency >= 3000) {
-      return { rank: 2, latency: entry.latency, name: modelName }
+  const entryLat = entry?.ttft != null && entry.ttft > 0 ? entry.ttft : (entry?.latency != null && entry.latency > 0 ? entry.latency : null)
+  if (entryLat != null) {
+    if (entry.status === 'degraded' || entryLat >= 3000) {
+      return { rank: 2, latency: entryLat, name: modelName }
     }
-    return { rank: 1, latency: entry.latency, name: modelName }
+    return { rank: 1, latency: entryLat, name: modelName }
   }
 
   // 4. 探活主模型默认继承的渠道有效延迟 (若渠道本身 healthy)
   const isPrimary = isPrimaryModel(channel, modelName)
-  if (isPrimary && channel.latency != null && channel.latency > 0 && channel.status !== 'offline') {
-    if (channel.status === 'degraded' || channel.latency >= 3000) {
-      return { rank: 2, latency: channel.latency, name: modelName }
+  const chanLat = channel.ttft != null && channel.ttft > 0 ? channel.ttft : (channel.latency != null && channel.latency > 0 ? channel.latency : null)
+  if (isPrimary && chanLat != null && channel.status !== 'offline') {
+    if (channel.status === 'degraded' || chanLat >= 3000) {
+      return { rank: 2, latency: chanLat, name: modelName }
     }
-    return { rank: 1, latency: channel.latency, name: modelName }
+    return { rank: 1, latency: chanLat, name: modelName }
   }
 
   // 5. 待测速 / 未测状态 (Rank 3)
@@ -1760,6 +1792,7 @@ async function probeSingleModel(channel: Channel, modelName: string) {
         const errMsg = hasErr ? (res.message || '模型调用异常') : null
         modelLatencies.value[key] = {
           latency: lat,
+          ttft: res.ttftMs ?? null,
           probing: false,
           status: res.status,
           error: errMsg,
@@ -1767,6 +1800,7 @@ async function probeSingleModel(channel: Channel, modelName: string) {
         }
         if (channel.modelNames?.[0] === modelName) {
           channel.latency = lat
+          channel.ttft = res.ttftMs ?? null
           if (isOk) {
             channel.status = res.status === 'degraded' ? 'degraded' : 'healthy'
             channel.lastError = ''
@@ -1800,6 +1834,7 @@ async function probeSingleModel(channel: Channel, modelName: string) {
     const errMsg = err?.message || '请求超时或网络异常'
     modelLatencies.value[key] = {
       latency: null,
+      ttft: null,
       probing: false,
       status: 'timeout',
       error: errMsg,
@@ -2459,7 +2494,7 @@ async function refreshGatewayHealth() {
   const health = await checkGatewayHealth()
   gatewayOnline.value = health.ok
   gatewayLatency.value = health.latency
-  gatewayLastChecked.value = health.ok ? `${health.latency}ms 响应` : '无法连接'
+  gatewayLastChecked.value = health.ok ? `${formatLatencySec(health.latency)} 响应` : '无法连接'
 }
 
 function copyModelId(modelName: string) {
@@ -2554,7 +2589,8 @@ function getFastestProviderInfo(modelName?: string | null): { channelName: strin
     if (!upstream) return null
     const key = getModelKey(ch, upstream)
     const entry = modelLatencies.value[key]
-    const latMs = entry?.latency != null ? entry.latency : (ch.modelNames?.[0] === upstream && ch.latency != null && ch.status !== 'offline' ? ch.latency : null)
+    const entryLat = entry?.ttft != null ? entry.ttft : (entry?.latency != null ? entry.latency : null)
+    const latMs = entryLat != null ? entryLat : (ch.modelNames?.[0] === upstream && ch.status !== 'offline' ? (ch.ttft ?? ch.latency) : null)
     const failed = isModelFailed(ch, upstream)
     if (!ch.enabled || failed || latMs == null || latMs <= 0) return null
     return { channelName: ch.name, latency: latMs }
@@ -2609,7 +2645,7 @@ async function probeAllProvidersForModel(modelName?: string | null) {
 
   const fastest = getFastestProviderInfo(target)
   if (fastest) {
-    showToast(`测速完成：${target} 优选供应商为 “${fastest.channelName}” (${fastest.latency}ms)`)
+    showToast(`测速完成：${target} 优选供应商为 “${fastest.channelName}” (首字 ${formatLatencySec(fastest.latency)})`)
   } else {
     showToast(`已完成 “${target}” 全部 ${matchingChannels.length} 家供应商测速 (可用: ${healthyCount}/${matchingChannels.length})`)
   }
@@ -2746,7 +2782,7 @@ function getLogDiagnostic(log: RequestLog): {
       badge: 'success',
       codeText: `${log.status_code} OK`,
       title: '请求执行成功',
-      message: `上游渠道【${log.channel_name}】响应正常，全链路耗时 ${log.latency_ms}ms，首字耗时 ${log.ttft_ms || log.latency_ms}ms。`,
+      message: `上游渠道【${log.channel_name}】响应正常，全链路耗时 ${formatLatencySec(log.latency_ms)}，首字耗时 ${formatLatencySec(log.ttft_ms || log.latency_ms)}。`,
     }
   }
   if (log.status_code === 429) {
@@ -2783,7 +2819,7 @@ function updateOverviewEvents() {
     model: log.model || '通用模型',
     channel: log.is_failover && log.failover_from ? `${log.failover_from} ➔ ${log.channel_name}` : log.channel_name || '默认',
     result: log.status_code === 0 ? '传输中' : log.is_failover ? '轮转成功' : log.status_code >= 200 && log.status_code < 300 ? '200 OK' : `异常 (${log.status_code})`,
-    detail: `${log.latency_ms}ms`,
+    detail: formatLatencySec(log.latency_ms),
     tone: log.status_code === 0 ? 'badge-sky' : log.is_failover ? 'badge-amber' : log.status_code >= 200 && log.status_code < 300 ? 'badge-emerald' : 'badge-rose',
   }))
 }
@@ -2859,7 +2895,7 @@ async function runGatewaySelfTest() {
     gatewayOnline.value = health.ok
     gatewayLatency.value = health.latency
     if (health.ok) {
-      showToast(`网关自测正常！本地服务 (${gatewayHostOnly.value}) 连通，时延 ${health.latency}ms`)
+      showToast(`网关自测正常！本地服务 (${gatewayHostOnly.value}) 连通，时延 ${formatLatencySec(health.latency)}`)
     } else {
       showToast(`网关自测失败：无法连接到本地网关 (${gatewayHostOnly.value})`)
     }
@@ -2999,8 +3035,8 @@ async function addChannel() {
     protocol: newChannelProtocol.value,
     status: 'offline',
     latency: null,
+    ttft: null,
     models: modelNames.length,
-    priority: channels.value.length + 1,
     lastCheck: interval <= 0 ? '仅手动探活' : '待探活',
     accent: newChannelProtocol.value === 'anthropic' ? '#f59e0b' : newChannelProtocol.value === 'openai-responses' ? '#3b82f6' : '#10b981',
     enabled: newChannelEnabled.value,
@@ -3013,9 +3049,9 @@ async function addChannel() {
       channels.value.unshift(fromDesktopChannel(created))
       showToast(`渠道“${name}”创建成功`)
     } else {
-      gatewayApiActive.value = false
-      channels.value.unshift(draft)
-      showToast(`渠道“${name}”保存在本地存储`)
+      // 保留表单内容以便重试；不落本地存储，否则刷新后副本会消失。
+      showToast(`渠道“${name}”创建失败，请检查网关状态后重试`)
+      return
     }
   } else {
     channels.value.unshift(draft)
@@ -3199,9 +3235,8 @@ function formatLastCheckTime(str?: string): string {
 }
 
 function formatDurationPill(ms?: number): string {
-  if (ms === undefined || ms === null || ms < 0) return '0 ms'
-  if (ms < 1000) return `${ms} ms`
-  return `${(ms / 1000).toFixed(1)} s`
+  if (ms === undefined || ms === null || ms < 0) return '0 s'
+  return formatLatencySec(ms)
 }
 
 function getCompactFailoverNodes(str?: string): string[] {
@@ -3454,7 +3489,7 @@ function handleContextMenu(event: MouseEvent) {
                 <div class="flex items-center gap-2">
                   <h4 class="text-sm font-semibold text-main">本地分发网关</h4>
                   <span class="m26-gateway-status-badge" :class="{ offline: !gatewayOnline }">
-                    {{ gatewayOnline ? `健康运行中 · 当前时延 ${gatewayLatency ?? 0}ms` : '网关离线' }}
+                    {{ gatewayOnline ? `健康运行中 · 当前时延 ${formatLatencySec(gatewayLatency)}` : '网关离线' }}
                   </span>
                 </div>
               </div>
@@ -3699,8 +3734,7 @@ function handleContextMenu(event: MouseEvent) {
                 </span>
               </div>
               <div class="m26-bento-stat">
-                <span class="m26-bento-num">{{ averageLatency != null ? averageLatency : '—' }}</span>
-                <span class="m26-bento-unit" v-if="averageLatency != null">ms</span>
+                <span class="m26-bento-num">{{ formatLatencySec(averageLatency) }}</span>
               </div>
               <div class="m26-bento-foot">
                 <span class="m26-tag-subtle">{{ averageLatency && averageLatency < 500 ? '极速响应' : '正常负载' }}</span>
@@ -3720,7 +3754,7 @@ function handleContextMenu(event: MouseEvent) {
               </div>
               <div class="m26-bento-stat">
                 <span class="m26-bento-text">
-                  {{ (routingStrategy === 'smart_quality' || routingStrategy === 'priority') ? '智能综合质量' : routingStrategy === 'latency' ? '最低延迟' : '轮询均衡' }}
+                  {{ routingStrategy === 'smart_quality' ? '智能综合质量' : routingStrategy === 'latency' ? '最低延迟' : '轮询均衡' }}
                 </span>
               </div>
               <div class="m26-bento-foot">
@@ -3786,7 +3820,7 @@ function handleContextMenu(event: MouseEvent) {
                 </div>
                 <div class="m26-mini-meta">
                   <span class="m26-mini-proto">{{ c.protocol }}</span>
-                  <span class="m26-mini-lat">{{ c.latency ? `${c.latency}ms` : '—' }}</span>
+                  <span class="m26-mini-lat">{{ c.ttft ? `首字 ${formatLatencySec(c.ttft)}` : formatLatencySec(c.latency) }}</span>
                 </div>
               </div>
             </div>
@@ -4474,10 +4508,10 @@ function handleContextMenu(event: MouseEvent) {
               <thead>
                 <tr>
                   <th style="width: 160px;">渠道名称</th>
-                  <th style="width: 120px;">接口协议</th>
+                  <th style="width: 110px;">接口协议</th>
                   <th style="width: 190px;">支持模型</th>
                   <th style="width: 170px;">健康状态</th>
-                  <th style="width: 90px;">延迟</th>
+                  <th style="width: 80px;">首字</th>
                   <th style="width: 165px;">上次探活</th>
                   <th style="width: 65px; text-align: center;">启停</th>
                   <th style="width: 220px;" class="text-right">操作</th>
@@ -4493,7 +4527,7 @@ function handleContextMenu(event: MouseEvent) {
                   <td>
                     <span class="font-medium text-main truncate block" :title="c.name">{{ c.name }}</span>
                   </td>
-                  <td><span class="m26-proto-pill" :class="c.protocol">{{ c.protocol }}</span></td>
+                  <td><span class="m26-proto-pill" :class="c.protocol">{{ protocolShortLabel(c.protocol) }}</span></td>
                   <td class="cursor-pointer" @click="openModelLatencyModal(c)" title="点击查看全部模型与测速">
                     <span class="m26-model-badge primary">
                       <span class="badge-icon">⚡</span>
@@ -4515,7 +4549,7 @@ function handleContextMenu(event: MouseEvent) {
                       <span v-if="c.lastError && c.status !== 'healthy'" class="m26-status-err-tag">查看原因</span>
                     </div>
                   </td>
-                  <td class="font-mono whitespace-nowrap">{{ c.latency ? `${c.latency}ms` : '—' }}</td>
+                  <td class="font-mono whitespace-nowrap">{{ formatLatencySec(c.ttft ?? c.latency) }}</td>
                   <td class="text-xs text-muted font-mono whitespace-nowrap">{{ formatLastCheckTime(c.lastCheck) }}</td>
                   <td style="text-align: center;">
                     <label class="m26-switch micro" :title="c.enabled ? '已启用（点击停用）' : '已停用（点击启用）'">
@@ -4711,7 +4745,7 @@ function handleContextMenu(event: MouseEvent) {
                     :key="ch.name"
                     class="m26-channel-mini-pill"
                     :class="ch.status"
-                    :title="`${ch.name} · ${ch.status === 'healthy' ? '就绪' : ch.status === 'degraded' ? '延迟较高' : '离线'}${ch.latency ? ' · ' + ch.latency + 'ms' : ''}${ch.upstreamModel ? ' · 上游: ' + ch.upstreamModel : ''}`"
+                    :title="`${ch.name} · ${ch.status === 'healthy' ? '就绪' : ch.status === 'degraded' ? '延迟较高' : '离线'}${ch.latency ? ' · ' + formatLatencySec(ch.latency) : ''}${ch.upstreamModel ? ' · 上游: ' + ch.upstreamModel : ''}`"
                   >
                     <span class="prov-dot" :class="ch.status"></span>
                     <span class="truncate max-w-[90px]">{{ ch.name }}</span>
@@ -4863,10 +4897,10 @@ function handleContextMenu(event: MouseEvent) {
                   </td>
                   <td class="whitespace-nowrap">
                     <div class="flex items-center gap-1.5 flex-nowrap">
-                      <span class="m26-pill-total" :title="'总响应耗时: ' + log.latency_ms + 'ms'">
+                      <span class="m26-pill-total" :title="'总响应耗时: ' + formatLatencySec(log.latency_ms)">
                         {{ formatDurationPill(log.latency_ms) }}
                       </span>
-                      <span class="m26-pill-ttft" :title="'首字耗时 (TTFT): ' + (log.ttft_ms || log.latency_ms) + 'ms'">
+                      <span class="m26-pill-ttft" :title="'首字耗时 (TTFT): ' + formatLatencySec(log.ttft_ms || log.latency_ms)">
                         {{ formatDurationPill(log.ttft_ms || log.latency_ms) }}
                       </span>
                       <span v-if="log.is_stream" class="m26-pill-stream" title="SSE 流式传输">流</span>
@@ -4918,7 +4952,7 @@ function handleContextMenu(event: MouseEvent) {
                 <!-- Card 1: Smart Quality -->
                 <div
                   class="m26-route-card"
-                  :class="{ selected: routingStrategy === 'smart_quality' || routingStrategy === 'priority' }"
+                  :class="{ selected: routingStrategy === 'smart_quality' }"
                   @click="setRoutingStrategy('smart_quality')"
                 >
                   <div class="m26-route-card-head">
@@ -4928,7 +4962,7 @@ function handleContextMenu(event: MouseEvent) {
                       </svg>
                     </div>
                     <div class="m26-route-check-indicator">
-                      <svg v-if="routingStrategy === 'smart_quality' || routingStrategy === 'priority'" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3">
+                      <svg v-if="routingStrategy === 'smart_quality'" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3">
                         <polyline points="20 6 9 17 4 12" />
                       </svg>
                     </div>
@@ -5542,7 +5576,7 @@ function handleContextMenu(event: MouseEvent) {
             <div class="flex items-center gap-2">
               <h3 class="m26-modal-title">全部模型与实时测速</h3>
               <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
-                {{ activeModelLatencyChannel.protocol }}
+                {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
               </span>
             </div>
             <p class="m26-modal-subtitle">
@@ -5737,7 +5771,7 @@ function handleContextMenu(event: MouseEvent) {
           <div class="flex items-center gap-2">
             <div v-if="getFastestProviderInfo(activeModelSpeedTestName)" class="m26-fastest-provider-pill">
               <span class="m26-fastest-dot"></span>
-              <span>⚡ 最优: {{ getFastestProviderInfo(activeModelSpeedTestName)!.channelName }} ({{ getFastestProviderInfo(activeModelSpeedTestName)!.latency }}ms)</span>
+              <span>⚡ 最优: {{ getFastestProviderInfo(activeModelSpeedTestName)!.channelName }} (首字 {{ formatLatencySec(getFastestProviderInfo(activeModelSpeedTestName)!.latency) }})</span>
             </div>
 
             <button
@@ -5768,7 +5802,7 @@ function handleContextMenu(event: MouseEvent) {
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="m26-model-idx">#{{ idx + 1 }}</span>
                   <span class="m26-channel-name font-semibold">{{ p.channel.name }}</span>
-                  <span class="m26-proto-pill" :class="p.channel.protocol">{{ p.channel.protocol }}</span>
+                  <span class="m26-proto-pill" :class="p.channel.protocol">{{ protocolShortLabel(p.channel.protocol) }}</span>
 
                   <span v-if="isFastestProvider(p)" class="m26-tag-preferred">
                     ⚡ 优选首选 (网关优先调度)
@@ -6022,7 +6056,7 @@ function handleContextMenu(event: MouseEvent) {
                     >
                       <span class="prov-dot" :class="ch.status"></span>
                       <span>{{ ch.name }}</span>
-                      <span v-if="ch.latency" class="ch-lat-num">{{ ch.latency }}ms</span>
+                      <span v-if="ch.latency" class="ch-lat-num">{{ formatLatencySec(ch.latency) }}</span>
                     </span>
                   </div>
                 </div>
@@ -6099,7 +6133,7 @@ function handleContextMenu(event: MouseEvent) {
                         <span class="m26-status-text" :class="ch.status">
                           {{ ch.status === 'healthy' ? '正常' : ch.status === 'degraded' ? '延迟较高' : '离线' }}
                         </span>
-                        <span v-if="ch.latency" class="font-mono text-slate-400">({{ ch.latency }}ms)</span>
+                        <span v-if="ch.latency" class="font-mono text-slate-400">({{ formatLatencySec(ch.latency) }})</span>
                       </div>
                     </td>
                   </tr>
@@ -6344,7 +6378,7 @@ function handleContextMenu(event: MouseEvent) {
             </div>
             <div class="m26-diag-meta-item">
               <span class="label">上游返回耗时</span>
-              <span class="value font-mono">{{ activeDiagnosticChannel.latency ? `${activeDiagnosticChannel.latency}ms` : '超时' }}</span>
+              <span class="value font-mono">{{ activeDiagnosticChannel.latency ? formatLatencySec(activeDiagnosticChannel.latency) : '超时' }}</span>
             </div>
             <div class="m26-diag-meta-item">
               <span class="label">最近检测时间</span>
@@ -6482,7 +6516,7 @@ function handleContextMenu(event: MouseEvent) {
                       >
                         {{ step.status_code ? `HTTP ${step.status_code}` : '超时/中断' }}
                       </span>
-                      <span v-if="step.latency_ms > 0" class="m26-trace-latency">{{ step.latency_ms }}ms</span>
+                      <span v-if="step.latency_ms > 0" class="m26-trace-latency">{{ formatLatencySec(step.latency_ms) }}</span>
                     </div>
                   </div>
                   <div class="m26-trace-body">
@@ -6493,7 +6527,7 @@ function handleContextMenu(event: MouseEvent) {
                     <div class="m26-trace-spec-row">
                       <span class="label">模型:</span>
                       <span class="val font-mono">{{ step.model }}</span>
-                      <span v-if="step.ttft_ms" class="val-ttft">TTFT: {{ step.ttft_ms }}ms</span>
+                      <span v-if="step.ttft_ms" class="val-ttft">TTFT: {{ formatLatencySec(step.ttft_ms) }}</span>
                     </div>
                     <div v-if="step.error || step.raw_error" class="m26-trace-error-box">
                       <span class="error-icon">⚠️</span>
@@ -6514,11 +6548,11 @@ function handleContextMenu(event: MouseEvent) {
             <div class="m26-perf-grid">
               <div class="m26-perf-card">
                 <span class="label">首字耗时 (TTFT)</span>
-                <span class="val font-mono">{{ activeLogDetail.ttft_ms || activeLogDetail.latency_ms }} <span class="unit">ms</span></span>
+                <span class="val font-mono">{{ formatLatencySec(activeLogDetail.ttft_ms || activeLogDetail.latency_ms) }}</span>
               </div>
               <div class="m26-perf-card">
                 <span class="label">全程总耗时</span>
-                <span class="val font-mono">{{ activeLogDetail.latency_ms }} <span class="unit">ms</span></span>
+                <span class="val font-mono">{{ formatLatencySec(activeLogDetail.latency_ms) }}</span>
               </div>
               <div class="m26-perf-card">
                 <span class="label">生成速率</span>
@@ -7788,16 +7822,6 @@ function handleContextMenu(event: MouseEvent) {
   gap: 8px;
   min-width: 0;
 }
-.m26-priority-badge {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: rgba(79, 70, 229, 0.08);
-  color: #4f46e5;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  flex-shrink: 0;
-}
 .m26-card-name {
   font-size: 15px;
   font-weight: 700;
@@ -8147,20 +8171,12 @@ function handleContextMenu(event: MouseEvent) {
   align-items: center;
   gap: 6px;
 }
-.m26-priority-pill {
-  font-size: 10px;
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.05);
-  color: var(--m26-text-secondary);
-}
 .m26-proto-pill {
   font-size: 10px;
   font-weight: 600;
   padding: 2px 7px;
   border-radius: 5px;
-  text-transform: uppercase;
+  white-space: nowrap;
 }
 .m26-proto-pill.anthropic {
   background: rgba(217, 119, 6, 0.12);
@@ -9623,8 +9639,7 @@ input:checked + .m26-slider:before {
   justify-content: center;
 }
 
-.m26-route-type-badge.smart_quality,
-.m26-route-type-badge.priority {
+.m26-route-type-badge.smart_quality {
   background: rgba(59, 130, 246, 0.12);
   color: #2563eb;
 }

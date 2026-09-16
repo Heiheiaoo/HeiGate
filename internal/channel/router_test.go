@@ -21,8 +21,8 @@ func TestChannelRouterFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := &Channel{Name: "first", Provider: probe.ProviderOpenAI, Endpoint: "https://one.example", APIKey: "key-1", PrimaryModel: "gpt-test", Enabled: true, Priority: 1, LastStatus: probe.StatusOperational}
-	second := &Channel{Name: "second", Provider: probe.ProviderOpenAI, Endpoint: "https://two.example", APIKey: "key-2", PrimaryModel: "gpt-test", Enabled: true, Priority: 2, LastStatus: probe.StatusOperational}
+	first := &Channel{Name: "first", Provider: probe.ProviderOpenAI, Endpoint: "https://one.example", APIKey: "key-1", PrimaryModel: "gpt-test", Enabled: true, LastStatus: probe.StatusOperational}
+	second := &Channel{Name: "second", Provider: probe.ProviderOpenAI, Endpoint: "https://two.example", APIKey: "key-2", PrimaryModel: "gpt-test", Enabled: true, LastStatus: probe.StatusOperational}
 	if err := store.Save(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestChannelRouterFailover(t *testing.T) {
 	}
 	router := NewRouter(store)
 	attempts := 0
-	selected, err := router.Route(context.Background(), "gpt-test", RoutePriority, func(_ context.Context, channel *Channel) error {
+	selected, err := router.Route(context.Background(), "gpt-test", RouteSmartQuality, func(_ context.Context, channel *Channel) error {
 		attempts++
 		if channel.Name == "first" {
 			return errors.New("upstream unavailable")
@@ -64,8 +64,8 @@ func TestChannelRouterCooldownAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	cooldown := time.Now().UTC().Add(5 * time.Minute)
-	blocked := &Channel{Name: "blocked", Provider: probe.ProviderOpenAI, Endpoint: "https://blocked.example", APIKey: "key", PrimaryModel: "gpt-test", Enabled: true, Priority: 1, LastStatus: probe.StatusOperational, CooldownUntil: &cooldown}
-	available := &Channel{Name: "available", Provider: probe.ProviderOpenAI, Endpoint: "https://available.example", APIKey: "key", PrimaryModel: "gpt-test", Enabled: true, Priority: 2, LastStatus: probe.StatusOperational}
+	blocked := &Channel{Name: "blocked", Provider: probe.ProviderOpenAI, Endpoint: "https://blocked.example", APIKey: "key", PrimaryModel: "gpt-test", Enabled: true, LastStatus: probe.StatusOperational, CooldownUntil: &cooldown}
+	available := &Channel{Name: "available", Provider: probe.ProviderOpenAI, Endpoint: "https://available.example", APIKey: "key", PrimaryModel: "gpt-test", Enabled: true, LastStatus: probe.StatusOperational}
 	if err := store.Save(context.Background(), blocked); err != nil {
 		t.Fatal(err)
 	}
@@ -73,14 +73,14 @@ func TestChannelRouterCooldownAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := NewRouter(store)
-	candidates, err := router.Candidates(context.Background(), "gpt-test", RoutePriority)
+	candidates, err := router.Candidates(context.Background(), "gpt-test", RouteSmartQuality)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(candidates) != 1 || candidates[0].Name != "available" {
 		t.Fatalf("expected cooldown channel to be skipped, got %#v", candidates)
 	}
-	if _, err := router.Route(context.Background(), "gpt-test", RoutePriority, func(_ context.Context, _ *Channel) error {
+	if _, err := router.Route(context.Background(), "gpt-test", RouteSmartQuality, func(_ context.Context, _ *Channel) error {
 		return errors.New("temporary outage")
 	}); err == nil {
 		t.Fatal("expected route failure")
@@ -127,7 +127,6 @@ func TestChannelRouterCanonicalMatching(t *testing.T) {
 		APIKey:       "key-nexus",
 		PrimaryModel: "glm-5.3-flash-free",
 		Enabled:      true,
-		Priority:     1,
 		LastStatus:   probe.StatusOperational,
 	}
 	// Channel 2: B.AI has "glm-5.3-flash"
@@ -138,7 +137,6 @@ func TestChannelRouterCanonicalMatching(t *testing.T) {
 		APIKey:       "key-bai",
 		PrimaryModel: "glm-5.3-flash",
 		Enabled:      true,
-		Priority:     2,
 		LastStatus:   probe.StatusOperational,
 	}
 	// Channel 3: 芝公益站 has "z-ai/glm-5.3-free"
@@ -149,7 +147,6 @@ func TestChannelRouterCanonicalMatching(t *testing.T) {
 		APIKey:       "key-zhi",
 		PrimaryModel: "z-ai/glm-5.3-free",
 		Enabled:      true,
-		Priority:     3,
 		LastStatus:   probe.StatusOperational,
 	}
 
@@ -166,7 +163,7 @@ func TestChannelRouterCanonicalMatching(t *testing.T) {
 	router := NewRouter(store)
 
 	// Client requests standard name "glm-5.3-flash"
-	candidates, err := router.Candidates(context.Background(), "glm-5.3-flash", RoutePriority)
+	candidates, err := router.Candidates(context.Background(), "glm-5.3-flash", RouteSmartQuality)
 	if err != nil {
 		t.Fatalf("expected candidates for glm-5.3-flash, got err: %v", err)
 	}

@@ -28,9 +28,9 @@ type Channel struct {
 	ExtraModels       []string   `json:"extra_models"`
 	Enabled           bool       `json:"enabled"`
 	IntervalSeconds   int        `json:"interval_seconds"`
-	Priority          int        `json:"priority"`
 	LastStatus        string     `json:"last_status"`
 	LastLatencyMs     *int       `json:"last_latency_ms"`
+	LastTTFTMs        *int       `json:"last_ttft_ms"`
 	LastPingLatencyMs *int       `json:"last_ping_latency_ms"`
 	LastError         string     `json:"last_error"`
 	LastCheckedAt     *time.Time `json:"last_checked_at"`
@@ -68,9 +68,9 @@ CREATE TABLE IF NOT EXISTS desktop_channels (
   extra_models_json TEXT NOT NULL DEFAULT '[]',
   enabled INTEGER NOT NULL DEFAULT 1,
   interval_seconds INTEGER NOT NULL DEFAULT 300,
-  priority INTEGER NOT NULL DEFAULT 1,
   last_status TEXT NOT NULL DEFAULT 'unknown',
   last_latency_ms INTEGER,
+  last_ttft_ms INTEGER,
   last_ping_latency_ms INTEGER,
   last_error TEXT NOT NULL DEFAULT '',
   last_checked_at TEXT,
@@ -156,6 +156,7 @@ func (s *Store) initialize(ctx context.Context) error {
 		"ALTER TABLE desktop_channels ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_channels ADD COLUMN circuit_state TEXT NOT NULL DEFAULT 'closed'",
 		"ALTER TABLE desktop_channels ADD COLUMN cooldown_until TEXT",
+		"ALTER TABLE desktop_channels ADD COLUMN last_ttft_ms INTEGER",
 		"ALTER TABLE desktop_request_logs ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0",
@@ -173,6 +174,12 @@ func (s *Store) initialize(ctx context.Context) error {
 			return fmt.Errorf("migrate desktop channel schema: %w", err)
 		}
 	}
+
+	// Channel priority was never exposed in the UI and no routing strategy read
+	// it, so the column is dropped from databases created before its removal.
+	// Older SQLite builds without DROP COLUMN support leave the column in place;
+	// it is simply ignored because no query references it.
+	_, _ = s.db.ExecContext(ctx, "ALTER TABLE desktop_channels DROP COLUMN priority")
 
 	// Auto-repair legacy false-positive 502 logs where streaming completed tokens but was flagged context canceled
 	_, _ = s.db.ExecContext(ctx, `
@@ -197,10 +204,10 @@ func (s *Store) Close() error {
 func (s *Store) List(ctx context.Context) ([]*Channel, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, name, provider, api_mode, endpoint, api_key, primary_model,
-       extra_models_json, enabled, interval_seconds, priority, last_status,
-       last_latency_ms, last_ping_latency_ms, last_error, last_checked_at,
+       extra_models_json, enabled, interval_seconds, last_status,
+       last_latency_ms, last_ttft_ms, last_ping_latency_ms, last_error, last_checked_at,
        failure_count, circuit_state, cooldown_until, created_at, updated_at
-FROM desktop_channels ORDER BY priority ASC, id ASC`)
+FROM desktop_channels ORDER BY id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list desktop channels: %w", err)
 	}
@@ -223,8 +230,8 @@ FROM desktop_channels ORDER BY priority ASC, id ASC`)
 func (s *Store) Get(ctx context.Context, id int64) (*Channel, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, name, provider, api_mode, endpoint, api_key, primary_model,
-       extra_models_json, enabled, interval_seconds, priority, last_status,
-       last_latency_ms, last_ping_latency_ms, last_error, last_checked_at,
+       extra_models_json, enabled, interval_seconds, last_status,
+       last_latency_ms, last_ttft_ms, last_ping_latency_ms, last_error, last_checked_at,
        failure_count, circuit_state, cooldown_until, created_at, updated_at
 FROM desktop_channels WHERE id = ?`, id)
 	channel, err := scanChannel(row)
@@ -257,9 +264,6 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
 	if channel.IntervalSeconds < 0 {
 		channel.IntervalSeconds = 0
 	}
-	if channel.Priority <= 0 {
-		channel.Priority = 1
-	}
 	if channel.LastStatus == "" {
 		channel.LastStatus = "unknown"
 	}
@@ -269,13 +273,13 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
 
 	args := []any{channel.Name, channel.Provider, channel.APIMode, channel.Endpoint, channel.APIKey,
 		channel.PrimaryModel, string(extraModels), channel.Enabled, channel.IntervalSeconds,
-		channel.Priority, channel.LastStatus, channel.LastLatencyMs, channel.LastPingLatencyMs,
+		channel.LastStatus, channel.LastLatencyMs, channel.LastTTFTMs, channel.LastPingLatencyMs,
 		channel.LastError, nullableTime(channel.LastCheckedAt), channel.FailureCount, channel.CircuitState,
 		nullableTime(channel.CooldownUntil), channel.CreatedAt.UTC().Format(time.RFC3339Nano), channel.UpdatedAt.UTC().Format(time.RFC3339Nano)}
 	if channel.ID == 0 {
 		result, err := s.db.ExecContext(ctx, `INSERT INTO desktop_channels
  (name, provider, api_mode, endpoint, api_key, primary_model, extra_models_json,
-  enabled, interval_seconds, priority, last_status, last_latency_ms,
+  enabled, interval_seconds, last_status, last_latency_ms, last_ttft_ms,
   last_ping_latency_ms, last_error, last_checked_at, failure_count, circuit_state,
   cooldown_until, created_at, updated_at)
  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
@@ -288,13 +292,42 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
 	args = append(args, channel.ID)
 	if _, err := s.db.ExecContext(ctx, `UPDATE desktop_channels SET
  name=?, provider=?, api_mode=?, endpoint=?, api_key=?, primary_model=?, extra_models_json=?,
- enabled=?, interval_seconds=?, priority=?, last_status=?, last_latency_ms=?,
+ enabled=?, interval_seconds=?, last_status=?, last_latency_ms=?, last_ttft_ms=?,
  last_ping_latency_ms=?, last_error=?, last_checked_at=?, failure_count=?, circuit_state=?,
  cooldown_until=?, created_at=?, updated_at=?
  WHERE id=?`, args...); err != nil {
 		return fmt.Errorf("update desktop channel: %w", err)
 	}
 	return nil
+}
+
+// copyRuntimeState copies the runtime health fields from src to dst. It is the
+// only set of fields a probe or forward attempt may write back.
+func copyRuntimeState(dst, src *Channel) {
+	dst.LastStatus = src.LastStatus
+	dst.LastError = src.LastError
+	dst.LastLatencyMs = src.LastLatencyMs
+	dst.LastTTFTMs = src.LastTTFTMs
+	dst.LastPingLatencyMs = src.LastPingLatencyMs
+	dst.LastCheckedAt = src.LastCheckedAt
+	dst.FailureCount = src.FailureCount
+	dst.CircuitState = src.CircuitState
+	dst.CooldownUntil = src.CooldownUntil
+}
+
+// UpdateRuntime re-reads the channel by id, lets mutate adjust it, and saves.
+// Probes and forward attempts hold a channel snapshot for tens of seconds; a
+// user edit during that window changes configuration fields (models, endpoint)
+// in the database, and writing the stale snapshot back wholesale would
+// resurrect the old configuration. Callers therefore mutate only runtime
+// health fields via copyRuntimeState so configuration always stays fresh.
+func (s *Store) UpdateRuntime(ctx context.Context, id int64, mutate func(*Channel)) error {
+	fresh, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	mutate(fresh)
+	return s.Save(ctx, fresh)
 }
 
 func (s *Store) Delete(ctx context.Context, id int64) error {
@@ -323,11 +356,11 @@ func scanChannel(scanner rowScanner) (*Channel, error) {
 	var channel Channel
 	var modelsJSON string
 	var enabled int
-	var lastLatency, lastPing sql.NullInt64
+	var lastLatency, lastTTFT, lastPing sql.NullInt64
 	var lastChecked, cooldownUntil, createdAt, updatedAt sql.NullString
 	if err := scanner.Scan(&channel.ID, &channel.Name, &channel.Provider, &channel.APIMode,
 		&channel.Endpoint, &channel.APIKey, &channel.PrimaryModel, &modelsJSON, &enabled,
-		&channel.IntervalSeconds, &channel.Priority, &channel.LastStatus, &lastLatency,
+		&channel.IntervalSeconds, &channel.LastStatus, &lastLatency, &lastTTFT,
 		&lastPing, &channel.LastError, &lastChecked, &channel.FailureCount, &channel.CircuitState,
 		&cooldownUntil, &createdAt, &updatedAt); err != nil {
 		return nil, fmt.Errorf("scan desktop channel: %w", err)
@@ -339,6 +372,10 @@ func scanChannel(scanner rowScanner) (*Channel, error) {
 	if lastLatency.Valid {
 		value := int(lastLatency.Int64)
 		channel.LastLatencyMs = &value
+	}
+	if lastTTFT.Valid {
+		value := int(lastTTFT.Int64)
+		channel.LastTTFTMs = &value
 	}
 	if lastPing.Valid {
 		value := int(lastPing.Int64)
@@ -466,7 +503,11 @@ func (s *Store) RecordLog(ctx context.Context, log *RequestLog) error {
 		return fmt.Errorf("record desktop request log: %w", err)
 	}
 	log.ID, _ = res.LastInsertId()
-	s.BroadcastLog(LogEvent{Type: "created", Log: log})
+	// Broadcast a copy: the caller keeps mutating the same RequestLog while
+	// streaming (token counts every ~200ms), and subscribers marshal the event
+	// on their own goroutines — sharing the live pointer is a data race.
+	created := *log
+	s.BroadcastLog(LogEvent{Type: "created", Log: &created})
 	return nil
 }
 
@@ -500,7 +541,8 @@ WHERE id = ?`
 	if err != nil {
 		return fmt.Errorf("update desktop request log: %w", err)
 	}
-	s.BroadcastLog(LogEvent{Type: "updated", Log: log})
+	updated := *log
+	s.BroadcastLog(LogEvent{Type: "updated", Log: &updated})
 	return nil
 }
 

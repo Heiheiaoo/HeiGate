@@ -6,6 +6,7 @@
 package probe
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -48,6 +49,11 @@ const (
 const (
 	// RequestTimeout bounds a single probe request including body read.
 	RequestTimeout = 45 * time.Second
+	// RetryTimeout bounds a retry attempt. It matches the first attempt's
+	// window: reasoning models on free upstreams legitimately take 40+ seconds
+	// to first content, and a shorter retry window would re-fail a channel the
+	// first attempt merely lost to jitter.
+	RetryTimeout = 45 * time.Second
 	// PingTimeout bounds the HEAD request used to measure origin reachability.
 	PingTimeout = 8 * time.Second
 	// MinIntervalSeconds is the shortest automatic probe interval.
@@ -57,14 +63,33 @@ const (
 	// ScheduleBuffer is extra slack added to the per-run deadline by schedulers.
 	ScheduleBuffer = 10 * time.Second
 
-	maxAnswerTokens  = 64
+	// maxAnswerTokens is deliberately tiny: the probe aborts the stream at the
+	// first content delta anyway, so the cap only bounds what a provider may
+	// generate before that. It is not 1 because some upstreams reject that
+	// outright (B.AI: "max_tokens must be greater than 2"); 16 clears every
+	// lower bound seen in the wild while keeping generation negligible.
+	maxAnswerTokens  = 16
 	maxErrorSnippet  = 300
 	maxErrorBodyRead = 64 << 10
+
+	// probeRetries is how many extra attempts a model gets after a transient
+	// failure. Shared upstreams return an empty 200 or a stray 5xx
+	// intermittently, and a single sample would flap the channel status.
+	probeRetries = 2
 )
 
 // DegradedThreshold is the latency at or above which a correct answer is
 // still reported as degraded. It is a variable so tests can tighten it.
 var DegradedThreshold = 6 * time.Second
+
+// RunBudget is the wall-clock a full Run may need for one model: the origin
+// ping, a first attempt, every retry, plus scheduling slack. Callers that
+// impose their own deadline must use this rather than RequestTimeout, or the
+// deadline cuts the retries short and reports a failure the retry was meant
+// to absorb.
+func RunBudget() time.Duration {
+	return PingTimeout + RequestTimeout + probeRetries*RetryTimeout + ScheduleBuffer
+}
 
 // Validation errors. Messages intentionally contain "invalid" / "required"
 // so HTTP handlers can map them to 400 responses.
@@ -92,9 +117,14 @@ type Result struct {
 	Model         string    `json:"model"`
 	Status        string    `json:"status"`
 	LatencyMs     *int      `json:"latency_ms,omitempty"`
+	TTFTMs        *int      `json:"ttft_ms,omitempty"`
 	PingLatencyMs *int      `json:"ping_latency_ms,omitempty"`
 	Message       string    `json:"message,omitempty"`
 	CheckedAt     time.Time `json:"checked_at"`
+
+	// retryable marks a failure that may be upstream jitter rather than a real
+	// fault. It never leaves this package.
+	retryable bool
 }
 
 var (
@@ -254,8 +284,12 @@ type challenge struct {
 func newChallenge() challenge {
 	a := randomInt(10, 89)
 	b := randomInt(10, 89)
+	// A bare sum: reasoning models spend far longer thinking about an English
+	// instruction ("Answer with digits only...") than about plain arithmetic
+	// (measured 35s vs 8s on the same model), and answerMatches scans digit
+	// runs anyway, so decorated answers still pass.
 	return challenge{
-		prompt:   fmt.Sprintf("Answer with digits only, no words: %d + %d = ?", a, b),
+		prompt:   fmt.Sprintf("%d + %d = ?", a, b),
 		expected: strconv.Itoa(a + b),
 	}
 }
@@ -283,42 +317,108 @@ func answerMatches(reply, expected string) bool {
 }
 
 func checkModel(ctx context.Context, cfg Config, model string) *Result {
+	var res *Result
+	for attempt := 0; attempt <= probeRetries; attempt++ {
+		attemptTimeout := RequestTimeout
+		if attempt > 0 {
+			attemptTimeout = RetryTimeout
+		}
+		res = checkModelOnce(ctx, cfg, model, attemptTimeout)
+		if !res.retryable {
+			break
+		}
+		// A wrong answer or an empty 200 costs no upstream quota to rule out;
+		// a transport error might, so stop retrying once the caller's context
+		// is done.
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	res.retryable = false
+	return res
+}
+
+// checkModelOnce performs a single challenge request. The unexported
+// retryable field tells checkModel whether another attempt is worthwhile.
+func checkModelOnce(ctx context.Context, cfg Config, model string, attemptTimeout time.Duration) *Result {
 	res := &Result{Model: model, Status: StatusError, CheckedAt: time.Now()}
 	ch := newChallenge()
 
-	reqCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
 
 	started := time.Now()
-	reply, status, body, err := send(reqCtx, cfg, model, ch.prompt)
+	out, err := send(reqCtx, cfg, model, ch.prompt)
 	latency := time.Since(started)
 	latencyMs := int(latency / time.Millisecond)
 	res.LatencyMs = &latencyMs
+	if err == nil && out.hasTTFT {
+		ttftMs := int(out.ttft / time.Millisecond)
+		res.TTFTMs = &ttftMs
+	}
 
 	switch {
 	case err != nil:
 		res.Message = redact(truncate(err.Error(), maxErrorSnippet), cfg.APIKey)
-	case status < 200 || status >= 300:
-		res.Message = redact(fmt.Sprintf("upstream HTTP %d: %s", status, truncate(compactWhitespace(body), maxErrorSnippet)), cfg.APIKey)
-	case !answerMatches(reply, ch.expected):
+		res.retryable = true
+	case out.status >= 500:
+		// 5xx from a shared upstream is usually transient; 4xx (bad key, unknown
+		// model) is deterministic and retrying only wastes time.
+		res.Message = redact(fmt.Sprintf("upstream HTTP %d: %s", out.status, truncate(compactWhitespace(out.body), maxErrorSnippet)), cfg.APIKey)
+		res.retryable = true
+	case out.status < 200 || out.status >= 300:
+		res.Message = redact(fmt.Sprintf("upstream HTTP %d: %s", out.status, truncate(compactWhitespace(out.body), maxErrorSnippet)), cfg.APIKey)
+	case !out.sawContent && !out.sawReasoning:
+		// 2xx but nothing was ever produced: the channel answers HTTP yet cannot
+		// serve a request, which is the failure worth catching. Reasoning-only
+		// output does not land here — with generation capped at maxAnswerTokens
+		// a slow thinker legitimately spends the whole budget before its first
+		// visible token, and it still proved the whole path works.
 		res.Status = StatusFailed
-		if strings.TrimSpace(reply) == "" {
-			res.Message = "upstream returned 2xx but no text content"
-		} else {
-			res.Message = truncate(fmt.Sprintf("unexpected answer: wanted %s, got %q", ch.expected, compactWhitespace(reply)), maxErrorSnippet)
-		}
+		res.retryable = true
+		res.Message = "upstream returned 2xx but no content"
 	case latency >= DegradedThreshold:
 		res.Status = StatusDegraded
 		res.Message = fmt.Sprintf("slow response: %dms", latencyMs)
 	default:
 		res.Status = StatusOperational
 	}
+	// Answer correctness is a soft signal, not a verdict: the probe caps
+	// generation at maxAnswerTokens and stops at the first content delta, so a
+	// correct answer is usually truncated ("8" of "85"). A channel that streams
+	// content is usable for real traffic even when this note fires.
+	if res.Status == StatusOperational || res.Status == StatusDegraded {
+		if !answerMatches(out.reply, ch.expected) && res.Message == "" {
+			res.Message = truncate(fmt.Sprintf("answer not verified (wanted %s, got %q)", ch.expected, compactWhitespace(out.reply)), maxErrorSnippet)
+		}
+	}
 	return res
 }
 
-// send performs one provider request and returns the reply text, HTTP status
-// and raw body (for error reporting).
-func send(ctx context.Context, cfg Config, model, prompt string) (reply string, status int, body string, err error) {
+// sendResult carries what a probe request learned. body holds the raw error
+// payload and is only meaningful for non-2xx statuses.
+type sendResult struct {
+	reply        string
+	ttft         time.Duration
+	hasTTFT      bool
+	sawContent   bool
+	sawReasoning bool
+	sawAnyDelta  bool
+	status       int
+	body         string
+}
+
+// maxStreamBytes bounds how much of a streamed answer is read. The challenge
+// answer is tiny; the cap only stops a broken upstream from streaming forever
+// into memory.
+const maxStreamBytes = 1 << 20
+
+// send performs one streaming provider request. The first visible text delta
+// is recorded as the time to first token — the number a streaming client
+// actually waits for — falling back to the first reasoning delta for models
+// that answer entirely inside thinking. Total time (stream end) is measured
+// by the caller.
+func send(ctx context.Context, cfg Config, model, prompt string) (*sendResult, error) {
 	var path string
 	var payload any
 	headers := map[string]string{"Content-Type": "application/json", "Accept": "application/json"}
@@ -330,6 +430,7 @@ func send(ctx context.Context, cfg Config, model, prompt string) (reply string, 
 			"model":      model,
 			"max_tokens": maxAnswerTokens,
 			"messages":   []map[string]any{{"role": "user", "content": prompt}},
+			"stream":     true,
 		}
 		if cfg.APIKey != "" {
 			headers["x-api-key"] = cfg.APIKey
@@ -345,20 +446,22 @@ func send(ctx context.Context, cfg Config, model, prompt string) (reply string, 
 				"model":             model,
 				"input":             prompt,
 				"max_output_tokens": maxAnswerTokens,
-				"stream":            false,
+				"stream":            true,
 			}
 		} else {
 			path = "/v1/chat/completions"
+			// No temperature: some models only accept a single value (kimi-k3
+			// rejects anything but 1), and determinism does not matter for a
+			// two-digit addition.
 			payload = map[string]any{
-				"model":       model,
-				"messages":    []map[string]any{{"role": "user", "content": prompt}},
-				"max_tokens":  maxAnswerTokens,
-				"temperature": 0,
-				"stream":      false,
+				"model":      model,
+				"messages":   []map[string]any{{"role": "user", "content": prompt}},
+				"max_tokens": maxAnswerTokens,
+				"stream":     true,
 			}
 		}
 	default:
-		return "", 0, "", ErrInvalidProvider
+		return nil, ErrInvalidProvider
 	}
 	for k, v := range cfg.ExtraHeaders {
 		if strings.TrimSpace(k) != "" {
@@ -368,93 +471,180 @@ func send(ctx context.Context, cfg Config, model, prompt string) (reply string, 
 
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return "", 0, "", fmt.Errorf("encode probe request: %w", err)
+		return nil, fmt.Errorf("encode probe request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Endpoint+path, bytes.NewReader(raw))
 	if err != nil {
-		return "", 0, "", err
+		return nil, err
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	started := time.Now()
 	resp, err := requestClient.Do(req)
 	if err != nil {
-		return "", 0, "", err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
-	if err != nil {
-		return "", resp.StatusCode, "", fmt.Errorf("read probe response: %w", err)
-	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", resp.StatusCode, string(data), nil
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
+		return &sendResult{status: resp.StatusCode, body: string(data)}, nil
 	}
-	return extractText(cfg, data), resp.StatusCode, string(data), nil
+	return readStream(cfg, resp.Body, started)
 }
 
-// extractText pulls assistant text out of the three supported response
-// shapes. Reasoning text is included as a fallback so "thinking" models that
-// spend their token budget before emitting content still get a fair check.
-func extractText(cfg Config, data []byte) string {
-	var sb strings.Builder
-	switch {
-	case cfg.Provider == ProviderAnthropic:
-		var msg struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
+// readStream consumes the SSE stream and accumulates the answer. text and
+// reasoning are tracked separately so the TTFT can prefer visible text.
+func readStream(cfg Config, body io.Reader, started time.Time) (*sendResult, error) {
+	out := &sendResult{status: http.StatusOK}
+	var text, reasoning strings.Builder
+	var textAt, reasonAt time.Time
+
+	scanner := bufio.NewScanner(io.LimitReader(body, maxStreamBytes))
+	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	for scanner.Scan() {
+		payload, done, ok := parseSSELine(scanner.Text())
+		if !ok {
+			continue
 		}
-		if json.Unmarshal(data, &msg) == nil {
-			for _, block := range msg.Content {
-				if block.Type == "text" {
-					sb.WriteString(block.Text)
-					sb.WriteByte(' ')
-				}
+		if done {
+			break
+		}
+		out.sawAnyDelta = true
+		switch {
+		case cfg.Provider == ProviderAnthropic:
+			var ev struct {
+				Type  string `json:"type"`
+				Delta struct {
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Thinking string `json:"thinking"`
+				} `json:"delta"`
 			}
-		}
-	case cfg.APIMode == APIModeResponses:
-		var out struct {
-			OutputText string `json:"output_text"`
-			Output     []struct {
-				Type    string `json:"type"`
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"output"`
-		}
-		if json.Unmarshal(data, &out) == nil {
-			sb.WriteString(out.OutputText)
-			for _, item := range out.Output {
-				for _, part := range item.Content {
-					if part.Type == "output_text" || part.Type == "text" || part.Type == "reasoning_text" {
-						sb.WriteByte(' ')
-						sb.WriteString(part.Text)
+			if json.Unmarshal([]byte(payload), &ev) != nil || ev.Type != "content_block_delta" {
+				continue
+			}
+			switch ev.Delta.Type {
+			case "text_delta":
+				if ev.Delta.Text != "" {
+					if textAt.IsZero() {
+						textAt = time.Now()
 					}
+					text.WriteString(ev.Delta.Text)
+				}
+			case "thinking_delta":
+				if ev.Delta.Thinking != "" {
+					if reasonAt.IsZero() {
+						reasonAt = time.Now()
+					}
+					reasoning.WriteString(ev.Delta.Thinking)
+				}
+			}
+		case cfg.APIMode == APIModeResponses:
+			var ev struct {
+				Type  string `json:"type"`
+				Delta string `json:"delta"`
+			}
+			if json.Unmarshal([]byte(payload), &ev) != nil {
+				continue
+			}
+			switch ev.Type {
+			case "response.output_text.delta":
+				if ev.Delta != "" {
+					if textAt.IsZero() {
+						textAt = time.Now()
+					}
+					text.WriteString(ev.Delta)
+				}
+			case "response.reasoning_text.delta":
+				if ev.Delta != "" {
+					if reasonAt.IsZero() {
+						reasonAt = time.Now()
+					}
+					reasoning.WriteString(ev.Delta)
+				}
+			}
+		default:
+			var ev struct {
+				Choices []struct {
+					Delta struct {
+						Content          json.RawMessage `json:"content"`
+						ReasoningContent string          `json:"reasoning_content"`
+						// Some OpenAI-compatible upstreams (PM and friends) emit
+						// plain "reasoning" instead of "reasoning_content".
+						Reasoning string `json:"reasoning"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			if json.Unmarshal([]byte(payload), &ev) != nil {
+				continue
+			}
+			for _, choice := range ev.Choices {
+				if part := contentToText(choice.Delta.Content); part != "" {
+					if textAt.IsZero() {
+						textAt = time.Now()
+					}
+					text.WriteString(part)
+				}
+				thinking := choice.Delta.ReasoningContent
+				if thinking == "" {
+					thinking = choice.Delta.Reasoning
+				}
+				if thinking != "" {
+					if reasonAt.IsZero() {
+						reasonAt = time.Now()
+					}
+					reasoning.WriteString(thinking)
 				}
 			}
 		}
-	default:
-		var out struct {
-			Choices []struct {
-				Message struct {
-					Content          json.RawMessage `json:"content"`
-					ReasoningContent string          `json:"reasoning_content"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal(data, &out) == nil {
-			for _, choice := range out.Choices {
-				sb.WriteString(contentToText(choice.Message.Content))
-				if sb.Len() == 0 {
-					sb.WriteString(choice.Message.ReasoningContent)
-				}
-				sb.WriteByte(' ')
-			}
+		// Everything a probe needs — endpoint, credentials, model name, quota,
+		// the fact that content is actually produced, and the time to first
+		// token — is proven by the first content delta. Stop reading there and
+		// let the caller close the body: the rest of the stream costs upstream
+		// tokens and, on a slow reasoning model, tens of seconds of waiting.
+		if !textAt.IsZero() {
+			break
 		}
 	}
-	return strings.TrimSpace(sb.String())
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read probe stream: %w", err)
+	}
+
+	out.sawContent = !textAt.IsZero()
+	out.sawReasoning = !reasonAt.IsZero()
+	out.reply = strings.TrimSpace(text.String())
+	if out.reply == "" {
+		out.reply = strings.TrimSpace(reasoning.String())
+	}
+	// Prefer the first visible text token; fall back to reasoning for models
+	// that only answer inside thinking.
+	if !textAt.IsZero() {
+		out.ttft = textAt.Sub(started)
+		out.hasTTFT = true
+	} else if !reasonAt.IsZero() {
+		out.ttft = reasonAt.Sub(started)
+		out.hasTTFT = true
+	}
+	return out, nil
+}
+
+// parseSSELine extracts the JSON payload from a "data: ..." line. done is
+// true for the OpenAI "[DONE]" sentinel; ok is false for non-data lines.
+func parseSSELine(line string) (payload string, done bool, ok bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "data:") {
+		return "", false, false
+	}
+	payload = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	if payload == "[DONE]" {
+		return "", true, true
+	}
+	if payload == "" {
+		return "", false, false
+	}
+	return payload, false, true
 }
 
 // contentToText handles both string content and an array of content parts.

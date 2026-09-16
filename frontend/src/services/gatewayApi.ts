@@ -9,9 +9,9 @@ export type ApiChannel = {
   extraModels: string[]
   enabled: boolean
   intervalSeconds: number
-  priority: number
   status: 'healthy' | 'degraded' | 'offline' | 'unknown'
   latency: number | null
+  ttft: number | null
   pingLatency: number | null
   lastError: string
   lastCheck: string
@@ -43,9 +43,9 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
     extraModels: Array.isArray(record.extra_models) ? record.extra_models.map(String) : [],
     enabled: Boolean(record.enabled),
     intervalSeconds: Number(record.interval_seconds ?? 300),
-    priority: Number(record.priority ?? 1),
     status,
     latency: record.last_latency_ms == null ? null : Number(record.last_latency_ms),
+    ttft: record.last_ttft_ms == null ? null : Number(record.last_ttft_ms),
     pingLatency: record.last_ping_latency_ms == null ? null : Number(record.last_ping_latency_ms),
     lastError: String(record.last_error ?? ''),
     lastCheck: record.last_checked_at ? String(record.last_checked_at) : '尚未探活',
@@ -55,7 +55,7 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
   }
 }
 
-async function request(path: string, init?: RequestInit): Promise<Response> {
+async function request(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<Response> {
   const method = (init?.method ?? 'GET').toUpperCase()
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -65,7 +65,9 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
     ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
     ...((init?.headers as Record<string, string>) ?? {}),
   }
-  return fetch(`${endpoint}${path}`, { ...init, headers, credentials: 'same-origin' })
+  // Without a deadline a wedged gateway hangs the caller forever (e.g. the
+  // probing flag that is cleared only after the response arrives).
+  return fetch(`${endpoint}${path}`, { ...init, headers, credentials: 'same-origin', signal: AbortSignal.timeout(timeoutMs) })
 }
 
 export async function listChannels(includeSecrets = true): Promise<ApiChannel[] | null> {
@@ -138,6 +140,7 @@ export type ProbeResult = {
   model: string
   status: string
   latencyMs?: number | null
+  ttftMs?: number | null
   pingLatencyMs?: number | null
   message?: string
 }
@@ -145,7 +148,7 @@ export type ProbeResult = {
 export async function probeChannel(id: number, modelName?: string): Promise<boolean> {
   try {
     const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
-    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' })
+    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, 180_000)
     return response.ok
   } catch {
     return false
@@ -155,7 +158,7 @@ export async function probeChannel(id: number, modelName?: string): Promise<bool
 export async function probeChannelDetails(id: number, modelName?: string): Promise<ProbeResult[] | null> {
   try {
     const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
-    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' })
+    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, 180_000)
     if (!response.ok) return null
     const payload = (await response.json()) as { data?: any[] }
     if (!Array.isArray(payload.data)) return []
@@ -163,6 +166,7 @@ export async function probeChannelDetails(id: number, modelName?: string): Promi
       model: item.model || item.Model || '',
       status: item.status || item.Status || 'unknown',
       latencyMs: item.latency_ms ?? item.LatencyMs ?? null,
+      ttftMs: item.ttft_ms ?? item.TTFTMs ?? null,
       pingLatencyMs: item.ping_latency_ms ?? item.PingLatencyMs ?? null,
       message: item.message || item.Message || '',
     }))
@@ -324,7 +328,7 @@ export type SystemInfo = {
   log_retention_days: number
   log_max_count: number
   logs_count: number
-  routing_strategy: 'smart_quality' | 'priority' | 'round_robin' | 'latency'
+  routing_strategy: 'smart_quality' | 'round_robin' | 'latency'
 }
 
 export async function getSystemInfo(): Promise<SystemInfo | null> {
@@ -341,7 +345,7 @@ export async function getSystemInfo(): Promise<SystemInfo | null> {
 export async function updateSettings(settings: {
   log_retention_days?: number
   log_max_count?: number
-  routing_strategy?: 'smart_quality' | 'priority' | 'round_robin' | 'latency'
+  routing_strategy?: 'smart_quality' | 'round_robin' | 'latency'
 }): Promise<boolean> {
   try {
     const response = await request('/settings', {
@@ -485,7 +489,6 @@ function toPayload(channel: Partial<ApiChannel> & { apiKey?: string }) {
     extra_models: channel.extraModels ?? [],
     enabled: channel.enabled ?? true,
     interval_seconds: channel.intervalSeconds ?? 300,
-    priority: channel.priority ?? 1,
   }
 }
 

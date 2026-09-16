@@ -403,14 +403,19 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				}
 			}
 
-			// Sort fallback candidates by lowest latency first
+			// Sort fallback candidates by lowest time-to-first-token first,
+			// falling back to total latency when the probe measured none.
 			sort.SliceStable(fallbackChannels, func(i, j int) bool {
 				latI := 999999
-				if fallbackChannels[i].LastLatencyMs != nil && *fallbackChannels[i].LastLatencyMs > 0 {
+				if fallbackChannels[i].LastTTFTMs != nil && *fallbackChannels[i].LastTTFTMs > 0 {
+					latI = *fallbackChannels[i].LastTTFTMs
+				} else if fallbackChannels[i].LastLatencyMs != nil && *fallbackChannels[i].LastLatencyMs > 0 {
 					latI = *fallbackChannels[i].LastLatencyMs
 				}
 				latJ := 999999
-				if fallbackChannels[j].LastLatencyMs != nil && *fallbackChannels[j].LastLatencyMs > 0 {
+				if fallbackChannels[j].LastTTFTMs != nil && *fallbackChannels[j].LastTTFTMs > 0 {
+					latJ = *fallbackChannels[j].LastTTFTMs
+				} else if fallbackChannels[j].LastLatencyMs != nil && *fallbackChannels[j].LastLatencyMs > 0 {
 					latJ = *fallbackChannels[j].LastLatencyMs
 				}
 				return latI < latJ
@@ -501,6 +506,15 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 						fallbackSucceeded = true
 						break
 					}
+					// Transport died before the first byte: the next attempt may
+					// still succeed, but the abandoned body must be closed or the
+					// keep-alive connection leaks (the primary loop closes this
+					// path; the fallback loop must too).
+					_ = altResp.body.Close()
+					step.StatusCode = altResp.status
+					step.Error = fmt.Sprintf("传输首字节中断: %v", rErr)
+					step.RawError = rErr.Error()
+					traceSteps = append(traceSteps, step)
 				}
 				if fallbackSucceeded {
 					break

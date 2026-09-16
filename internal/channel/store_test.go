@@ -24,7 +24,7 @@ func TestChannelStoreCRUD(t *testing.T) {
 	channel := &Channel{
 		Name: "Test", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeResponses,
 		Endpoint: "https://example.com", APIKey: "sk-test", PrimaryModel: "gpt-test",
-		ExtraModels: []string{"gpt-extra"}, Enabled: true, IntervalSeconds: 60, Priority: 2,
+		ExtraModels: []string{"gpt-extra"}, Enabled: true, IntervalSeconds: 60,
 	}
 	if err := store.Save(context.Background(), channel); err != nil {
 		t.Fatal(err)
