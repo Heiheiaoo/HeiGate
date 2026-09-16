@@ -111,19 +111,69 @@ func (r *ProbeRunner) Stop() {
 	r.mu.Unlock()
 }
 
-func (r *ProbeRunner) runScheduled(ctx context.Context, id int64, interval time.Duration) {
-	r.runOne(ctx, id)
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
+func (r *ProbeRunner) runScheduled(ctx context.Context, id int64, base time.Duration) {
 	for {
+		r.runOne(ctx, id)
+		timer := time.NewTimer(r.nextInterval(ctx, id, base))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		case <-timer.C:
-			r.runOne(ctx, id)
-			timer.Reset(interval)
 		}
 	}
+}
+
+// nextInterval re-reads the channel each tick so the wait reflects the streak
+// the probe just updated. Capturing the interval once would freeze the backoff
+// and stop a recovered channel from being re-checked promptly.
+func (r *ProbeRunner) nextInterval(ctx context.Context, id int64, base time.Duration) time.Duration {
+	ch, err := r.store.Get(ctx, id)
+	if err != nil {
+		return base
+	}
+	return AdaptiveProbeInterval(base, ch.ProbeStreak)
+}
+
+// probeBackoffCap bounds how far a quiet channel's interval is stretched. Two
+// hours is a backstop, not the primary health signal: real traffic trips the
+// circuit breaker within seconds, so the probe only has to notice a channel
+// that nothing is routing to. A lower cap would do nothing for the common
+// case of a channel already configured to probe every 30 minutes.
+const probeBackoffCap = 2 * time.Hour
+
+// AdaptiveProbeInterval returns how long to wait before the next automatic
+// probe, given how many consecutive fully-healthy probes the channel has had.
+// Every probe is a real billed inference request and some upstreams charge a
+// large fixed input prompt on each one, so a stable channel is polled less
+// often. Any non-operational result resets the streak, dropping the interval
+// straight back to the configured value so recovery is noticed promptly.
+func AdaptiveProbeInterval(base time.Duration, streak int) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	var factor float64
+	switch {
+	case streak >= 20:
+		factor = 4
+	case streak >= 10:
+		factor = 2
+	case streak >= 5:
+		factor = 1.5
+	default:
+		return base
+	}
+	interval := time.Duration(float64(base) * factor)
+	// The cap is a ceiling on escalation, never a shortening: a channel the
+	// user already configured slower than the cap keeps its own cadence.
+	limit := probeBackoffCap
+	if base > limit {
+		limit = base
+	}
+	if interval > limit {
+		return limit
+	}
+	return interval
 }
 
 func (r *ProbeRunner) runOne(ctx context.Context, id int64) {
@@ -174,6 +224,7 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		channel.LastLatencyMs = nil
 		channel.LastTTFTMs = nil
 		channel.LastPingLatencyMs = nil
+		channel.ProbeStreak = 0
 		channel.LastCheckedAt = timePtr(time.Now().UTC())
 		if err := r.store.UpdateRuntime(context.Background(), id, func(fresh *Channel) {
 			copyRuntimeState(fresh, channel)
@@ -230,6 +281,7 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		channel.FailureCount++
 		channel.LastLatencyMs = nil
 		channel.LastTTFTMs = nil
+		channel.ProbeStreak = 0
 		// Same bookkeeping as the transport-failure path above and the forward
 		// path in Router.RouteCandidates: without it a channel whose probes all
 		// fail keeps a closed circuit and no cooldown forever, so it stays a
@@ -241,6 +293,10 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 			channel.CircuitState = CircuitOpen
 		}
 	} else if errCount > 0 || degradedCount > 0 {
+		// Degraded is neutral for the streak: the channel is still serving, just
+		// slowly, so it neither earns backoff nor loses it. Resetting here would
+		// mean a channel that flaps between clean and slow — the common case on
+		// shared upstreams — never reaches a backoff at all.
 		channel.LastStatus = probe.StatusDegraded
 		if errCount > 0 {
 			channel.LastError = fmt.Sprintf("%d/%d 模型异常: %s", errCount, len(results), firstErr)
@@ -258,6 +314,7 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 	} else {
 		channel.LastStatus = probe.StatusOperational
 		channel.LastError = ""
+		channel.ProbeStreak++
 		channel.FailureCount = 0
 		channel.CircuitState = CircuitClosed
 		channel.CooldownUntil = nil

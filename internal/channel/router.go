@@ -151,22 +151,28 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 		}
 		lastErr = err
 		failureInfo := FailureFromError(err)
-		channel.FailureCount++
-		channel.LastStatus = probe.StatusError
-		channel.LastError = FailureLabel(failureInfo) + ": " + err.Error()
-		cooldown := FailureCooldown(failureInfo, channel.FailureCount)
-		until := time.Now().UTC().Add(cooldown)
-		channel.CooldownUntil = &until
-		if FailureIsCircuitEligible(failureInfo) && channel.FailureCount >= 3 {
-			channel.CircuitState = CircuitOpen
-		} else if channel.CircuitState == "" {
-			channel.CircuitState = CircuitClosed
+		// A client-class failure (4xx other than 408/429) is the request's
+		// fault. Counting it would let one malformed request bench a healthy
+		// channel for 30s and drop it out of the routing pool, so only the
+		// failure is returned.
+		if FailureIsChannelFault(failureInfo) {
+			channel.FailureCount++
+			channel.LastStatus = probe.StatusError
+			channel.LastError = FailureLabel(failureInfo) + ": " + err.Error()
+			cooldown := FailureCooldown(failureInfo, channel.FailureCount)
+			until := time.Now().UTC().Add(cooldown)
+			channel.CooldownUntil = &until
+			if FailureIsCircuitEligible(failureInfo) && channel.FailureCount >= 3 {
+				channel.CircuitState = CircuitOpen
+			} else if channel.CircuitState == "" {
+				channel.CircuitState = CircuitClosed
+			}
+			channel.LastLatencyMs = &latency
+			channel.LastCheckedAt = timePtr(time.Now().UTC())
+			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
+				copyRuntimeState(fresh, channel)
+			})
 		}
-		channel.LastLatencyMs = &latency
-		channel.LastCheckedAt = timePtr(time.Now().UTC())
-		_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
-			copyRuntimeState(fresh, channel)
-		})
 	}
 	return nil, fmt.Errorf("all desktop channels failed for model %q: %w", model, lastErr)
 }

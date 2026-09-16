@@ -349,3 +349,39 @@ func TestChannelStoreGetAnalytics(t *testing.T) {
 		t.Fatalf("expected at least 1 daily trend entry, got 0")
 	}
 }
+
+// The update handler writes configuration by copying onto a freshly read
+// record. That is only safe if the copy never touches runtime health fields,
+// otherwise an edit would still wipe a probe result.
+func TestCopyConfigStateLeavesRuntimeAlone(t *testing.T) {
+	ttft := 1200
+	dst := &Channel{
+		Name: "old", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions,
+		Endpoint: "https://old.example", APIKey: "old-key", PrimaryModel: "old-model",
+		ExtraModels: []string{"old-extra"}, Enabled: true, IntervalSeconds: 60,
+		LastStatus: probe.StatusOperational, LastError: "keep me",
+		FailureCount: 7, CircuitState: CircuitOpen, LastTTFTMs: &ttft,
+		CooldownUntil: timePtr(time.Now().Add(time.Minute)),
+	}
+	src := &Channel{
+		Name: "new", Provider: probe.ProviderAnthropic, APIMode: probe.APIModeChatCompletions,
+		Endpoint: "https://new.example", APIKey: "new-key", PrimaryModel: "new-model",
+		ExtraModels: []string{"new-extra"}, Enabled: false, IntervalSeconds: 900,
+		LastStatus: probe.StatusError, LastError: "clobber", FailureCount: 99,
+		CircuitState: CircuitClosed,
+	}
+
+	CopyConfigState(dst, src)
+
+	if dst.Name != "new" || dst.Endpoint != "https://new.example" || dst.APIKey != "new-key" ||
+		dst.PrimaryModel != "new-model" || dst.Enabled || dst.IntervalSeconds != 900 ||
+		len(dst.ExtraModels) != 1 || dst.ExtraModels[0] != "new-extra" {
+		t.Fatalf("configuration was not applied: %+v", dst)
+	}
+	if dst.LastStatus != probe.StatusOperational || dst.LastError != "keep me" ||
+		dst.FailureCount != 7 || dst.CircuitState != CircuitOpen ||
+		dst.LastTTFTMs == nil || *dst.LastTTFTMs != 1200 || dst.CooldownUntil == nil {
+		t.Fatalf("runtime state was clobbered: status=%q err=%q failures=%d circuit=%q",
+			dst.LastStatus, dst.LastError, dst.FailureCount, dst.CircuitState)
+	}
+}

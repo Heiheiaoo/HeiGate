@@ -79,6 +79,26 @@ func FailureCooldown(info FailureInfo, failures int) time.Duration {
 	}
 }
 
+// FailureIsRetryable reports whether resending the same request could
+// plausibly succeed. A deterministic client-side rejection (bad request, bad
+// key, unknown model) fails identically on a second identical request, so
+// retrying only burns upstream quota and adds latency.
+func FailureIsRetryable(info FailureInfo) bool {
+	switch info.Class {
+	case FailureAuth, FailureModel, FailureClient:
+		return false
+	}
+	return true
+}
+
+// FailureIsChannelFault reports whether a failure should count against the
+// channel's health. A client-class failure is the request's fault, not the
+// channel's: counting it would let one malformed request bench a perfectly
+// healthy channel and take it out of the routing pool.
+func FailureIsChannelFault(info FailureInfo) bool {
+	return info.Class != FailureClient
+}
+
 func FailureIsCircuitEligible(info FailureInfo) bool {
 	return info.Class == FailureProvider || info.Class == FailureNetwork || info.StatusCode == 408 || info.StatusCode >= 500
 }

@@ -97,18 +97,52 @@ func (h *Handler) resolveModelAlias(ctx context.Context, requestedModel string) 
 					return requestedModel
 				}
 			}
-			// 3. Fallback: if requestedModel starts with "claude-" but no channel has it,
-			// pick the first enabled healthy channel's primary model
+			// 3. Fallback: if requestedModel starts with "claude-" but no channel
+			// has it, use the primary model of the healthiest enabled channel.
+			// Preferring a channel that is actually serving traffic matters: the
+			// previous "first enabled" rule could hand a working request to a
+			// channel whose circuit is open or whose last check failed.
 			if strings.HasPrefix(strings.ToLower(requestedModel), "claude-") || strings.HasPrefix(strings.ToLower(requestedModel), "anthropic/claude-") {
+				var benched string
 				for _, ch := range channels {
-					if ch.Enabled && strings.TrimSpace(ch.PrimaryModel) != "" {
-						return strings.TrimSpace(ch.PrimaryModel)
+					model := strings.TrimSpace(ch.PrimaryModel)
+					if !ch.Enabled || model == "" {
+						continue
 					}
+					if channelServingTraffic(ch) {
+						return model
+					}
+					if benched == "" {
+						benched = model
+					}
+				}
+				// Every channel looks unhealthy: better to try one than to fail
+				// the request outright.
+				if benched != "" {
+					return benched
 				}
 			}
 		}
 	}
 	return requestedModel
+}
+
+// channelServingTraffic reports whether a channel is a sensible target right
+// now: enabled, not benched by an open circuit or an active cooldown, and not
+// left in a failed state by its last check. A never-probed channel counts as
+// usable rather than unknown-bad.
+func channelServingTraffic(ch *channel.Channel) bool {
+	if ch.CircuitState == channel.CircuitOpen {
+		return false
+	}
+	if ch.CooldownUntil != nil && time.Now().Before(*ch.CooldownUntil) {
+		return false
+	}
+	switch ch.LastStatus {
+	case probe.StatusOperational, probe.StatusDegraded, "healthy", "", "unknown":
+		return true
+	}
+	return false
 }
 
 // TraceStep records a single attempt in the routing and failover process.
@@ -303,7 +337,9 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				step.Error = parsedErr
 				step.RawError = rawErr
 				traceSteps = append(traceSteps, step)
-				if attempt == 0 {
+				// Only resend when the outcome could differ. A deterministic 4xx
+				// (bad request, bad key, unknown model) would fail identically.
+				if attempt == 0 && channel.FailureIsRetryable(upErr.FailureInfo()) {
 					continue
 				}
 				failedAttempts = append(failedAttempts, fmt.Sprintf("%s (%d: %s)", ch.Name, response.status, parsedErr))

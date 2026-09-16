@@ -18,6 +18,8 @@ export type ApiChannel = {
   failureCount: number
   circuitState: 'closed' | 'open' | 'half_open'
   cooldownUntil: string | null
+  probeStreak: number
+  effectiveIntervalSeconds: number
   injectionState: 'unknown' | 'clean' | 'suspected' | 'detected' | 'error'
   injectionTokens: number | null
   injectionContent: string
@@ -56,6 +58,8 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
     failureCount: Number(record.failure_count ?? 0),
     circuitState: record.circuit_state === 'open' || record.circuit_state === 'half_open' ? record.circuit_state : 'closed',
     cooldownUntil: record.cooldown_until ? String(record.cooldown_until) : null,
+    probeStreak: Number(record.probe_streak ?? 0),
+    effectiveIntervalSeconds: Number(record.effective_interval_seconds ?? record.interval_seconds ?? 300),
     injectionState: ['clean', 'suspected', 'detected', 'error'].includes(String(record.injection_state)) ? record.injection_state as ApiChannel['injectionState'] : 'unknown',
     injectionTokens: record.injection_tokens == null ? null : Number(record.injection_tokens),
     injectionContent: String(record.injection_content ?? ''),

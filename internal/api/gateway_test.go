@@ -2,18 +2,22 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Heiheiaoo/heigate/internal/channel"
 	"github.com/Heiheiaoo/heigate/internal/probe"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func TestForwardDesktopRequestInjectsAnthropicKeyAndPath(t *testing.T) {
@@ -282,4 +286,150 @@ func TestStreamLogsSSE(t *testing.T) {
 	output = string(buf[:n])
 	require.Contains(t, output, "log_created")
 	require.Contains(t, output, "test-stream-model")
+}
+
+// The edit path must apply configuration without disturbing runtime health
+// state. This checks the fields a request carries; the "landed while the
+// request was in flight" half of the race is covered by
+// channel.TestCopyConfigStateLeavesRuntimeAlone and
+// channel.TestProbeNowDoesNotClobberConcurrentEdit, which exercise the two
+// building blocks the handler relies on.
+func TestUpdateAppliesConfigAndKeepsRuntimeState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := newTestStoreForHandler(t)
+	ch := &channel.Channel{
+		Name: "original", Provider: probe.ProviderOpenAI, Endpoint: "https://a.example",
+		APIKey: "sk-original", PrimaryModel: "m1", Enabled: true, IntervalSeconds: 300,
+		LastStatus: probe.StatusOperational,
+	}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandlerWithGatewayKey(store, channel.NewProbeRunner(store), "key")
+
+	// Simulate a probe landing between the handler's read and its write by
+	// changing runtime state right before issuing the request.
+	runtimeCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := store.UpdateRuntime(runtimeCtx, ch.ID, func(fresh *channel.Channel) {
+		fresh.LastStatus = probe.StatusDegraded
+		fresh.LastError = "probe found it slow"
+		fresh.FailureCount = 3
+		fresh.CircuitState = channel.CircuitOpen
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"name":"renamed","provider":"openai","endpoint":"https://a.example","api_key":"","primary_model":"m1","enabled":true,"interval_seconds":300}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/channels/"+strconv.FormatInt(ch.ID, 10), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(ch.ID, 10)}}
+	handler.update(c)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.Equal(t, "renamed", loaded.Name, "config change must apply")
+	require.Equal(t, probe.StatusDegraded, loaded.LastStatus, "runtime status must survive the edit")
+	require.Equal(t, "probe found it slow", loaded.LastError)
+	require.Equal(t, 3, loaded.FailureCount)
+	require.Equal(t, channel.CircuitOpen, loaded.CircuitState)
+	require.Equal(t, "sk-original", loaded.APIKey, "blank key must keep the stored one")
+}
+
+func newTestStoreForHandler(t *testing.T) *channel.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:desktop_handler_update_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := channel.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// The streaming token tracker splits incoming bytes on newlines and buffers
+// the trailing partial line. A multi-byte UTF-8 sequence can never straddle
+// that split: every byte of a rune is >= 0x80 while '\n' is 0x0A, so the
+// split point is always outside a rune. Feeding a stream one byte at a time
+// must therefore produce the same estimate as feeding it whole.
+func TestStreamTokenTrackerIsUTF8SplitSafe(t *testing.T) {
+	// Chinese text plus an emoji, both multi-byte, inside JSON string values.
+	payload := `data: {"choices":[{"delta":{"content":"你好世界，这是测试"}}]}` + "\n" +
+		`data: {"choices":[{"delta":{"content":"🚀 emoji 混排"}}]}` + "\n" +
+		"data: [DONE]\n\n"
+
+	whole := &streamTokenTracker{}
+	whole.Feed([]byte(payload))
+
+	byByte := &streamTokenTracker{}
+	for i := 0; i < len(payload); i++ {
+		byByte.Feed([]byte(payload[i : i+1]))
+	}
+
+	if byByte.completionTokens != whole.completionTokens {
+		t.Fatalf("byte-at-a-time estimate differs: %d vs %d", byByte.completionTokens, whole.completionTokens)
+	}
+	if byByte.estimatedChars != whole.estimatedChars {
+		t.Fatalf("char count differs: %d vs %d", byByte.estimatedChars, whole.estimatedChars)
+	}
+	if !byByte.sawDone {
+		t.Fatal("byte-at-a-time feed lost the [DONE] sentinel")
+	}
+	if whole.completionTokens == 0 {
+		t.Fatal("expected a non-zero estimate")
+	}
+}
+
+// The claude-* fallback must not hand a working request to a channel that is
+// benched. The old rule took the first enabled channel whatever its health.
+func TestResolveModelAliasPrefersHealthyChannel(t *testing.T) {
+	store := newTestStoreForHandler(t)
+	cooldown := time.Now().Add(10 * time.Minute)
+
+	broken := &channel.Channel{
+		Name: "broken", Provider: probe.ProviderOpenAI, Endpoint: "https://broken.example",
+		APIKey: "k1", PrimaryModel: "broken-model", Enabled: true,
+		LastStatus: probe.StatusError, CircuitState: channel.CircuitOpen,
+	}
+	benched := &channel.Channel{
+		Name: "benched", Provider: probe.ProviderOpenAI, Endpoint: "https://benched.example",
+		APIKey: "k2", PrimaryModel: "benched-model", Enabled: true,
+		LastStatus: probe.StatusOperational, CooldownUntil: &cooldown,
+	}
+	healthy := &channel.Channel{
+		Name: "healthy", Provider: probe.ProviderOpenAI, Endpoint: "https://healthy.example",
+		APIKey: "k3", PrimaryModel: "healthy-model", Enabled: true,
+		LastStatus: probe.StatusOperational,
+	}
+	for _, c := range []*channel.Channel{broken, benched, healthy} {
+		if err := store.Save(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := NewHandlerWithGatewayKey(store, channel.NewProbeRunner(store), "key")
+	got := handler.resolveModelAlias(context.Background(), "claude-sonnet-4-6")
+	require.Equal(t, "healthy-model", got, "must skip the open-circuit and cooling-down channels")
+
+	// With every channel benched it still returns something rather than failing.
+	if err := store.UpdateRuntime(context.Background(), healthy.ID, func(fresh *channel.Channel) {
+		fresh.CircuitState = channel.CircuitOpen
+		fresh.LastStatus = probe.StatusError
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := handler.resolveModelAlias(context.Background(), "claude-sonnet-4-6"); got == "" || got == "claude-sonnet-4-6" {
+		t.Fatalf("expected a last-resort model, got %q", got)
+	}
 }

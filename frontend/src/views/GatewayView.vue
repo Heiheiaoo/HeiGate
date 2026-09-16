@@ -49,6 +49,8 @@ export type Channel = {
   accent: string
   enabled: boolean
   probeInterval: number
+  probeStreak?: number
+  effectiveIntervalSeconds?: number
   apiKey?: string
   primaryModel?: string
   modelNames?: string[]
@@ -1330,6 +1332,8 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     accent: item.provider === 'anthropic' ? '#f59e0b' : item.provider === 'openai-responses' ? '#3b82f6' : '#10b981',
     enabled: item.enabled,
     probeInterval: item.intervalSeconds,
+    probeStreak: item.probeStreak ?? 0,
+    effectiveIntervalSeconds: item.effectiveIntervalSeconds ?? item.intervalSeconds,
     apiKey: item.apiKey,
     primaryModel: item.primaryModel,
     modelNames,
@@ -1369,6 +1373,8 @@ function toDesktopChannel(channel: Channel): ApiChannel {
     failureCount: channel.failureCount ?? 0,
     circuitState: channel.circuitState ?? 'closed',
     cooldownUntil: channel.cooldownUntil ?? null,
+    probeStreak: channel.probeStreak ?? 0,
+    effectiveIntervalSeconds: channel.effectiveIntervalSeconds ?? channel.probeInterval,
     injectionState: channel.injectionState ?? 'unknown',
     injectionTokens: channel.injectionTokens ?? null,
     injectionContent: channel.injectionContent ?? '',
@@ -4474,7 +4480,7 @@ function handleContextMenu(event: MouseEvent) {
                     <path d="M6 3h4M6 13h4M8 3v10M3 8h10" />
                   </svg>
                   <span v-if="c.circuitState && c.circuitState !== 'closed'">{{ circuitLabel(c.circuitState) }} · 自动熔断保护</span>
-                  <span v-else>路由服务通道 · {{ getIntervalDisplay(c.probeInterval) }}探活</span>
+                  <span v-else>路由服务通道 · {{ getIntervalDisplay(c.effectiveIntervalSeconds ?? c.probeInterval) }}探活<template v-if="(c.effectiveIntervalSeconds ?? c.probeInterval) !== c.probeInterval"> (自适应)</template></span>
                 </div>
               </div>
 

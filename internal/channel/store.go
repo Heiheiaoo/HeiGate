@@ -34,6 +34,7 @@ type Channel struct {
 	LastPingLatencyMs  *int       `json:"last_ping_latency_ms"`
 	LastError          string     `json:"last_error"`
 	LastCheckedAt      *time.Time `json:"last_checked_at"`
+	ProbeStreak        int        `json:"probe_streak"`
 	FailureCount       int        `json:"failure_count"`
 	CircuitState       string     `json:"circuit_state"`
 	CooldownUntil      *time.Time `json:"cooldown_until"`
@@ -43,6 +44,11 @@ type Channel struct {
 	InjectionCheckedAt *time.Time `json:"injection_checked_at"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+
+	// EffectiveIntervalSeconds is derived, not stored: it is the interval the
+	// scheduler will actually use after adaptive backoff, so the UI can show
+	// the real cadence instead of the configured one.
+	EffectiveIntervalSeconds int `json:"effective_interval_seconds"`
 }
 
 // LogEvent represents a real-time event for desktop request logs.
@@ -78,6 +84,7 @@ CREATE TABLE IF NOT EXISTS desktop_channels (
   last_ping_latency_ms INTEGER,
   last_error TEXT NOT NULL DEFAULT '',
   last_checked_at TEXT,
+  probe_streak INTEGER NOT NULL DEFAULT 0,
   failure_count INTEGER NOT NULL DEFAULT 0,
   circuit_state TEXT NOT NULL DEFAULT 'closed',
   cooldown_until TEXT,
@@ -169,6 +176,7 @@ func (s *Store) initialize(ctx context.Context) error {
 		"ALTER TABLE desktop_channels ADD COLUMN injection_tokens INTEGER",
 		"ALTER TABLE desktop_channels ADD COLUMN injection_content TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE desktop_channels ADD COLUMN injection_checked_at TEXT",
+		"ALTER TABLE desktop_channels ADD COLUMN probe_streak INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE desktop_request_logs ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0",
@@ -218,7 +226,7 @@ func (s *Store) List(ctx context.Context) ([]*Channel, error) {
 SELECT id, name, provider, api_mode, endpoint, api_key, primary_model,
        extra_models_json, enabled, interval_seconds, last_status,
        last_latency_ms, last_ttft_ms, last_ping_latency_ms, last_error, last_checked_at,
-       failure_count, circuit_state, cooldown_until,
+       probe_streak, failure_count, circuit_state, cooldown_until,
        injection_state, injection_tokens, injection_content, injection_checked_at,
        created_at, updated_at
 FROM desktop_channels ORDER BY id ASC`)
@@ -246,7 +254,7 @@ func (s *Store) Get(ctx context.Context, id int64) (*Channel, error) {
 SELECT id, name, provider, api_mode, endpoint, api_key, primary_model,
        extra_models_json, enabled, interval_seconds, last_status,
        last_latency_ms, last_ttft_ms, last_ping_latency_ms, last_error, last_checked_at,
-       failure_count, circuit_state, cooldown_until,
+       probe_streak, failure_count, circuit_state, cooldown_until,
        injection_state, injection_tokens, injection_content, injection_checked_at,
        created_at, updated_at
 FROM desktop_channels WHERE id = ?`, id)
@@ -290,7 +298,7 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
 	args := []any{channel.Name, channel.Provider, channel.APIMode, channel.Endpoint, channel.APIKey,
 		channel.PrimaryModel, string(extraModels), channel.Enabled, channel.IntervalSeconds,
 		channel.LastStatus, channel.LastLatencyMs, channel.LastTTFTMs, channel.LastPingLatencyMs,
-		channel.LastError, nullableTime(channel.LastCheckedAt), channel.FailureCount, channel.CircuitState,
+		channel.LastError, nullableTime(channel.LastCheckedAt), channel.ProbeStreak, channel.FailureCount, channel.CircuitState,
 		nullableTime(channel.CooldownUntil), channel.InjectionState, nullableInt(channel.InjectionTokens),
 		channel.InjectionContent, nullableTime(channel.InjectionCheckedAt),
 		channel.CreatedAt.UTC().Format(time.RFC3339Nano), channel.UpdatedAt.UTC().Format(time.RFC3339Nano)}
@@ -298,21 +306,23 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
 		result, err := s.db.ExecContext(ctx, `INSERT INTO desktop_channels
  (name, provider, api_mode, endpoint, api_key, primary_model, extra_models_json,
   enabled, interval_seconds, last_status, last_latency_ms, last_ttft_ms,
-  last_ping_latency_ms, last_error, last_checked_at, failure_count, circuit_state,
+  last_ping_latency_ms, last_error, last_checked_at, probe_streak, failure_count, circuit_state,
   cooldown_until, injection_state, injection_tokens, injection_content, injection_checked_at,
   created_at, updated_at)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
 		if err != nil {
 			return fmt.Errorf("insert desktop channel: %w", err)
 		}
 		channel.ID, err = result.LastInsertId()
+		channel.EffectiveIntervalSeconds = effectiveIntervalSeconds(channel)
 		return err
 	}
+	channel.EffectiveIntervalSeconds = effectiveIntervalSeconds(channel)
 	args = append(args, channel.ID)
 	if _, err := s.db.ExecContext(ctx, `UPDATE desktop_channels SET
  name=?, provider=?, api_mode=?, endpoint=?, api_key=?, primary_model=?, extra_models_json=?,
  enabled=?, interval_seconds=?, last_status=?, last_latency_ms=?, last_ttft_ms=?,
- last_ping_latency_ms=?, last_error=?, last_checked_at=?, failure_count=?, circuit_state=?,
+ last_ping_latency_ms=?, last_error=?, last_checked_at=?, probe_streak=?, failure_count=?, circuit_state=?,
  cooldown_until=?, injection_state=?, injection_tokens=?, injection_content=?, injection_checked_at=?,
  created_at=?, updated_at=?
  WHERE id=?`, args...); err != nil {
@@ -330,9 +340,36 @@ func copyRuntimeState(dst, src *Channel) {
 	dst.LastTTFTMs = src.LastTTFTMs
 	dst.LastPingLatencyMs = src.LastPingLatencyMs
 	dst.LastCheckedAt = src.LastCheckedAt
+	dst.ProbeStreak = src.ProbeStreak
 	dst.FailureCount = src.FailureCount
 	dst.CircuitState = src.CircuitState
 	dst.CooldownUntil = src.CooldownUntil
+}
+
+// effectiveIntervalSeconds is the cadence the scheduler will actually use for
+// this channel, after adaptive backoff. Derived on read so the UI can show the
+// real interval rather than the configured one.
+func effectiveIntervalSeconds(ch *Channel) int {
+	if ch.IntervalSeconds <= 0 {
+		return 0
+	}
+	return int(AdaptiveProbeInterval(time.Duration(ch.IntervalSeconds)*time.Second, ch.ProbeStreak).Seconds())
+}
+
+// CopyConfigState copies the user-editable configuration fields from src to
+// dst, leaving every runtime health field untouched. The update handler uses
+// it so an edit cannot clobber a probe or forward result that landed while the
+// request was in flight.
+func CopyConfigState(dst, src *Channel) {
+	dst.Name = src.Name
+	dst.Provider = src.Provider
+	dst.APIMode = src.APIMode
+	dst.Endpoint = src.Endpoint
+	dst.APIKey = src.APIKey
+	dst.PrimaryModel = src.PrimaryModel
+	dst.ExtraModels = src.ExtraModels
+	dst.Enabled = src.Enabled
+	dst.IntervalSeconds = src.IntervalSeconds
 }
 
 // UpdateRuntime re-reads the channel by id, lets mutate adjust it, and saves.
@@ -403,7 +440,7 @@ func scanChannel(scanner rowScanner) (*Channel, error) {
 	if err := scanner.Scan(&channel.ID, &channel.Name, &channel.Provider, &channel.APIMode,
 		&channel.Endpoint, &channel.APIKey, &channel.PrimaryModel, &modelsJSON, &enabled,
 		&channel.IntervalSeconds, &channel.LastStatus, &lastLatency, &lastTTFT,
-		&lastPing, &channel.LastError, &lastChecked, &channel.FailureCount, &channel.CircuitState,
+		&lastPing, &channel.LastError, &lastChecked, &channel.ProbeStreak, &channel.FailureCount, &channel.CircuitState,
 		&cooldownUntil, &channel.InjectionState, &injectTokens, &channel.InjectionContent, &injectChecked,
 		&createdAt, &updatedAt); err != nil {
 		return nil, fmt.Errorf("scan desktop channel: %w", err)
@@ -430,6 +467,7 @@ func scanChannel(scanner rowScanner) (*Channel, error) {
 	}
 	channel.InjectionCheckedAt = parseTime(injectChecked)
 	channel.LastCheckedAt = parseTime(lastChecked)
+	channel.EffectiveIntervalSeconds = effectiveIntervalSeconds(&channel)
 	channel.CooldownUntil = parseTime(cooldownUntil)
 	if channel.CircuitState == "" {
 		channel.CircuitState = "closed"

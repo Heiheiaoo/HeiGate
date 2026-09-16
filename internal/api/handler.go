@@ -185,23 +185,25 @@ func (h *Handler) update(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	ch.ID = id
-	ch.CreatedAt = existing.CreatedAt
-	ch.LastStatus = existing.LastStatus
-	ch.LastLatencyMs = existing.LastLatencyMs
-	ch.LastTTFTMs = existing.LastTTFTMs
-	ch.LastPingLatencyMs = existing.LastPingLatencyMs
-	ch.LastError = existing.LastError
-	ch.LastCheckedAt = existing.LastCheckedAt
-	ch.FailureCount = existing.FailureCount
-	ch.CircuitState = existing.CircuitState
-	ch.CooldownUntil = existing.CooldownUntil
-	if err := h.store.Save(c.Request.Context(), ch); err != nil {
+	// Apply only the configuration fields to whatever is in the database now.
+	// A probe or forward that finished while this handler was running keeps its
+	// result instead of being overwritten by the runtime state read above.
+	var updated *channel.Channel
+	if err := h.store.UpdateRuntime(c.Request.Context(), id, func(fresh *channel.Channel) {
+		// Changing the cadence is an explicit instruction: drop the adaptive
+		// backoff so the new interval takes effect immediately instead of the
+		// channel staying on its escalated one.
+		if fresh.IntervalSeconds != ch.IntervalSeconds {
+			fresh.ProbeStreak = 0
+		}
+		channel.CopyConfigState(fresh, ch)
+		updated = fresh
+	}); err != nil {
 		writeError(c, err)
 		return
 	}
-	h.runner.Schedule(ch)
-	c.JSON(http.StatusOK, gin.H{"data": sanitizeChannel(ch)})
+	h.runner.Schedule(updated)
+	c.JSON(http.StatusOK, gin.H{"data": sanitizeChannel(updated)})
 }
 
 func (h *Handler) remove(c *gin.Context) {
@@ -294,19 +296,26 @@ func (h *Handler) probe(c *gin.Context) {
 			writeError(c, err)
 			return
 		}
-		if len(results) > 0 && (targetModel == ch.PrimaryModel || ch.PrimaryModel == "") {
+		if len(results) > 0 {
 			primary := results[0]
-			ch.LastStatus = primary.Status
-			ch.LastError = primary.Message
-			ch.LastLatencyMs = primary.LatencyMs
-			ch.LastPingLatencyMs = primary.PingLatencyMs
-			ch.LastCheckedAt = &primary.CheckedAt
-			if primary.Status == probe.StatusOperational {
-				ch.FailureCount = 0
-				ch.CircuitState = channel.CircuitClosed
-				ch.CooldownUntil = nil
-			}
-			_ = h.store.Save(c.Request.Context(), ch)
+			// Re-read inside the update so a concurrent probe or edit is not
+			// clobbered, and skip the write if the primary model changed
+			// underneath us (this result is then about a different model).
+			_ = h.store.UpdateRuntime(c.Request.Context(), id, func(fresh *channel.Channel) {
+				if fresh.PrimaryModel != "" && targetModel != fresh.PrimaryModel {
+					return
+				}
+				fresh.LastStatus = primary.Status
+				fresh.LastError = primary.Message
+				fresh.LastLatencyMs = primary.LatencyMs
+				fresh.LastPingLatencyMs = primary.PingLatencyMs
+				fresh.LastCheckedAt = &primary.CheckedAt
+				if primary.Status == probe.StatusOperational {
+					fresh.FailureCount = 0
+					fresh.CircuitState = channel.CircuitClosed
+					fresh.CooldownUntil = nil
+				}
+			})
 		}
 		c.JSON(http.StatusOK, gin.H{"data": results})
 		return

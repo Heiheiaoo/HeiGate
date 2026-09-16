@@ -187,3 +187,93 @@ func TestChannelRouterCanonicalMatching(t *testing.T) {
 		}
 	}
 }
+
+// A client-class failure (400) is the request's fault. It must not count
+// against the channel, otherwise one malformed request benches a healthy
+// channel for 30s and removes it from the routing pool.
+func TestRouteClientFaultDoesNotPenalizeChannel(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:desktop_router_client_fault?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := &Channel{
+		Name: "healthy", Provider: probe.ProviderOpenAI, Endpoint: "https://x.example",
+		APIKey: "k", PrimaryModel: "gpt-test", Enabled: true, LastStatus: probe.StatusOperational,
+	}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+
+	router := NewRouter(store)
+	_, err = router.Route(context.Background(), "gpt-test", RouteSmartQuality, func(_ context.Context, _ *Channel) error {
+		return &upstreamStatusStub{status: 400}
+	})
+	if err == nil {
+		t.Fatal("expected the client error to surface")
+	}
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.FailureCount != 0 {
+		t.Fatalf("client fault counted against the channel: failure_count=%d", loaded.FailureCount)
+	}
+	if loaded.CooldownUntil != nil {
+		t.Fatal("client fault set a cooldown, benching a healthy channel")
+	}
+	if loaded.LastStatus == probe.StatusError {
+		t.Fatal("client fault marked the channel as errored")
+	}
+}
+
+// A transport failure is the channel's fault and must still be counted.
+func TestRouteChannelFaultStillPenalizes(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:desktop_router_channel_fault?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := &Channel{
+		Name: "flaky", Provider: probe.ProviderOpenAI, Endpoint: "https://y.example",
+		APIKey: "k", PrimaryModel: "gpt-test", Enabled: true, LastStatus: probe.StatusOperational,
+	}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+
+	router := NewRouter(store)
+	_, err = router.Route(context.Background(), "gpt-test", RouteSmartQuality, func(_ context.Context, _ *Channel) error {
+		return errors.New("connection refused")
+	})
+	if err == nil {
+		t.Fatal("expected the transport error to surface")
+	}
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.FailureCount != 1 {
+		t.Fatalf("transport failure not counted: failure_count=%d", loaded.FailureCount)
+	}
+	if loaded.CooldownUntil == nil {
+		t.Fatal("transport failure should set a cooldown")
+	}
+}
+
+// upstreamStatusStub carries a status that FailureFromError classifies.
+type upstreamStatusStub struct{ status int }
+
+func (e *upstreamStatusStub) Error() string { return "stub upstream error" }
+
+func (e *upstreamStatusStub) FailureInfo() FailureInfo { return ClassifyStatus(e.status) }
