@@ -531,3 +531,21 @@ func TestRunReadsNonstandardReasoningField(t *testing.T) {
 	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
 	require.NotNil(t, results[0].TTFTMs, "reasoning-only streams still report a TTFT")
 }
+
+func TestRunExtractsInStreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: error\n")
+		_, _ = io.WriteString(w, `data: {"error":{"message":"503 Service Unavailable: No available workers"}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusError, results[0].Status)
+	require.Contains(t, results[0].Message, "503 Service Unavailable: No available workers")
+}

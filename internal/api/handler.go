@@ -189,11 +189,16 @@ func (h *Handler) update(c *gin.Context) {
 	// A probe or forward that finished while this handler was running keeps its
 	// result instead of being overwritten by the runtime state read above.
 	var updated *channel.Channel
+	var primaryChanged bool
 	if err := h.store.UpdateRuntime(c.Request.Context(), id, func(fresh *channel.Channel) {
 		// Changing the cadence is an explicit instruction: drop the adaptive
 		// backoff so the new interval takes effect immediately instead of the
 		// channel staying on its escalated one.
 		if fresh.IntervalSeconds != ch.IntervalSeconds {
+			fresh.ProbeStreak = 0
+		}
+		if fresh.PrimaryModel != ch.PrimaryModel {
+			primaryChanged = true
 			fresh.ProbeStreak = 0
 		}
 		channel.CopyConfigState(fresh, ch)
@@ -203,6 +208,9 @@ func (h *Handler) update(c *gin.Context) {
 		return
 	}
 	h.runner.Schedule(updated)
+	if primaryChanged {
+		h.runner.ProbeOnce(updated)
+	}
 	c.JSON(http.StatusOK, gin.H{"data": sanitizeChannel(updated)})
 }
 
@@ -236,13 +244,19 @@ func (h *Handler) injectionCheck(c *gin.Context) {
 		return
 	}
 
-	models := []string{ch.PrimaryModel}
+	targetModel := strings.TrimSpace(c.Query("model"))
 	checkAll := c.Query("all") == "1" || c.Query("all") == "true"
-	if checkAll {
-		models = append(models, ch.ExtraModels...)
+
+	var models []string
+	if targetModel != "" {
+		models = []string{targetModel}
+	} else if checkAll {
+		models = append([]string{ch.PrimaryModel}, ch.ExtraModels...)
+	} else {
+		models = []string{ch.PrimaryModel}
 	}
 
-	timeout := 3 * time.Minute
+	timeout := 1 * time.Minute
 	if checkAll {
 		timeout = 8 * time.Minute
 	}
@@ -283,7 +297,10 @@ func (h *Handler) probe(c *gin.Context) {
 			writeError(c, err)
 			return
 		}
-		probeCtx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		// One model, but the budget must still cover the retries probe.Run
+		// runs to absorb slow-first-token jitter; a flat minute equals a single
+		// RequestTimeout and guarantees both retries get cut short.
+		probeCtx, cancel := context.WithTimeout(c.Request.Context(), probe.RunBudgetFor(1))
 		defer cancel()
 		results, err := probe.Run(probeCtx, probe.Config{
 			Provider:     ch.Provider,

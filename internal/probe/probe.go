@@ -20,7 +20,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -48,12 +47,12 @@ const (
 // Timing and limits.
 const (
 	// RequestTimeout bounds a single probe request including body read.
-	RequestTimeout = 45 * time.Second
+	RequestTimeout = 60 * time.Second
 	// RetryTimeout bounds a retry attempt. It matches the first attempt's
 	// window: reasoning models on free upstreams legitimately take 40+ seconds
 	// to first content, and a shorter retry window would re-fail a channel the
 	// first attempt merely lost to jitter.
-	RetryTimeout = 45 * time.Second
+	RetryTimeout = 60 * time.Second
 	// PingTimeout bounds the HEAD request used to measure origin reachability.
 	PingTimeout = 8 * time.Second
 	// MinIntervalSeconds is the shortest automatic probe interval.
@@ -88,7 +87,16 @@ var DegradedThreshold = 6 * time.Second
 // deadline cuts the retries short and reports a failure the retry was meant
 // to absorb.
 func RunBudget() time.Duration {
-	return PingTimeout + RequestTimeout + probeRetries*RetryTimeout + ScheduleBuffer
+	return RunBudgetFor(1)
+}
+
+// RunBudgetFor calculates the outer deadline for probing modelCount models sequentially
+// in a queue, including origin ping, first attempts, retries, and slack buffer.
+func RunBudgetFor(modelCount int) time.Duration {
+	if modelCount <= 1 {
+		return PingTimeout + RequestTimeout + probeRetries*RetryTimeout + ScheduleBuffer
+	}
+	return PingTimeout + time.Duration(modelCount)*(RequestTimeout+probeRetries*RetryTimeout) + ScheduleBuffer
 }
 
 // Validation errors. Messages intentionally contain "invalid" / "required"
@@ -215,9 +223,10 @@ func validateEndpoint(raw string) error {
 	return nil
 }
 
-// Run probes the primary model and every extra model concurrently and
-// returns one Result per distinct model, in configuration order. The origin
-// ping latency is measured once and attached to every result. A non-nil
+// Run probes the primary model and every extra model sequentially in a queue and
+// returns one Result per distinct model, in configuration order. Requesting
+// sequentially avoids triggering upstream concurrency limits or rate limits.
+// The origin ping latency is measured once and attached to every result. A non-nil
 // error is only returned for invalid configuration.
 func Run(ctx context.Context, cfg Config) ([]*Result, error) {
 	if ctx == nil {
@@ -239,17 +248,21 @@ func Run(ctx context.Context, cfg Config) ([]*Result, error) {
 
 	ping := Ping(ctx, cfg.Endpoint)
 	results := make([]*Result, len(models))
-	var wg sync.WaitGroup
 	for i, model := range models {
-		wg.Add(1)
-		go func(i int, model string) {
-			defer wg.Done()
-			res := checkModel(ctx, cfg, model)
-			res.PingLatencyMs = ping
-			results[i] = res
-		}(i, model)
+		if ctx.Err() != nil {
+			results[i] = &Result{
+				Model:         model,
+				Status:        StatusError,
+				PingLatencyMs: ping,
+				Message:       ctx.Err().Error(),
+				CheckedAt:     time.Now(),
+			}
+			continue
+		}
+		res := checkModel(ctx, cfg, model)
+		res.PingLatencyMs = ping
+		results[i] = res
 	}
-	wg.Wait()
 	return results, nil
 }
 
@@ -512,6 +525,24 @@ func readStream(cfg Config, body io.Reader, started time.Time) (*sendResult, err
 			break
 		}
 		out.sawAnyDelta = true
+		// Upstream providers may emit an error object inside the SSE stream (e.g. 503 or quota error with 200 HTTP status)
+		var errPayload struct {
+			Error json.RawMessage `json:"error"`
+			Type  string          `json:"type"`
+		}
+		if json.Unmarshal([]byte(payload), &errPayload) == nil && len(errPayload.Error) > 0 {
+			var errMsg string
+			var obj struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(errPayload.Error, &obj) == nil && obj.Message != "" {
+				errMsg = obj.Message
+			} else if json.Unmarshal(errPayload.Error, &errMsg) != nil || errMsg == "" {
+				errMsg = string(errPayload.Error)
+			}
+			return nil, fmt.Errorf("upstream stream error: %s", compactWhitespace(errMsg))
+		}
+
 		switch {
 		case cfg.Provider == ProviderAnthropic:
 			var ev struct {
@@ -571,9 +602,9 @@ func readStream(cfg Config, body io.Reader, started time.Time) (*sendResult, err
 					Delta struct {
 						Content          json.RawMessage `json:"content"`
 						ReasoningContent string          `json:"reasoning_content"`
-						// Some OpenAI-compatible upstreams (PM and friends) emit
-						// plain "reasoning" instead of "reasoning_content".
-						Reasoning string `json:"reasoning"`
+						Reasoning        string          `json:"reasoning"`
+						Thinking         string          `json:"thinking"`
+						Thought          string          `json:"thought"`
 					} `json:"delta"`
 				} `json:"choices"`
 			}
@@ -590,6 +621,12 @@ func readStream(cfg Config, body io.Reader, started time.Time) (*sendResult, err
 				thinking := choice.Delta.ReasoningContent
 				if thinking == "" {
 					thinking = choice.Delta.Reasoning
+				}
+				if thinking == "" {
+					thinking = choice.Delta.Thinking
+				}
+				if thinking == "" {
+					thinking = choice.Delta.Thought
 				}
 				if thinking != "" {
 					if reasonAt.IsZero() {

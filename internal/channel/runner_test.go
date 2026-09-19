@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -396,5 +397,152 @@ func TestProbeStreakRisesAndStretchesInterval(t *testing.T) {
 	}
 	if loaded.EffectiveIntervalSeconds != 450 {
 		t.Fatalf("effective interval = %d, want 450 (1.5x) once the channel proved stable", loaded.EffectiveIntervalSeconds)
+	}
+}
+
+// The channel's status describes its primary model. A broken extra model used
+// to drag the whole channel to degraded, which cost it its place in the
+// healthiest routing bucket and blocked adaptive backoff.
+func TestPrimaryModelDrivesChannelStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		var req struct {
+			Model string `json:"model"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+		if req.Model != "primary" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"message":"model not found"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, sumFromProbeBody(t, body))+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	store := newTestStore(t, "desktop_primary_status_test")
+	ch := &Channel{
+		Name: "mixed", Provider: probe.ProviderOpenAI, Endpoint: server.URL,
+		APIKey: "k", PrimaryModel: "primary", ExtraModels: []string{"stale-model"},
+		Enabled: true, IntervalSeconds: 300,
+	}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewProbeRunner(store)
+	defer runner.Stop()
+	if _, err := runner.ProbeNow(context.Background(), ch.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LastStatus != probe.StatusOperational {
+		t.Fatalf("status = %q, want operational: a working primary must not be dragged down by a stale extra model", loaded.LastStatus)
+	}
+	if loaded.ProbeStreak != 1 {
+		t.Fatalf("streak = %d, want 1: a working primary must earn adaptive backoff", loaded.ProbeStreak)
+	}
+	if !strings.Contains(loaded.LastError, "stale-model") {
+		t.Fatalf("the broken extra model must still be reported, got %q", loaded.LastError)
+	}
+}
+
+// The primary is the default routing target, so a dead primary benches the
+// whole channel as error even when a backup model still answers: a request that
+// lands on the primary would fail, and latency is cleared to keep it out of the
+// healthy routing bucket.
+func TestDeadPrimaryMarksChannelError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if req.Model == "primary" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"message":"model not found"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, sumFromProbeBody(t, body))+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	store := newTestStore(t, "desktop_dead_primary_test")
+	ch := &Channel{
+		Name: "backup", Provider: probe.ProviderOpenAI, Endpoint: server.URL,
+		APIKey: "k", PrimaryModel: "primary", ExtraModels: []string{"backup-model"},
+		Enabled: true, IntervalSeconds: 300,
+	}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewProbeRunner(store)
+	defer runner.Stop()
+	if _, err := runner.ProbeNow(context.Background(), ch.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LastStatus != probe.StatusError {
+		t.Fatalf("status = %q, want error when primary model fails", loaded.LastStatus)
+	}
+	if loaded.LastLatencyMs != nil {
+		t.Fatalf("latency = %v, want nil when primary model fails", loaded.LastLatencyMs)
+	}
+}
+
+// With nothing usable the channel is failed and benched, as before.
+func TestAllModelsDeadIsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"message":"model not found"}}`)
+	}))
+	defer server.Close()
+
+	store := newTestStore(t, "desktop_all_dead_test")
+	ch := &Channel{
+		Name: "dead", Provider: probe.ProviderOpenAI, Endpoint: server.URL,
+		APIKey: "k", PrimaryModel: "primary", ExtraModels: []string{"extra"},
+		Enabled: true, IntervalSeconds: 300,
+	}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewProbeRunner(store)
+	defer runner.Stop()
+	if _, err := runner.ProbeNow(context.Background(), ch.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LastStatus != probe.StatusError {
+		t.Fatalf("status = %q, want error when nothing serves", loaded.LastStatus)
+	}
+	if loaded.CooldownUntil == nil {
+		t.Fatal("a channel with nothing usable should be benched")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -200,7 +201,8 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		return nil, nil
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, probe.RunBudget())
+	modelCount := 1 + len(channel.ExtraModels)
+	probeCtx, cancel := context.WithTimeout(ctx, probe.RunBudgetFor(modelCount))
 	defer cancel()
 	results, probeErr := probe.Run(probeCtx, probe.Config{
 		Provider:     channel.Provider,
@@ -237,37 +239,33 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		return results, nil
 	}
 
-	var okCount, degradedCount, errCount int
-	var totalLatency, totalTTFT int
-	var firstErr string
+	// Non-operational models are surfaced in the channel's message regardless of
+	// which one is primary; the headline status and latency come from the primary
+	// alone (resolved below), so per-model counters and latency sums aren't needed.
+	var issues []string
 	for _, r := range results {
-		switch r.Status {
-		case probe.StatusOperational:
-			okCount++
-			if r.LatencyMs != nil {
-				totalLatency += *r.LatencyMs
-			}
-			if r.TTFTMs != nil {
-				totalTTFT += *r.TTFTMs
-			}
-		case probe.StatusDegraded:
-			degradedCount++
-			if r.LatencyMs != nil {
-				totalLatency += *r.LatencyMs
-			}
-			if r.TTFTMs != nil {
-				totalTTFT += *r.TTFTMs
-			}
-			if firstErr == "" && r.Message != "" {
-				firstErr = fmt.Sprintf("[%s] %s", r.Model, r.Message)
-			}
-		default:
-			errCount++
-			if firstErr == "" && r.Message != "" {
-				firstErr = fmt.Sprintf("[%s] %s", r.Model, r.Message)
-			}
+		if r.Status != probe.StatusOperational && r.Message != "" {
+			issues = append(issues, fmt.Sprintf("[%s] %s", r.Model, r.Message))
 		}
 	}
+
+	// The channel's headline status describes its primary model, which is the
+	// default routing target. Judging the channel by its worst model meant one
+	// stale or rate-limited entry in a long model list marked the whole channel
+	// degraded even when its primary served fine — which also kept the channel
+	// out of the healthiest routing bucket and blocked adaptive probe backoff.
+	// Problems in the other models are carried in the message instead.
+	var primary *probe.Result
+	for _, r := range results {
+		if r.Model == channel.PrimaryModel {
+			primary = r
+			break
+		}
+	}
+	if primary == nil && len(results) > 0 {
+		primary = results[0]
+	}
+	issueText := strings.Join(issues, "; ")
 
 	now := time.Now().UTC()
 	channel.LastCheckedAt = &now
@@ -275,55 +273,45 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		channel.LastPingLatencyMs = results[0].PingLatencyMs
 	}
 
-	if errCount == len(results) {
-		channel.LastStatus = probe.StatusError
-		channel.LastError = firstErr
-		channel.FailureCount++
-		channel.LastLatencyMs = nil
-		channel.LastTTFTMs = nil
-		channel.ProbeStreak = 0
-		// Same bookkeeping as the transport-failure path above and the forward
-		// path in Router.RouteCandidates: without it a channel whose probes all
-		// fail keeps a closed circuit and no cooldown forever, so it stays a
-		// routing candidate and is retried on every request.
-		cooldown := FailureCooldown(FailureInfo{Class: FailureProvider}, channel.FailureCount)
-		until := time.Now().UTC().Add(cooldown)
-		channel.CooldownUntil = &until
-		if channel.FailureCount >= 3 {
-			channel.CircuitState = CircuitOpen
-		}
-	} else if errCount > 0 || degradedCount > 0 {
-		// Degraded is neutral for the streak: the channel is still serving, just
-		// slowly, so it neither earns backoff nor loses it. Resetting here would
-		// mean a channel that flaps between clean and slow — the common case on
-		// shared upstreams — never reaches a backoff at all.
-		channel.LastStatus = probe.StatusDegraded
-		if errCount > 0 {
-			channel.LastError = fmt.Sprintf("%d/%d 模型异常: %s", errCount, len(results), firstErr)
-		} else {
-			channel.LastError = firstErr
-		}
-		if okCount+degradedCount > 0 {
-			avgLatency := totalLatency / (okCount + degradedCount)
-			channel.LastLatencyMs = &avgLatency
-			if totalTTFT > 0 {
-				avgTTFT := totalTTFT / (okCount + degradedCount)
-				channel.LastTTFTMs = &avgTTFT
+	if primary != nil {
+		switch primary.Status {
+		case probe.StatusOperational:
+			channel.LastStatus = probe.StatusOperational
+			channel.LastLatencyMs = primary.LatencyMs
+			channel.LastTTFTMs = primary.TTFTMs
+			channel.LastError = issueText
+			channel.ProbeStreak++
+			channel.FailureCount = 0
+			channel.CircuitState = CircuitClosed
+			channel.CooldownUntil = nil
+		case probe.StatusDegraded:
+			channel.LastStatus = probe.StatusDegraded
+			channel.LastLatencyMs = primary.LatencyMs
+			channel.LastTTFTMs = primary.TTFTMs
+			if primary.Message != "" {
+				channel.LastError = fmt.Sprintf("[%s] %s", primary.Model, primary.Message)
+			} else {
+				channel.LastError = issueText
 			}
-		}
-	} else {
-		channel.LastStatus = probe.StatusOperational
-		channel.LastError = ""
-		channel.ProbeStreak++
-		channel.FailureCount = 0
-		channel.CircuitState = CircuitClosed
-		channel.CooldownUntil = nil
-		if okCount > 0 {
-			avgLatency := totalLatency / okCount
-			channel.LastLatencyMs = &avgLatency
-			if totalTTFT > 0 {
-				avgTTFT := totalTTFT / okCount
-				channel.LastTTFTMs = &avgTTFT
+		default:
+			// Primary model failed / error. The channel status is error based on the primary model.
+			channel.LastStatus = probe.StatusError
+			channel.LastLatencyMs = nil
+			channel.LastTTFTMs = nil
+			if primary.Message != "" {
+				channel.LastError = fmt.Sprintf("[%s] %s", primary.Model, primary.Message)
+			} else if issueText != "" {
+				channel.LastError = issueText
+			} else {
+				channel.LastError = fmt.Sprintf("[%s] 探活失败", primary.Model)
+			}
+			channel.FailureCount++
+			channel.ProbeStreak = 0
+			cooldown := FailureCooldown(FailureInfo{Class: FailureProvider}, channel.FailureCount)
+			until := time.Now().UTC().Add(cooldown)
+			channel.CooldownUntil = &until
+			if channel.FailureCount >= 3 {
+				channel.CircuitState = CircuitOpen
 			}
 		}
 	}

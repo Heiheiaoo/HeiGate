@@ -36,6 +36,11 @@ import {
   type ClientStatus,
   type AnalyticsResult,
 } from '@/services/gatewayApi'
+import type { ChannelFilterStatus } from '@/components/channels/types'
+import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
+import ChannelGridView from '@/components/channels/ChannelGridView.vue'
+import ChannelTableView from '@/components/channels/ChannelTableView.vue'
+import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 
 export type Channel = {
   name: string
@@ -134,12 +139,7 @@ const modelSpeedTestQuery = ref('')
 
 
 
-function getChannelModels(c: Channel): string[] {
-  if (c.modelNames && c.modelNames.length > 0) {
-    return c.modelNames
-  }
-  return ['默认模型']
-}
+
 
 // Analytics state & helpers
 const analyticsDays = ref(7)
@@ -216,7 +216,7 @@ const maxDailyTokens = computed(() => {
 })
 
 // Channel View Mode (Cards Grid vs Table List)
-const channelViewMode = ref<'grid' | 'list'>('list')
+const channelViewMode = ref<'grid' | 'list'>('grid')
 function setChannelViewMode(mode: 'grid' | 'list') {
   channelViewMode.value = mode
   try {
@@ -228,21 +228,12 @@ function setChannelViewMode(mode: 'grid' | 'list') {
 
 // Interval Preset Options (0s = Manual Only, saves tokens)
 const intervalPresets = [
-  { label: '仅手动 (不耗Token)', value: 0 },
-  { label: '5分钟', value: 300 },
-  { label: '15分钟', value: 900 },
-  { label: '30分钟', value: 1800 },
-  { label: '自定义', value: -1 },
+  { label: '队列探活 · 仅手动 (不耗Token)', value: 0 },
+  { label: '队列探活 · 5分钟', value: 300 },
+  { label: '队列探活 · 15分钟', value: 900 },
+  { label: '队列探活 · 30分钟', value: 1800 },
+  { label: '队列探活 · 自定义间隔', value: -1 },
 ]
-
-function getIntervalDisplay(interval: number): string {
-  if (interval <= 0) return '手动'
-  if (interval === 300) return '5分钟'
-  if (interval === 900) return '15分钟'
-  if (interval === 1800) return '30分钟'
-  if (interval >= 60) return `${Math.round(interval / 60)}分钟`
-  return `${interval}秒`
-}
 
 
 
@@ -254,7 +245,8 @@ const newChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const newChannelEnabled = ref(true)
 const newChannelProbePreset = ref<number>(0)
 const newChannelProbeCustom = ref<number>(60)
-const newChannelModelText = ref('gpt-4o-mini')
+const newChannelPrimaryModel = ref('gpt-4o-mini')
+const newChannelModelNames = ref<string[]>(['gpt-4o-mini'])
 const isFetchingNewModels = ref(false)
 const showNewKey = ref(false)
 
@@ -266,7 +258,8 @@ const editChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const editChannelEnabled = ref(true)
 const editChannelProbePreset = ref<number>(0)
 const editChannelProbeCustom = ref<number>(60)
-const editChannelModelText = ref('')
+const editChannelPrimaryModel = ref('')
+const editChannelModelNames = ref<string[]>([])
 const isFetchingEditModels = ref(false)
 const showEditKey = ref(false)
 
@@ -350,16 +343,30 @@ type RequestEvent = {
 const channels = ref<Channel[]>([])
 const events = ref<RequestEvent[]>([])
 
-function channelRenderKey(channel: Channel, index: number): string {
-  return channel.gatewayId ? `desktop-${channel.gatewayId}` : `local-${channel.name}-${channel.url}-${index}`
-}
+const channelStatusFilter = ref<ChannelFilterStatus>('all')
+const channelToolbarRef = ref<InstanceType<typeof ChannelToolbar> | null>(null)
+
+const healthyChannelsCount = computed(() => channels.value.filter(c => c.enabled && c.status === 'healthy').length)
+const degradedChannelsCount = computed(() => channels.value.filter(c => c.enabled && c.status === 'degraded').length)
+const errorChannelsCount = computed(() => channels.value.filter(c => c.enabled && c.status !== 'healthy' && c.status !== 'degraded').length)
+const disabledChannelsCount = computed(() => channels.value.filter(c => !c.enabled).length)
 
 const filteredChannels = computed(() => {
   const query = channelSearch.value.trim().toLowerCase()
   return channels.value.filter((channel) => {
-    const matchesQuery = !query || `${channel.name} ${channel.url}`.toLowerCase().includes(query)
+    const matchesQuery = !query || `${channel.name} ${channel.url} ${(channel.modelNames || []).join(' ')}`.toLowerCase().includes(query)
     const matchesProtocol = protocolFilter.value === 'all' || channel.protocol === protocolFilter.value
-    return matchesQuery && matchesProtocol
+    let matchesStatus = true
+    if (channelStatusFilter.value === 'healthy') {
+      matchesStatus = channel.enabled && channel.status === 'healthy'
+    } else if (channelStatusFilter.value === 'degraded') {
+      matchesStatus = channel.enabled && channel.status === 'degraded'
+    } else if (channelStatusFilter.value === 'offline') {
+      matchesStatus = channel.enabled && channel.status !== 'healthy' && channel.status !== 'degraded'
+    } else if (channelStatusFilter.value === 'disabled') {
+      matchesStatus = !channel.enabled
+    }
+    return matchesQuery && matchesProtocol && matchesStatus
   })
 })
 
@@ -1286,32 +1293,6 @@ const averageLatency = computed(() => {
 })
 
 
-function statusLabel(c: Channel) {
-  if (c.status === 'healthy') return '正常'
-  if (c.status === 'degraded') return '波动'
-  if (c.status === 'unknown') return '待探活'
-  if (c.lastError) {
-    if (c.lastError.includes('401')) return '未授权 (401)'
-    if (c.lastError.includes('404')) return '模型不存在 (404)'
-    if (c.lastError.includes('429')) return '超额/限流 (429)'
-    if (c.lastError.includes('timeout') || c.lastError.includes('deadline')) return '连接超时'
-    return '异常'
-  }
-  return '离线'
-}
-
-function getStatusTooltip(c: Channel): string {
-  if (c.status === 'healthy') return `渠道与主模型探活正常 (响应耗时: ${formatLatencySec(c.latency)})`
-  if (c.status === 'degraded') return `模型正常返回，但时延较高 (${formatLatencySec(c.latency)})`
-  if (c.status === 'unknown') return '渠道新建，尚未发起过探活检测'
-  if (c.lastError) return `探活失败具体报错：\n${c.lastError}`
-  return '渠道离线或网络无法连接'
-}
-
-function circuitLabel(state?: Channel['circuitState']) {
-  return state === 'open' ? '熔断中' : state === 'half_open' ? '恢复探测' : ''
-}
-
 function toggleChannel(channel: Channel) {
   channel.enabled = !channel.enabled
   void persistChannel(channel)
@@ -1432,15 +1413,30 @@ async function probeChannel(channel: Channel) {
           message: hasErr ? errMsg! : (res.status === 'degraded' ? '响应稍慢' : ''),
         }
       }
+      const primaryRes = details.find((d) => isPrimaryModel(channel, d.model)) || details[0]
+      if (primaryRes) {
+        const isOk = primaryRes.status === 'operational' || primaryRes.status === 'degraded' || primaryRes.status === 'healthy'
+        channel.latency = primaryRes.latencyMs ?? null
+        channel.ttft = primaryRes.ttftMs ?? null
+        if (isOk) {
+          channel.status = primaryRes.status === 'degraded' ? 'degraded' : 'healthy'
+          channel.lastError = ''
+        } else {
+          channel.status = 'offline'
+          channel.lastError = primaryRes.message || '主模型探活失败'
+        }
+      }
     }
     await refreshChannels()
     channel.probing = false
-    const count = details?.length ?? (channel.modelNames?.length || 1)
-    const errs = details?.filter(d => d.status !== 'healthy' && d.status !== 'operational').length ?? 0
-    if (errs === 0) {
-      showToast(`渠道“${channel.name}”共 ${count} 个模型全部探活成功`)
+    const primaryRes = details?.find((d) => isPrimaryModel(channel, d.model)) || details?.[0]
+    const pModelName = primaryRes?.model || channel.primaryModel || '主模型'
+    if (primaryRes && (primaryRes.status === 'healthy' || primaryRes.status === 'operational')) {
+      showToast(`渠道“${channel.name}”探活成功，主模型 [${pModelName}] 状态就绪`)
+    } else if (primaryRes && primaryRes.status === 'degraded') {
+      showToast(`渠道“${channel.name}”探活完成，主模型 [${pModelName}] 响应稍慢`)
     } else {
-      showToast(`渠道“${channel.name}”探活完成，${count - errs}/${count} 个模型正常，${errs} 个异常`)
+      showToast(`渠道“${channel.name}”探活异常，主模型 [${pModelName}] 调用失败`)
     }
     return
   }
@@ -1449,9 +1445,19 @@ async function probeChannel(channel: Channel) {
   showToast(`渠道“${channel.name}”测试完成`)
 }
 
+const isProbingAllChannels = ref(false)
+
 async function probeAllChannels() {
-  await Promise.all(enabledChannels.value.map((channel) => probeChannel(channel)))
-  showToast('全量渠道探活完成')
+  if (isProbingAllChannels.value) return
+  isProbingAllChannels.value = true
+  try {
+    for (const channel of enabledChannels.value) {
+      await probeChannel(channel)
+    }
+    showToast('全量渠道队列探活完成')
+  } finally {
+    isProbingAllChannels.value = false
+  }
 }
 
 async function duplicateChannel(channel: Channel) {
@@ -1485,6 +1491,149 @@ const showInjectionModal = ref(false)
 const injectionChannel = ref<Channel | null>(null)
 const isCheckingInjection = ref(false)
 const injectionResults = ref<ModelInjectionResult[]>([])
+const modelInjections = ref<Record<string, ModelInjectionResult>>({})
+const modelCheckingInjection = ref<Record<string, boolean>>({})
+const isCheckingAllInjections = ref(false)
+
+function getModelInjection(channel: Channel, modelName: string): ModelInjectionResult | null {
+  const key = getModelKey(channel, modelName)
+  const r = modelInjections.value[key]
+  if (r) return r
+  if (isPrimaryModel(channel, modelName) && channel.injectionState && channel.injectionState !== 'unknown') {
+    return {
+      model: modelName,
+      state: channel.injectionState,
+      prompt_tokens: channel.injectionTokens ?? 0,
+      content: channel.injectionContent,
+      checked_at: channel.injectionCheckedAt ?? '',
+    }
+  }
+  return null
+}
+
+function isModelCheckingInjection(channel: Channel, modelName: string): boolean {
+  return Boolean(modelCheckingInjection.value[getModelKey(channel, modelName)])
+}
+
+function getModelInjectionClass(channel: Channel, modelName: string): string {
+  if (isModelCheckingInjection(channel, modelName)) return 'checking'
+  const inj = getModelInjection(channel, modelName)
+  if (!inj) return 'idle'
+  return inj.state || 'idle'
+}
+
+function getModelInjectionLabel(channel: Channel, modelName: string): string {
+  if (isModelCheckingInjection(channel, modelName)) return '检测中...'
+  const inj = getModelInjection(channel, modelName)
+  if (!inj) return '待测注入'
+  switch (inj.state) {
+    case 'clean': return '无注入'
+    case 'suspected': return `疑似 ${inj.prompt_tokens}tok`
+    case 'detected': return `注入 ${inj.prompt_tokens}tok`
+    case 'error': return '检测异常'
+    default: return '待测注入'
+  }
+}
+
+function getModelInjectionTooltip(channel: Channel, modelName: string): string {
+  const inj = getModelInjection(channel, modelName)
+  if (!inj) return '尚未检测。点击单独检测此模型的 Prompt 注入'
+  if (inj.state === 'clean') return `输入 token 数 ${inj.prompt_tokens}，在正常模板范围内。点击查看详情`
+  if (inj.state === 'suspected') return `输入 token 数 ${inj.prompt_tokens}，疑似轻微注入。点击查看详情`
+  if (inj.state === 'detected') return `输入 token 数 ${inj.prompt_tokens}，明确发现服务器注入！点击查看提取内容`
+  if (inj.state === 'error') return `检测失败：${inj.message || '上游接口异常'}。点击查看详情`
+  return '点击检测此模型的 Prompt 注入'
+}
+
+async function checkSingleModelInjection(channel: Channel, modelName: string) {
+  if (!channel || !channel.gatewayId) return
+  const key = getModelKey(channel, modelName)
+  if (modelCheckingInjection.value[key]) return
+  modelCheckingInjection.value[key] = true
+  try {
+    const results = await injectionCheck(channel.gatewayId, { model: modelName })
+    if (!results || results.length === 0) {
+      showToast(`模型 [${modelName}] 注入检测失败`)
+      return
+    }
+    const r = results[0]
+    modelInjections.value[key] = r
+    if (isPrimaryModel(channel, modelName)) {
+      channel.injectionState = r.state
+      channel.injectionTokens = r.prompt_tokens
+      channel.injectionContent = r.content || r.message || ''
+      channel.injectionCheckedAt = r.checked_at
+    }
+    if (r.state === 'detected') {
+      showToast(`⚠️ 警告：模型 [${modelName}] 发现服务器端 Prompt 注入 (${r.prompt_tokens} tokens)`)
+    } else if (r.state === 'suspected') {
+      showToast(`模型 [${modelName}] 疑似轻度注入 (${r.prompt_tokens} tokens)`)
+    } else if (r.state === 'clean') {
+      showToast(`模型 [${modelName}] 检测完成：无系统提示词注入 (${r.prompt_tokens} tokens)`)
+    } else {
+      showToast(`模型 [${modelName}] 注入检测失败：${r.message || '上游返回异常'}`)
+    }
+  } catch (err: any) {
+    showToast(`注入检测异常: ${err?.message || '未知错误'}`)
+  } finally {
+    modelCheckingInjection.value[key] = false
+  }
+}
+
+async function checkAllChannelModelsInjection(channel: Channel) {
+  if (!channel || !channel.gatewayId || isCheckingAllInjections.value) return
+  isCheckingAllInjections.value = true
+  try {
+    const results = await injectionCheck(channel.gatewayId, { all: true })
+    if (!results) {
+      showToast('全模型注入检测失败，请检查网络')
+      return
+    }
+    for (const r of results) {
+      const k = getModelKey(channel, r.model)
+      modelInjections.value[k] = r
+    }
+    const primary = results.find((r) => isPrimaryModel(channel, r.model)) ?? results[0]
+    if (primary) {
+      channel.injectionState = primary.state
+      channel.injectionTokens = primary.prompt_tokens
+      channel.injectionContent = primary.content || primary.message || ''
+      channel.injectionCheckedAt = primary.checked_at
+    }
+    const injected = results.filter((r) => r.state === 'detected').length
+    const suspected = results.filter((r) => r.state === 'suspected').length
+    if (injected > 0) showToast(`检测到 ${injected} 个模型存在注入${suspected ? `，${suspected} 个疑似` : ''}`)
+    else if (suspected > 0) showToast(`${suspected} 个模型疑似轻度注入`)
+    else if (results.every((r) => r.state === 'clean')) showToast(`全部 ${results.length} 个模型均无注入`)
+    else showToast('注入检测完成')
+  } catch (err: any) {
+    showToast(`注入检测异常: ${err?.message || '未知错误'}`)
+  } finally {
+    isCheckingAllInjections.value = false
+    await refreshChannels()
+  }
+}
+
+function openModelInjectionDetail(channel: Channel, modelName: string) {
+  const key = getModelKey(channel, modelName)
+  let r = modelInjections.value[key]
+  if (!r && isPrimaryModel(channel, modelName) && channel.injectionState && channel.injectionState !== 'unknown') {
+    r = {
+      model: modelName,
+      state: channel.injectionState,
+      prompt_tokens: channel.injectionTokens ?? 0,
+      content: channel.injectionContent,
+      checked_at: channel.injectionCheckedAt ?? '',
+    }
+  }
+  if (!r) {
+    checkSingleModelInjection(channel, modelName)
+    return
+  }
+  injectionChannel.value = channel
+  injectionResults.value = [r]
+  showInjectionModal.value = true
+}
 
 function modelInjectionLabel(r: ModelInjectionResult): string {
   switch (r.state) {
@@ -1496,11 +1645,12 @@ function modelInjectionLabel(r: ModelInjectionResult): string {
   }
 }
 
+// 列宽有限，标签只带数字；单位与详情在 title 里说清楚。
 function injectionStateLabel(c: Channel): string {
   switch (c.injectionState) {
     case 'clean': return '无注入'
-    case 'suspected': return `疑似 ${c.injectionTokens ?? '?'}tok`
-    case 'detected': return `注入 ${c.injectionTokens ?? '?'}tok`
+    case 'suspected': return `疑似 ${c.injectionTokens ?? '?'}`
+    case 'detected': return `注入 ${c.injectionTokens ?? '?'}`
     case 'error': return '检测失败'
     default: return '未检测'
   }
@@ -1508,9 +1658,17 @@ function injectionStateLabel(c: Channel): string {
 
 function openInjectionModal(channel: Channel) {
   injectionChannel.value = channel
-  // Seed the list from the persisted primary-model result so the modal is not
-  // empty before a check runs.
-  if (channel.injectionState && channel.injectionState !== 'unknown') {
+  // Seed the list from cached per-model results or the persisted primary-model result
+  const list: ModelInjectionResult[] = []
+  for (const m of (channel.modelNames || [])) {
+    const k = getModelKey(channel, m)
+    if (modelInjections.value[k]) {
+      list.push(modelInjections.value[k])
+    }
+  }
+  if (list.length > 0) {
+    injectionResults.value = list
+  } else if (channel.injectionState && channel.injectionState !== 'unknown') {
     injectionResults.value = [{
       model: channel.primaryModel || channel.modelNames?.[0] || '(主模型)',
       state: channel.injectionState,
@@ -1535,6 +1693,10 @@ async function runInjectionCheck(all: boolean) {
     return
   }
   injectionResults.value = results
+  for (const r of results) {
+    const k = getModelKey(channel, r.model)
+    modelInjections.value[k] = r
+  }
 
   const primary = results.find((r) => r.model === channel.primaryModel) ?? results[0]
   if (primary) {
@@ -1568,7 +1730,7 @@ async function openEditChannel(channel: Channel) {
   editChannelKey.value = rawKey
   editChannelProtocol.value = channel.protocol
   editChannelEnabled.value = channel.enabled
-  showEditKey.value = true
+  showEditKey.value = false
   const interval = channel.probeInterval ?? 0
   if (interval === 0 || interval === 300 || interval === 900 || interval === 1800) {
     editChannelProbePreset.value = interval
@@ -1576,7 +1738,9 @@ async function openEditChannel(channel: Channel) {
     editChannelProbePreset.value = -1
     editChannelProbeCustom.value = interval
   }
-  editChannelModelText.value = (channel.modelNames?.length ? channel.modelNames : ['gpt-4o-mini']).join('\n')
+  const primary = channel.primaryModel || channel.modelNames?.[0] || 'gpt-4o-mini'
+  editChannelPrimaryModel.value = primary
+  editChannelModelNames.value = channel.modelNames?.length ? [...channel.modelNames] : [primary]
   showEditChannel.value = true
 }
 
@@ -1584,10 +1748,12 @@ async function saveEditChannel() {
   if (!editingChannel.value) return
   const name = editChannelName.value.trim()
   const rawUrl = editChannelUrl.value.trim()
-  const modelNames = modelsFromText(editChannelModelText.value)
-  const model = modelNames[0] ?? ''
+  const primaryModel = editChannelPrimaryModel.value.trim() || editChannelModelNames.value[0] || 'gpt-4o-mini'
+  const modelNames = editChannelModelNames.value.includes(primaryModel)
+    ? [primaryModel, ...editChannelModelNames.value.filter(m => m !== primaryModel)]
+    : [primaryModel, ...editChannelModelNames.value]
   const interval = editChannelProbePreset.value === -1 ? Number(editChannelProbeCustom.value) : editChannelProbePreset.value
-  if (!name || !rawUrl || !model) {
+  if (!name || !rawUrl || !primaryModel) {
     showToast('请完整填写渠道名称、Base URL 与探活主模型')
     return
   }
@@ -1597,11 +1763,13 @@ async function saveEditChannel() {
   }
   const finalUrl = normalizeEndpointUrl(rawUrl)
   const target = editingChannel.value
+  const primaryChanged = target.primaryModel !== primaryModel
   target.name = name
   target.url = finalUrl
   target.protocol = editChannelProtocol.value
   target.enabled = editChannelEnabled.value
   target.probeInterval = interval
+  target.primaryModel = primaryModel
   target.modelNames = modelNames
   target.models = target.modelNames.length
   target.accent = target.protocol === 'anthropic' ? '#f59e0b' : target.protocol === 'openai-responses' ? '#3b82f6' : '#10b981'
@@ -1612,10 +1780,31 @@ async function saveEditChannel() {
     target.apiKey = ''
   }
 
+  // If primary model changed, sync target status/latency from cached primary model if exists
+  if (primaryChanged) {
+    const primaryKey = getModelKey(target, primaryModel)
+    const cached = modelLatencies.value[primaryKey]
+    if (cached && !cached.probing) {
+      const isOk = cached.status === 'operational' || cached.status === 'degraded' || cached.status === 'healthy'
+      target.latency = cached.latency
+      target.ttft = cached.ttft ?? null
+      if (isOk) {
+        target.status = cached.status === 'degraded' ? 'degraded' : 'healthy'
+        target.lastError = ''
+      } else if (cached.status === 'error' || cached.status === 'failed' || cached.status === 'timeout') {
+        target.status = 'offline'
+        target.lastError = cached.error || cached.message || '主模型调用异常'
+      }
+    }
+  }
+
   await persistChannel(target)
   showEditChannel.value = false
   editingChannel.value = null
   showToast(`渠道“${name}”配置已保存`)
+  if (primaryChanged && target.enabled) {
+    void probeChannel(target)
+  }
 }
 
 async function handleConfirmModalAction() {
@@ -1709,8 +1898,42 @@ function clearWorkspace() {
 }
 
 // Model Latency & Speed Test helpers
+const selectedModelNames = ref<string[]>([])
+
+const isAllModelsSelected = computed(() => {
+  const models = activeModelLatencyChannel.value?.modelNames || []
+  if (models.length === 0) return false
+  return models.every((m) => selectedModelNames.value.includes(m))
+})
+
+const isSomeModelsSelected = computed(() => {
+  const models = activeModelLatencyChannel.value?.modelNames || []
+  if (models.length === 0) return false
+  const count = selectedModelNames.value.length
+  return count > 0 && count < models.length
+})
+
+function toggleSelectAllModels() {
+  const models = activeModelLatencyChannel.value?.modelNames || []
+  if (isAllModelsSelected.value) {
+    selectedModelNames.value = []
+  } else {
+    selectedModelNames.value = [...models]
+  }
+}
+
+function toggleModelSelection(modelName: string) {
+  const idx = selectedModelNames.value.indexOf(modelName)
+  if (idx >= 0) {
+    selectedModelNames.value.splice(idx, 1)
+  } else {
+    selectedModelNames.value.push(modelName)
+  }
+}
+
 function openModelLatencyModal(channel: Channel) {
   activeModelLatencyChannel.value = channel
+  selectedModelNames.value = []
   modelSearchQuery.value = ''
   if (channel.latency != null && channel.modelNames?.[0]) {
     const key = `${channel.gatewayId ?? channel.name}::${channel.modelNames[0]}`
@@ -1762,7 +1985,7 @@ function getModelErrorMessage(channel: Channel, modelName: string): string {
 }
 
 function getModelLatencyDisplay(channel: Channel, modelName: string): string {
-  if (isModelProbing(channel, modelName)) return '测速中...'
+  if (isModelProbing(channel, modelName)) return '探活中...'
   if (isModelFailed(channel, modelName)) {
     const err = getModelErrorMessage(channel, modelName)
     const codeMatch = err.match(/HTTP(?:\/[0-9.]+)?\s*([1-5]\d{2})\b/i) || err.match(/\b([45]\d{2})\b/)
@@ -1775,10 +1998,13 @@ function getModelLatencyDisplay(channel: Channel, modelName: string): string {
   const key = getModelKey(channel, modelName)
   const entry = modelLatencies.value[key]
   if (entry?.latency != null) return formatLatencySec(entry.latency)
-  if (channel.latency != null && channel.status !== 'offline') {
+  // The channel-level latency is measured on its primary model. Showing it for
+  // every model would invent a number for models that were never measured —
+  // which is why a whole list used to display one identical value.
+  if (isPrimaryModel(channel, modelName) && channel.latency != null && channel.status !== 'offline') {
     return formatLatencySec(channel.latency)
   }
-  return '待测速'
+  return '待探活'
 }
 
 function getModelLatencyClass(channel: Channel, modelName: string): string {
@@ -1788,7 +2014,8 @@ function getModelLatencyClass(channel: Channel, modelName: string): string {
   if (isModelFailed(channel, modelName)) {
     return 'timeout'
   }
-  const lat = entry?.latency ?? (channel.latency != null && channel.status !== 'offline' ? channel.latency : null)
+  const inheritChannel = isPrimaryModel(channel, modelName) && channel.status !== 'offline'
+  const lat = entry?.latency ?? (inheritChannel ? channel.latency : null)
   if (lat == null) return 'idle'
   if (lat < 1000) return 'fast'
   if (lat < 2500) return 'normal'
@@ -1801,12 +2028,12 @@ function getModelTooltip(channel: Channel, modelName: string): string {
   const entry = modelLatencies.value[key]
   if (entry?.probing) return '正在向该模型发起真实测试 Prompt 进行端到端检验...'
   if (isModelFailed(channel, modelName)) {
-    return `测速异常：${getModelErrorMessage(channel, modelName)} (点击查看详情与诊断)`
+    return `探活异常：${getModelErrorMessage(channel, modelName)} (点击查看详情与诊断)`
   }
   if (entry?.latency != null) {
     return `模型工作正常，真实对话端到端响应耗时 ${formatLatencySec(entry.latency)}`
   }
-  return '该模型响应就绪，点击可在弹窗中进行单个真实测速'
+  return '该模型响应就绪，点击可在弹窗中进行单个真实探活'
 }
 
 function isModelProbing(channel: Channel, modelName: string): boolean {
@@ -1825,7 +2052,7 @@ function getModelSortScore(channel: Channel, modelName: string): { rank: number;
     return { rank: 5, latency: 999999, name: modelName }
   }
 
-  // 2. 测速中 -> 倒数第二 (Rank 4)
+  // 2. 探活中 -> 倒数第二 (Rank 4)
   if (isProbing) {
     return { rank: 4, latency: 999999, name: modelName }
   }
@@ -1849,7 +2076,7 @@ function getModelSortScore(channel: Channel, modelName: string): { rank: number;
     return { rank: 1, latency: chanLat, name: modelName }
   }
 
-  // 5. 待测速 / 未测状态 (Rank 3)
+  // 5. 待探活 / 未测状态 (Rank 3)
   return { rank: 3, latency: 999999, name: modelName }
 }
 
@@ -1857,10 +2084,13 @@ const filteredModalModels = computed(() => {
   const ch = activeModelLatencyChannel.value
   if (!ch) return []
   const list = ch.modelNames?.length ? [...ch.modelNames] : [ch.name]
-  const q = modelSearchQuery.value.trim().toLowerCase()
-  const filtered = q ? list.filter((m) => m.toLowerCase().includes(q)) : list
 
-  return filtered.sort((a, b) => {
+  return list.sort((a, b) => {
+    const isPriA = isPrimaryModel(ch, a)
+    const isPriB = isPrimaryModel(ch, b)
+    if (isPriA && !isPriB) return -1
+    if (!isPriA && isPriB) return 1
+
     const sA = getModelSortScore(ch, a)
     const sB = getModelSortScore(ch, b)
     if (sA.rank !== sB.rank) return sA.rank - sB.rank
@@ -1873,12 +2103,13 @@ async function probeSingleModel(channel: Channel, modelName: string) {
   const key = getModelKey(channel, modelName)
   modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: true }
   const t0 = performance.now()
+  const isPrimary = isPrimaryModel(channel, modelName)
   try {
     if (gatewayApiActive.value && channel.gatewayId) {
       const probeRes = await probeChannelDetails(channel.gatewayId, modelName)
       const res = probeRes?.[0]
       if (res) {
-        const isOk = res.status === 'operational' || res.status === 'degraded'
+        const isOk = res.status === 'operational' || res.status === 'degraded' || res.status === 'healthy'
         const lat = res.latencyMs ?? (isOk ? Math.round(performance.now() - t0) : null)
         const hasErr = !isOk
         const errMsg = hasErr ? (res.message || '模型调用异常') : null
@@ -1890,7 +2121,7 @@ async function probeSingleModel(channel: Channel, modelName: string) {
           error: errMsg,
           message: hasErr ? errMsg! : (res.status === 'degraded' ? '响应稍慢' : ''),
         }
-        if (channel.modelNames?.[0] === modelName) {
+        if (isPrimary) {
           channel.latency = lat
           channel.ttft = res.ttftMs ?? null
           if (isOk) {
@@ -1922,6 +2153,17 @@ async function probeSingleModel(channel: Channel, modelName: string) {
       error: errMsg,
       message: isOk ? '' : errMsg!,
     }
+    if (isPrimary) {
+      channel.latency = isOk ? elapsed : null
+      channel.ttft = null
+      if (isOk) {
+        channel.status = 'healthy'
+        channel.lastError = ''
+      } else {
+        channel.status = 'offline'
+        channel.lastError = errMsg!
+      }
+    }
   } catch (err: any) {
     const errMsg = err?.message || '请求超时或网络异常'
     modelLatencies.value[key] = {
@@ -1932,6 +2174,12 @@ async function probeSingleModel(channel: Channel, modelName: string) {
       error: errMsg,
       message: errMsg,
     }
+    if (isPrimary) {
+      channel.latency = null
+      channel.ttft = null
+      channel.status = 'offline'
+      channel.lastError = errMsg
+    }
   }
 }
 
@@ -1940,56 +2188,25 @@ async function probeAllChannelModels(channel: Channel) {
   isProbingAllModels.value = true
   const models = channel.modelNames ?? []
 
-  for (const m of models) {
-    const key = getModelKey(channel, m)
-    modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: true }
-  }
-
   try {
-    if (gatewayApiActive.value && channel.gatewayId) {
-      const probeRes = await probeChannelDetails(channel.gatewayId)
-      if (probeRes && probeRes.length > 0) {
-        for (const res of probeRes) {
-          const key = getModelKey(channel, res.model)
-          const isOk = res.status === 'operational' || res.status === 'degraded'
-          const hasErr = !isOk
-          const errMsg = hasErr ? (res.message || '模型调用异常') : null
-          modelLatencies.value[key] = {
-            latency: res.latencyMs ?? null,
-            probing: false,
-            status: res.status,
-            error: errMsg,
-            message: hasErr ? errMsg! : (res.status === 'degraded' ? '响应稍慢' : ''),
-          }
-        }
-        await refreshChannels()
-        isProbingAllModels.value = false
-        showToast(`已完成渠道“${channel.name}”全量真实模型调用测速`)
-        return
-      }
+    for (const m of models) {
+      await probeSingleModel(channel, m)
     }
-  } catch {
-    // Fall back to probing models one by one below.
+    showToast(`已完成渠道“${channel.name}”全量 ${models.length} 个模型的队列探活`)
+  } catch (err: any) {
+    showToast(`模型队列探活中断: ${err?.message || '未知异常'}`)
+  } finally {
+    isProbingAllModels.value = false
+    await refreshChannels()
   }
-
-  for (const m of models) {
-    await probeSingleModel(channel, m)
-  }
-  isProbingAllModels.value = false
-  showToast(`已完成渠道“${channel.name}”全量 ${models.length} 个模型的测速`)
 }
 
-function copyModelName(name: string) {
-  navigator.clipboard.writeText(name).then(() => {
-    showToast(`已复制模型 ID: ${name}`)
-  }).catch(() => {
-    showToast(`模型 ID: ${name}`)
-  })
-}
-
-function getFailedModelsInChannel(channel?: Channel | null): string[] {
-  if (!channel || !channel.modelNames || channel.modelNames.length <= 1) return []
-  return channel.modelNames.filter((m) => isModelFailed(channel, m))
+function toChannelStatus(s?: string): 'healthy' | 'degraded' | 'offline' | 'unknown' {
+  if (!s) return 'unknown'
+  if (s === 'healthy' || s === 'operational') return 'healthy'
+  if (s === 'degraded') return 'degraded'
+  if (s === 'offline' || s === 'error' || s === 'failed' || s === 'timeout') return 'offline'
+  return 'unknown'
 }
 
 async function removeModelFromChannel(channel?: Channel | null, modelName?: string) {
@@ -2014,52 +2231,112 @@ async function removeModelFromChannel(channel?: Channel | null, modelName?: stri
       channel.models = remaining.length
       if (isPrimary || channel.primaryModel === modelName) {
         channel.primaryModel = remaining[0]
+        const newKey = getModelKey(channel, remaining[0])
+        const cached = modelLatencies.value[newKey]
+        if (cached) {
+          channel.latency = cached.latency ?? null
+          channel.ttft = cached.ttft ?? null
+          if (cached.status) channel.status = toChannelStatus(cached.status)
+          if (cached.error) channel.lastError = cached.error
+        }
       }
       const key = getModelKey(channel, modelName)
       delete modelLatencies.value[key]
+      selectedModelNames.value = selectedModelNames.value.filter((m) => m !== modelName)
 
       await persistChannel(channel)
       await refreshChannels()
+
+      const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
+      if (fresh) {
+        activeModelLatencyChannel.value = fresh
+      }
+
       showToast(`已从渠道“${channel.name}”删除模型“${modelName}”`)
     },
   }
 }
 
-async function cleanFailedModels(channel?: Channel | null) {
+async function batchDeleteSelectedModels(channel?: Channel | null) {
   if (!channel) return
-  const failedList = getFailedModelsInChannel(channel)
-  if (failedList.length === 0) {
-    showToast('当前渠道未检测到失效或报错的模型')
-    return
-  }
-  const remainingCount = (channel.modelNames?.length || 0) - failedList.length
-  if (remainingCount < 1) {
-    showToast('不可全部清除，渠道至少需要保留一个模型')
+  const toDelete = [...selectedModelNames.value]
+  if (toDelete.length === 0) return
+
+  const remaining = (channel.modelNames || []).filter((m) => !toDelete.includes(m))
+  if (remaining.length === 0) {
+    showToast('渠道至少需要保留一个模型，无法全部删除')
     return
   }
 
+  const isDeletingPrimary = toDelete.includes(channel.primaryModel || '')
+
   confirmModal.value = {
-    title: '批量清理失效模型',
-    message: `确定要一键清理渠道 “${channel.name}” 中全部 ${failedList.length} 个报错/失效模型吗？`,
-    description: `清理后将保留其余 ${remainingCount} 个可用模型。`,
+    title: '批量删除模型确认',
+    message: `确定要从渠道 “${channel.name}” 中批量删除已选的 ${toDelete.length} 个模型吗？`,
+    description: isDeletingPrimary
+      ? `注意：已选模型中包含当前探活主模型，删除后将自动将 “${remaining[0]}” 设为新的主模型。`
+      : `删除后，网关将不再通过渠道 “${channel.name}” 分发这 ${toDelete.length} 个模型的请求。`,
     danger: true,
-    confirmText: `清理 ${failedList.length} 个模型`,
+    confirmText: `确认删除 (${toDelete.length})`,
     onConfirm: async () => {
-      const remaining = (channel.modelNames || []).filter((m) => !failedList.includes(m))
       channel.modelNames = remaining
       channel.models = remaining.length
-      if (failedList.includes(channel.primaryModel || '')) {
+      if (isDeletingPrimary) {
         channel.primaryModel = remaining[0]
+        const newKey = getModelKey(channel, remaining[0])
+        const cached = modelLatencies.value[newKey]
+        if (cached) {
+          channel.latency = cached.latency ?? null
+          channel.ttft = cached.ttft ?? null
+          if (cached.status) channel.status = toChannelStatus(cached.status)
+          if (cached.error) channel.lastError = cached.error
+        }
       }
-      failedList.forEach((m) => {
+      toDelete.forEach((m) => {
         delete modelLatencies.value[getModelKey(channel, m)]
       })
+      selectedModelNames.value = []
 
       await persistChannel(channel)
       await refreshChannels()
-      showToast(`已成功从渠道“${channel.name}”清理 ${failedList.length} 个失效模型`)
+
+      const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
+      if (fresh) {
+        activeModelLatencyChannel.value = fresh
+      }
+
+      showToast(`已成功从渠道“${channel.name}”删除 ${toDelete.length} 个模型`)
     },
   }
+}
+
+async function setAsPrimaryModel(channel?: Channel | null, modelName?: string) {
+  if (!channel || !modelName) return
+  if (channel.primaryModel === modelName) return
+
+  channel.primaryModel = modelName
+  const rest = (channel.modelNames || []).filter((m) => m !== modelName)
+  channel.modelNames = [modelName, ...rest]
+
+  const key = getModelKey(channel, modelName)
+  const cached = modelLatencies.value[key]
+  if (cached) {
+    channel.latency = cached.latency ?? null
+    channel.ttft = cached.ttft ?? null
+    if (cached.status) channel.status = toChannelStatus(cached.status)
+    if (cached.error) channel.lastError = cached.error
+  }
+
+  await persistChannel(channel)
+  await refreshChannels()
+
+  const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
+  if (fresh) {
+    activeModelLatencyChannel.value = fresh
+  }
+
+  showToast(`已将 “${modelName}” 设为探活主模型`)
+  probeSingleModel(channel, modelName)
 }
 
 // ============================================================================
@@ -2513,6 +2790,7 @@ function onDesktopShortcut(e: Event) {
       activeSection.value = 'channels'
     }
     nextTick(() => {
+      channelToolbarRef.value?.focusSearch()
       searchInputRef.value?.focus()
       searchInputRef.value?.select()
     })
@@ -2737,9 +3015,9 @@ async function probeAllProvidersForModel(modelName?: string | null) {
 
   const fastest = getFastestProviderInfo(target)
   if (fastest) {
-    showToast(`测速完成：${target} 优选供应商为 “${fastest.channelName}” (首字 ${formatLatencySec(fastest.latency)})`)
+    showToast(`探活完成：${target} 优选供应商为 “${fastest.channelName}” (首字 ${formatLatencySec(fastest.latency)})`)
   } else {
-    showToast(`已完成 “${target}” 全部 ${matchingChannels.length} 家供应商测速 (可用: ${healthyCount}/${matchingChannels.length})`)
+    showToast(`已完成 “${target}” 全部 ${matchingChannels.length} 家供应商探活 (可用: ${healthyCount}/${matchingChannels.length})`)
   }
 }
 
@@ -2752,17 +3030,6 @@ function openModelSpeedTestFor(modelName: string) {
 function closeModelSpeedTestModal() {
   activeModelSpeedTestName.value = null
   modelSpeedTestQuery.value = ''
-}
-
-async function probeAllActiveModels() {
-  if (isProbingAllModels.value) return
-  isProbingAllModels.value = true
-  showToast('开始全量并发测速所有可用渠道与模型...')
-  try {
-    await probeAllChannels()
-  } finally {
-    isProbingAllModels.value = false
-  }
 }
 
 function openLogDetail(log: RequestLog) {
@@ -3034,8 +3301,17 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
     // 优先通过本地网关后端代理请求，避免浏览器 CORS 拦截
     const proxyRes = await apiFetchUpstreamModels(url.trim(), apiKey.trim(), protocol)
     if (proxyRes.ok && proxyRes.models && proxyRes.models.length > 0) {
-      if (mode === 'new') newChannelModelText.value = proxyRes.models.join('\n')
-      else editChannelModelText.value = proxyRes.models.join('\n')
+      if (mode === 'new') {
+        newChannelModelNames.value = proxyRes.models
+        if (!newChannelPrimaryModel.value || !proxyRes.models.includes(newChannelPrimaryModel.value)) {
+          newChannelPrimaryModel.value = proxyRes.models[0] || ''
+        }
+      } else {
+        editChannelModelNames.value = proxyRes.models
+        if (!editChannelPrimaryModel.value || !proxyRes.models.includes(editChannelPrimaryModel.value)) {
+          editChannelPrimaryModel.value = proxyRes.models[0] || ''
+        }
+      }
       showToast(`已获取 ${proxyRes.models.length} 个上游模型`)
       return
     }
@@ -3092,8 +3368,17 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
     }
 
     if (fetchedModels.length > 0) {
-      if (mode === 'new') newChannelModelText.value = fetchedModels.join('\n')
-      else editChannelModelText.value = fetchedModels.join('\n')
+      if (mode === 'new') {
+        newChannelModelNames.value = fetchedModels
+        if (!newChannelPrimaryModel.value || !fetchedModels.includes(newChannelPrimaryModel.value)) {
+          newChannelPrimaryModel.value = fetchedModels[0] || ''
+        }
+      } else {
+        editChannelModelNames.value = fetchedModels
+        if (!editChannelPrimaryModel.value || !fetchedModels.includes(editChannelPrimaryModel.value)) {
+          editChannelPrimaryModel.value = fetchedModels[0] || ''
+        }
+      }
       showToast(`已获取 ${fetchedModels.length} 个上游模型`)
     } else {
       showToast(proxyRes.error ? `获取失败: ${proxyRes.error}` : (lastErrMsg ? `获取失败: ${lastErrMsg}` : '获取上游模型失败，请检查 Base URL 或网络'))
@@ -3108,8 +3393,12 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
 async function addChannel() {
   const rawUrl = newChannelUrl.value.trim()
   const name = newChannelName.value.trim()
-  const modelNames = modelsFromText(newChannelModelText.value)
-  const model = modelNames[0] ?? ''
+  const primaryModel = newChannelPrimaryModel.value.trim()
+  const modelNames = [...newChannelModelNames.value]
+  if (primaryModel && !modelNames.includes(primaryModel)) {
+    modelNames.unshift(primaryModel)
+  }
+  const model = primaryModel || modelNames[0] || ''
   const interval = newChannelProbePreset.value === -1 ? Number(newChannelProbeCustom.value) : newChannelProbePreset.value
   if (!name || !rawUrl || !newChannelProtocol.value || !model) {
     showToast('请完整填写渠道名称、接口协议与主模型')
@@ -3125,7 +3414,8 @@ async function addChannel() {
     url: finalUrl,
     apiKey: newChannelKey.value.trim(),
     protocol: newChannelProtocol.value,
-    status: 'offline',
+    primaryModel: model,
+    status: 'unknown',
     latency: null,
     ttft: null,
     models: modelNames.length,
@@ -3152,12 +3442,19 @@ async function addChannel() {
   newChannelName.value = ''
   newChannelUrl.value = ''
   newChannelKey.value = ''
-  newChannelModelText.value = 'gpt-4o-mini'
+  showNewKey.value = false
+  newChannelPrimaryModel.value = 'gpt-4o-mini'
+  newChannelModelNames.value = ['gpt-4o-mini']
   newChannelProtocol.value = 'openai-compatible'
   showAddChannel.value = false
   newChannelEnabled.value = true
   newChannelProbePreset.value = 0
   activeSection.value = 'channels'
+}
+
+function openAddChannel() {
+  showNewKey.value = false
+  showAddChannel.value = true
 }
 
 let isRefreshingLogs = false
@@ -3305,24 +3602,6 @@ function formatLogDateTime(isoString: string): string {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
   } catch {
     return isoString
-  }
-}
-
-function formatLastCheckTime(str?: string): string {
-  if (!str || str === '尚未探活' || str === '待探活' || str === '仅手动探活') return str || '尚未探活'
-  try {
-    const d = new Date(str)
-    if (isNaN(d.getTime())) return str
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const year = d.getFullYear()
-    const month = pad(d.getMonth() + 1)
-    const day = pad(d.getDate())
-    const hours = pad(d.getHours())
-    const minutes = pad(d.getMinutes())
-    const seconds = pad(d.getSeconds())
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
-  } catch {
-    return str
   }
 }
 
@@ -4371,320 +4650,62 @@ function handleContextMenu(event: MouseEvent) {
 
         <!-- SECTION 2: CHANNELS -->
         <section v-if="activeSection === 'channels'" class="m26-section-view">
-          <!-- Filter & Controls Toolbar -->
-          <div class="m26-control-bar">
-            <!-- Left: Search, Sort By, Layout Mode -->
-            <div class="m26-tools-left">
-              <!-- Search Bar in Toolbar -->
-              <div class="m26-toolbar-search">
-                <svg class="m26-search-icon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="6.5" cy="6.5" r="4.5" />
-                  <line x1="10" y1="10" x2="14" y2="14" />
-                </svg>
-                <input
-                  ref="searchInputRef"
-                  v-model="channelSearch"
-                  type="text"
-                  class="m26-toolbar-search-input"
-                  placeholder="搜索渠道/URL/模型..."
-                />
-                <button v-if="channelSearch" class="m26-search-clear" @click="channelSearch = ''" title="清空搜索">✕</button>
-                <span v-else class="m26-kbd">⌘K</span>
-              </div>
-
-              <!-- View Switch -->
-              <div class="m26-segmented">
-                <button
-                  class="m26-seg-btn icon-only"
-                  :class="{ active: channelViewMode === 'grid' }"
-                  @click="setChannelViewMode('grid')"
-                  title="网格卡片视图"
-                >
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
-                    <rect x="2" y="2" width="5" height="5" rx="1.2" />
-                    <rect x="9" y="2" width="5" height="5" rx="1.2" />
-                    <rect x="2" y="9" width="5" height="5" rx="1.2" />
-                    <rect x="9" y="9" width="5" height="5" rx="1.2" />
-                  </svg>
-                </button>
-                <button
-                  class="m26-seg-btn icon-only"
-                  :class="{ active: channelViewMode === 'list' }"
-                  @click="setChannelViewMode('list')"
-                  title="高密度表格视图"
-                >
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="2" y1="4" x2="14" y2="4" />
-                    <line x1="2" y1="8" x2="14" y2="8" />
-                    <line x1="2" y1="12" x2="14" y2="12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-
-            <!-- Right: Actions -->
-            <div class="m26-tools-right">
-              <button class="m26-glass-btn" @click="probeAllChannels" title="探活全部渠道 (⌘⇧P)">
-                <span>批量探活</span>
-              </button>
-
-              <!-- Add Channel Button -->
-              <button class="m26-action-btn primary" @click="showAddChannel = true" title="添加渠道 (⌘N)">
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2">
-                  <line x1="8" y1="3" x2="8" y2="13" />
-                  <line x1="3" y1="8" x2="13" y2="8" />
-                </svg>
-                <span>添加渠道</span>
-              </button>
-            </div>
-          </div>
+          <!-- Toolbar: Search, Filter Pills, View Mode Switcher, Batch Probe, Add Channel -->
+          <ChannelToolbar
+            ref="channelToolbarRef"
+            :search="channelSearch"
+            :filter-status="channelStatusFilter"
+            :view-mode="channelViewMode"
+            :is-probing-all="isProbingAllChannels"
+            :total-count="channels.length"
+            :healthy-count="healthyChannelsCount"
+            :degraded-count="degradedChannelsCount"
+            :error-count="errorChannelsCount"
+            :disabled-count="disabledChannelsCount"
+            @update:search="channelSearch = $event"
+            @update:filter-status="channelStatusFilter = $event"
+            @update:view-mode="setChannelViewMode($event)"
+            @probe-all="probeAllChannels"
+            @add-channel="openAddChannel"
+          />
 
           <!-- Card Grid View -->
-          <div v-if="channelViewMode === 'grid'" class="m26-channels-grid">
-            <div
-              v-for="(c, idx) in sortedChannels"
-              :key="channelRenderKey(c, idx)"
-              class="m26-hg-card"
-              :class="[c.status, { disabled: !c.enabled, 'is-selected': isChannelSelected(c) }]"
-              tabindex="0"
-              @click="selectChannel(c)"
-            >
-              <!-- Card Header: Priority, Title, Toggle, Badges -->
-              <div class="m26-card-header">
-                <div class="m26-card-title-group">
-                  <h4 class="m26-card-name" :title="c.name">{{ c.name }}</h4>
-                </div>
-
-                <div class="m26-card-badges-group">
-                  <!-- Status Pill -->
-                  <span
-                    class="m26-card-status-pill"
-                    :class="c.status"
-                    :title="getStatusTooltip(c)"
-                  >
-                    {{ c.status === 'healthy' ? '就绪' : c.status === 'degraded' ? '高延迟' : '异常' }}
-                  </span>
-
-                  <!-- Enabled / Disabled Switch -->
-                  <label class="m26-card-switch" :title="c.enabled ? '已启用（点击禁用）' : '已停用（点击启用）'">
-                    <input type="checkbox" :checked="c.enabled" @change="toggleChannel(c)" />
-                    <span class="slider"></span>
-                  </label>
-                </div>
-              </div>
-
-              <!-- Service / Role Tag Row -->
-              <div class="m26-card-tag-row">
-                <div class="m26-service-tag" :class="{ 'warning': c.circuitState && c.circuitState !== 'closed' }">
-                  <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M6 3h4M6 13h4M8 3v10M3 8h10" />
-                  </svg>
-                  <span v-if="c.circuitState && c.circuitState !== 'closed'">{{ circuitLabel(c.circuitState) }} · 自动熔断保护</span>
-                  <span v-else>路由服务通道 · {{ getIntervalDisplay(c.effectiveIntervalSeconds ?? c.probeInterval) }}探活<template v-if="(c.effectiveIntervalSeconds ?? c.probeInterval) !== c.probeInterval"> (自适应)</template></span>
-                </div>
-              </div>
-
-              <!-- Models Section: 1 line per model, left model name, right latency / error -->
-              <div class="m26-card-models-list">
-                <div class="m26-models-header">
-                  <span class="m26-models-title">支持模型 ({{ getChannelModels(c).length }})</span>
-                </div>
-
-                <div class="m26-model-rows">
-                  <div
-                    v-for="m in getChannelModels(c).slice(0, 3)"
-                    :key="m"
-                    class="m26-model-row"
-                    :class="{ 'has-error': isModelFailed(c, m) }"
-                  >
-                    <!-- Left: Model Name -->
-                    <div class="m26-model-row-name" :title="m">
-                      <span class="m26-model-bullet" :class="{ error: isModelFailed(c, m) }"></span>
-                      <span class="m26-model-name-text">{{ m }}</span>
-                    </div>
-
-                    <!-- Right: Model Latency or Error -->
-                    <div class="m26-model-row-latency">
-                      <!-- If error: clickable error button/badge that opens diagnostic modal -->
-                      <button
-                        v-if="isModelFailed(c, m)"
-                        class="m26-model-err-badge"
-                        @click.stop="openModelErrorDetail(c, m)"
-                        :title="'模型异常：' + getModelErrorMessage(c, m) + ' (点击查看详细报错与诊断)'"
-                      >
-                        <span class="m26-err-dot"></span>
-                        <span>{{ getModelLatencyDisplay(c, m) }}</span>
-                        <span class="m26-err-arrow">➔</span>
-                      </button>
-
-                      <!-- If healthy / degraded / probing -->
-                      <span
-                        v-else
-                        class="m26-model-lat-tag"
-                        :class="getModelLatencyClass(c, m)"
-                        :title="getModelTooltip(c, m)"
-                        @click.stop="openModelErrorDetail(c, m)"
-                      >
-                        <span v-if="isModelProbing(c, m)" class="m26-spin-dot mini"></span>
-                        <span>{{ getModelLatencyDisplay(c, m) }}</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  <!-- If more than 3 models: collapse button that opens modal with all models -->
-                  <button
-                    v-if="getChannelModels(c).length > 3"
-                    class="m26-model-more-btn"
-                    @click.stop="openModelLatencyModal(c)"
-                    :title="'查看全部 ' + getChannelModels(c).length + ' 个模型详情'"
-                  >
-                    <span>查看全部 {{ getChannelModels(c).length }} 个模型 (展开余下 {{ getChannelModels(c).length - 3 }} 个)</span>
-                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                      <polyline points="5 3 10 8 5 13" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-
-              <!-- 4 Dedicated Action Buttons: 探活, 编辑, 复制, 删除 -->
-              <div class="m26-card-actions">
-                <button
-                  class="m26-card-btn"
-                  :disabled="c.probing"
-                  @click="probeChannel(c)"
-                  title="立即对该渠道所有模型发起探活"
-                >
-                  <svg v-if="!c.probing" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M23 4v6h-6M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                  </svg>
-                  <span v-else class="m26-spin-dot"></span>
-                  <span>{{ c.probing ? '探活中' : '探活' }}</span>
-                </button>
-                <button
-                  class="m26-card-btn"
-                  @click="openEditChannel(c)"
-                  title="编辑渠道配置"
-                >
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-                  </svg>
-                  <span>编辑</span>
-                </button>
-                <button
-                  class="m26-card-btn"
-                  @click="duplicateChannel(c)"
-                  title="复制渠道"
-                >
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                  <span>复制</span>
-                </button>
-                <button
-                  class="m26-card-btn danger"
-                  @click="removeChannel(c)"
-                  title="删除此渠道"
-                >
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  </svg>
-                  <span>删除</span>
-                </button>
-              </div>
-            </div>
-          </div>
+          <ChannelGridView
+            v-if="channelViewMode === 'grid'"
+            :channels="sortedChannels"
+            :selected-channel="getSelectedChannel()"
+            :search-query="channelSearch"
+            @select="selectChannel($event as Channel)"
+            @toggle="toggleChannel($event as Channel)"
+            @probe="probeChannel($event as Channel)"
+            @edit="openEditChannel($event as Channel)"
+            @duplicate="duplicateChannel($event as Channel)"
+            @remove="removeChannel($event as Channel)"
+            @open-models="openModelLatencyModal($event as Channel)"
+            @open-diagnostic="openChannelDiagnostic($event as Channel)"
+            @open-inject="openInjectionModal($event as Channel)"
+            @add-channel="openAddChannel"
+            @clear-search="channelSearch = ''; channelStatusFilter = 'all'"
+          />
 
           <!-- High-Density Table View -->
-          <div v-else class="m26-table-wrap">
-            <table class="m26-table">
-              <thead>
-                <tr>
-                  <th style="width: 160px;">渠道名称</th>
-                  <th style="width: 110px;">接口协议</th>
-                  <th style="width: 95px;">注入</th>
-                  <th style="width: 185px;">支持模型</th>
-                  <th style="width: 170px;">健康状态</th>
-                  <th style="width: 80px;">首字</th>
-                  <th style="width: 165px;">上次探活</th>
-                  <th style="width: 65px; text-align: center;">启停</th>
-                  <th style="width: 220px;" class="text-right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="(c, idx) in sortedChannels"
-                  :key="channelRenderKey(c, idx)"
-                  :class="{ 'is-selected': isChannelSelected(c) }"
-                  @click="selectChannel(c)"
-                >
-                  <td>
-                    <span class="font-medium text-main truncate block" :title="c.name">{{ c.name }}</span>
-                  </td>
-                  <td><span class="m26-proto-pill" :class="c.protocol">{{ protocolShortLabel(c.protocol) }}</span></td>
-                  <td>
-                    <button
-                      class="m26-inject-pill"
-                      :class="c.injectionState ?? 'unknown'"
-                      :title="c.injectionCheckedAt ? `上次检测: ${c.injectionCheckedAt.slice(0, 19).replace('T', ' ')}` : '点击检测该渠道是否被上游注入系统提示'"
-                      @click.stop="openInjectionModal(c)"
-                    >
-                      {{ injectionStateLabel(c) }}
-                    </button>
-                  </td>
-                  <td class="cursor-pointer" @click="openModelLatencyModal(c)" title="点击查看全部模型与测速">
-                    <span class="m26-model-badge primary">
-                      <span class="badge-icon">⚡</span>
-                      {{ c.modelNames?.[0] || '默认' }}
-                    </span>
-                    <span v-if="(c.modelNames?.length || 0) > 1" class="m26-model-badge count ml-1">
-                      +{{ (c.modelNames?.length || 1) - 1 }}
-                    </span>
-                  </td>
-                  <td>
-                    <div
-                      class="m26-ch-status-box"
-                      :class="{ 'has-error': c.lastError && c.status !== 'healthy' }"
-                      :title="getStatusTooltip(c) + (c.lastError ? '（点击查看报错详情）' : '')"
-                      @click="c.lastError && c.status !== 'healthy' ? openChannelDiagnostic(c) : null"
-                    >
-                      <span class="m26-status-dot" :class="c.status"></span>
-                      <span>{{ statusLabel(c) }}</span>
-                      <span v-if="c.lastError && c.status !== 'healthy'" class="m26-status-err-tag">查看原因</span>
-                    </div>
-                  </td>
-                  <td class="font-mono whitespace-nowrap">{{ formatLatencySec(c.ttft ?? c.latency) }}</td>
-                  <td class="text-xs text-muted font-mono whitespace-nowrap">{{ formatLastCheckTime(c.lastCheck) }}</td>
-                  <td style="text-align: center;">
-                    <label class="m26-switch micro" :title="c.enabled ? '已启用（点击停用）' : '已停用（点击启用）'">
-                      <input type="checkbox" :checked="c.enabled" @change="toggleChannel(c)" />
-                      <span class="m26-slider"></span>
-                    </label>
-                  </td>
-                  <td class="text-right">
-                    <div class="m26-table-actions">
-                      <button class="m26-btn-micro probe" :disabled="c.probing" @click="probeChannel(c)">探活</button>
-                      <button
-                        v-if="c.lastError && c.status !== 'healthy'"
-                        class="m26-btn-micro danger-soft"
-                        @click="openChannelDiagnostic(c)"
-                        title="查看报错原因与排查建议"
-                      >
-                        诊断
-                      </button>
-                      <button class="m26-btn-icon" @click="duplicateChannel(c)" title="复制副本">
-                        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                          <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                          <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                        </svg>
-                      </button>
-                      <button class="m26-btn-icon" @click="openEditChannel(c)" title="编辑"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"><path d="M11 2l3 3-8 8H3v-3l8-8z" /></svg></button>
-                      <button class="m26-btn-icon danger" @click="removeChannel(c)" title="删除"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"><path d="M3 4h10M6 4V2h4v2M5 6v7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V6" /></svg></button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <ChannelTableView
+            v-else
+            :channels="sortedChannels"
+            :selected-channel="getSelectedChannel()"
+            :search-query="channelSearch"
+            @select="selectChannel($event as Channel)"
+            @toggle="toggleChannel($event as Channel)"
+            @probe="probeChannel($event as Channel)"
+            @edit="openEditChannel($event as Channel)"
+            @duplicate="duplicateChannel($event as Channel)"
+            @remove="removeChannel($event as Channel)"
+            @open-models="openModelLatencyModal($event as Channel)"
+            @open-diagnostic="openChannelDiagnostic($event as Channel)"
+            @open-inject="openInjectionModal($event as Channel)"
+            @add-channel="openAddChannel"
+            @clear-search="channelSearch = ''; channelStatusFilter = 'all'"
+          />
         </section>
 
         <!-- SECTION 3: MODELS -->
@@ -4706,19 +4727,6 @@ function handleContextMenu(event: MouseEvent) {
             </div>
 
             <div class="m26-models-actions-area">
-              <div class="m26-toolbar-search">
-                <svg class="m26-search-icon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="6.5" cy="6.5" r="4.5" />
-                  <line x1="10" y1="10" x2="14" y2="14" />
-                </svg>
-                <input
-                  v-model="channelSearch"
-                  type="text"
-                  class="m26-toolbar-search-input"
-                  placeholder="搜索模型名称/渠道/别名..."
-                />
-                <button v-if="channelSearch" class="m26-search-clear" @click="channelSearch = ''" title="清空搜索">✕</button>
-              </div>
               <button
                 class="m26-action-btn secondary"
                 @click="openCustomMappingsModal"
@@ -4729,18 +4737,6 @@ function handleContextMenu(event: MouseEvent) {
                 </svg>
                 <span>模型归类设置</span>
                 <span v-if="Object.keys(customModelMappings).length > 0" class="m26-badge-count">{{ Object.keys(customModelMappings).length }}</span>
-              </button>
-              <button
-                v-if="channels.length"
-                class="m26-action-btn primary"
-                :disabled="isProbingAllModels"
-                @click="probeAllActiveModels"
-              >
-                <span v-if="isProbingAllModels" class="m26-spin-dot"></span>
-                <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                </svg>
-                <span>{{ isProbingAllModels ? '测速中...' : '一键测速全部' }}</span>
               </button>
             </div>
           </div>
@@ -4869,12 +4865,12 @@ function handleContextMenu(event: MouseEvent) {
                   <button
                     class="m26-model-test-btn"
                     @click="openModelSpeedTestFor(m.name)"
-                    title="在全部支持此模型的渠道中发起并发测速"
+                    title="在全部支持此模型的渠道中发起并发探活"
                   >
                     <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
                       <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
                     </svg>
-                    <span>测试此模型</span>
+                    <span>探活此模型</span>
                   </button>
                   <button
                     class="m26-model-classify-btn"
@@ -5449,7 +5445,7 @@ function handleContextMenu(event: MouseEvent) {
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
 
     <!-- MODAL: INJECTION CHECK -->
-    <div v-if="showInjectionModal" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
+    <div v-if="showInjectionModal" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
       <div class="m26-modal-sheet m26-inject-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <h3 class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
@@ -5540,7 +5536,7 @@ function handleContextMenu(event: MouseEvent) {
               </select>
             </div>
             <div class="m26-form-group">
-              <label class="m26-label">探活频率</label>
+              <label class="m26-label">探活模式与频率</label>
               <select v-model="newChannelProbePreset" class="m26-select">
                 <option v-for="opt in intervalPresets" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </select>
@@ -5594,13 +5590,12 @@ function handleContextMenu(event: MouseEvent) {
           </div>
 
           <div class="m26-form-group">
-            <div class="flex justify-between items-center mb-1">
-              <label class="m26-label mb-0">支持模型列表 (首行为探活主模型)</label>
-              <button class="m26-text-btn" :disabled="isFetchingNewModels" @click="fetchUpstreamModels('new')">
-                {{ isFetchingNewModels ? '拉取中...' : '自动拉取上游模型' }}
-              </button>
-            </div>
-            <textarea v-model="newChannelModelText" rows="3" class="m26-textarea font-mono text-xs" placeholder="gpt-4o-mini&#10;gpt-4o&#10;claude-3-7-sonnet"></textarea>
+            <ChannelModelManager
+              v-model:primary-model="newChannelPrimaryModel"
+              v-model:model-names="newChannelModelNames"
+              :is-fetching="isFetchingNewModels"
+              @fetch-upstream="fetchUpstreamModels('new')"
+            />
           </div>
         </div>
 
@@ -5635,7 +5630,7 @@ function handleContextMenu(event: MouseEvent) {
               </select>
             </div>
             <div class="m26-form-group">
-              <label class="m26-label">探活频率</label>
+              <label class="m26-label">探活模式与频率</label>
               <select v-model="editChannelProbePreset" class="m26-select">
                 <option v-for="opt in intervalPresets" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </select>
@@ -5689,13 +5684,12 @@ function handleContextMenu(event: MouseEvent) {
           </div>
 
           <div class="m26-form-group">
-            <div class="flex justify-between items-center mb-1">
-              <label class="m26-label mb-0">支持模型列表 (首行为探活主模型)</label>
-              <button class="m26-text-btn" :disabled="isFetchingEditModels" @click="fetchUpstreamModels('edit')">
-                {{ isFetchingEditModels ? '拉取中...' : '自动拉取上游模型' }}
-              </button>
-            </div>
-            <textarea v-model="editChannelModelText" rows="3" class="m26-textarea font-mono text-xs"></textarea>
+            <ChannelModelManager
+              v-model:primary-model="editChannelPrimaryModel"
+              v-model:model-names="editChannelModelNames"
+              :is-fetching="isFetchingEditModels"
+              @fetch-upstream="fetchUpstreamModels('edit')"
+            />
           </div>
         </div>
 
@@ -5740,12 +5734,12 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: MODEL LATENCY & SPEED TEST -->
-    <div v-if="activeModelLatencyChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeModelLatencyChannel = null)">
+    <div v-if="activeModelLatencyChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
       <div class="m26-modal-sheet m26-models-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div>
             <div class="flex items-center gap-2">
-              <h3 class="m26-modal-title">全部模型与实时测速</h3>
+              <h3 class="m26-modal-title">全部模型与实时探活</h3>
               <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
                 {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
               </span>
@@ -5754,46 +5748,59 @@ function handleContextMenu(event: MouseEvent) {
               渠道 “{{ activeModelLatencyChannel.name }}” · 共 {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
             </p>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="activeModelLatencyChannel = null">✕</button>
+          <button class="m26-close-btn" data-no-drag @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
         </div>
 
         <div class="m26-modal-toolbar">
-          <div class="m26-modal-search">
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="6.5" cy="6.5" r="4.5" />
-              <line x1="10" y1="10" x2="14" y2="14" />
-            </svg>
-            <input
-              v-model="modelSearchQuery"
-              type="text"
-              placeholder="过滤模型名称..."
-              class="m26-modal-search-input"
-            />
-          </div>
+          <!-- Left: Select All & Batch Delete -->
+          <div class="flex items-center gap-3">
+            <label class="m26-select-all-label">
+              <input
+                type="checkbox"
+                :checked="isAllModelsSelected"
+                .indeterminate="isSomeModelsSelected"
+                @change="toggleSelectAllModels"
+              />
+              <span>全选</span>
+            </label>
 
-          <div class="flex items-center gap-2">
             <button
-              v-if="getFailedModelsInChannel(activeModelLatencyChannel).length > 0"
+              v-if="selectedModelNames.length > 0"
               class="m26-action-btn danger-subtle"
-              @click="cleanFailedModels(activeModelLatencyChannel)"
-              title="一键移除该渠道中所有测速报错或异常的模型"
+              @click="batchDeleteSelectedModels(activeModelLatencyChannel)"
+              title="批量删除已选中的模型"
             >
               <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
                 <path d="M3 4h10M6 4V2h4v2M5 6v7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V6" />
               </svg>
-              <span>清理失效 ({{ getFailedModelsInChannel(activeModelLatencyChannel).length }})</span>
+              <span>批量删除 ({{ selectedModelNames.length }})</span>
+            </button>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <button
+              class="m26-action-btn glass-subtle text-xs"
+              :disabled="isCheckingAllInjections || isProbingAllModels"
+              title="一键对当前渠道全部模型进行 Prompt 注入排查"
+              @click="checkAllChannelModelsInjection(activeModelLatencyChannel)"
+            >
+              <span v-if="isCheckingAllInjections" class="m26-spin-dot mr-1"></span>
+              <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" class="mr-1 inline-block">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+              <span>{{ isCheckingAllInjections ? '全模型测注入中...' : '一键测全模型注入' }}</span>
             </button>
 
             <button
-              class="m26-action-btn primary"
-              :disabled="isProbingAllModels"
+              class="m26-action-btn primary text-xs"
+              :disabled="isProbingAllModels || isCheckingAllInjections"
               @click="probeAllChannelModels(activeModelLatencyChannel)"
             >
               <svg v-if="!isProbingAllModels" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
                 <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
               </svg>
               <span v-else class="m26-spin-dot"></span>
-              <span>{{ isProbingAllModels ? '全模型测速中...' : '一键测速全部模型' }}</span>
+              <span>{{ isProbingAllModels ? '全模型队列探活中...' : '一键探活全部模型' }}</span>
             </button>
           </div>
         </div>
@@ -5804,17 +5811,29 @@ function handleContextMenu(event: MouseEvent) {
               v-for="(modelName, idx) in filteredModalModels"
               :key="modelName"
               class="m26-model-item-card"
+              :class="{ 'is-selected': selectedModelNames.includes(modelName) }"
+              @click="toggleModelSelection(modelName)"
             >
-              <div class="m26-model-item-info">
-                <div class="flex items-center gap-2">
-                  <span class="m26-model-idx">#{{ idx + 1 }}</span>
-                  <span class="m26-model-full-name" :title="modelName">{{ modelName }}</span>
-                  <span v-if="isPrimaryModel(activeModelLatencyChannel, modelName)" class="m26-tag-primary">探活主模型</span>
+              <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                <!-- Checkbox -->
+                <label class="m26-model-checkbox" @click.stop>
+                  <input
+                    type="checkbox"
+                    :checked="selectedModelNames.includes(modelName)"
+                    @change="toggleModelSelection(modelName)"
+                  />
+                </label>
+
+                <div class="m26-model-item-info">
+                  <div class="flex items-center gap-2">
+                    <span class="m26-model-idx">#{{ idx + 1 }}</span>
+                    <span class="m26-model-full-name" :title="modelName">{{ modelName }}</span>
+                  </div>
+                  <span class="m26-model-ch-url">{{ activeModelLatencyChannel.url }}</span>
                 </div>
-                <span class="m26-model-ch-url">{{ activeModelLatencyChannel.url }}</span>
               </div>
 
-              <div class="m26-model-item-actions">
+              <div class="m26-model-item-actions" @click.stop>
                 <!-- Latency Badge -->
                 <div
                   class="m26-model-lat-pill"
@@ -5827,33 +5846,62 @@ function handleContextMenu(event: MouseEvent) {
                   <span v-if="isModelFailed(activeModelLatencyChannel, modelName)" class="lat-view-err">报错 ➔</span>
                 </div>
 
+                <!-- Injection Badge -->
+                <div
+                  class="m26-model-inject-pill"
+                  :class="getModelInjectionClass(activeModelLatencyChannel, modelName)"
+                  :title="getModelInjectionTooltip(activeModelLatencyChannel, modelName)"
+                  @click="openModelInjectionDetail(activeModelLatencyChannel, modelName)"
+                >
+                  <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.2" class="inject-shield">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                  <span class="inject-text">{{ getModelInjectionLabel(activeModelLatencyChannel, modelName) }}</span>
+                </div>
+
+                <!-- Primary Model Slot: Badge if primary, Button if not -->
+                <span
+                  v-if="isPrimaryModel(activeModelLatencyChannel, modelName)"
+                  class="m26-primary-slot-badge"
+                  title="当前渠道的探活主模型"
+                >
+                  探活主模型
+                </span>
+                <button
+                  v-else
+                  class="m26-btn-micro set-primary"
+                  @click="setAsPrimaryModel(activeModelLatencyChannel, modelName)"
+                  title="将此模型设为当前渠道的探活主模型"
+                >
+                  设为主模型
+                </button>
+
                 <!-- Test button -->
                 <button
                   class="m26-btn-micro probe"
-                  :disabled="isModelProbing(activeModelLatencyChannel, modelName)"
+                  :disabled="isModelProbing(activeModelLatencyChannel, modelName) || isProbingAllModels"
                   @click="probeSingleModel(activeModelLatencyChannel, modelName)"
-                  title="单独测试此模型真实可用性与时延"
+                  title="单独探活此模型真实可用性与时延"
                 >
                   <span v-if="isModelProbing(activeModelLatencyChannel, modelName)" class="m26-spin-dot"></span>
-                  <span>{{ isModelProbing(activeModelLatencyChannel, modelName) ? '测试中' : '测速' }}</span>
+                  <span>{{ isModelProbing(activeModelLatencyChannel, modelName) ? '探活中' : '探活' }}</span>
                 </button>
 
-                <!-- Copy button -->
+                <!-- Injection test button -->
                 <button
-                  class="m26-btn-icon"
-                  @click="copyModelName(modelName)"
-                  title="复制模型 ID"
+                  class="m26-btn-micro inject"
+                  :disabled="isModelCheckingInjection(activeModelLatencyChannel, modelName) || isCheckingAllInjections"
+                  @click="checkSingleModelInjection(activeModelLatencyChannel, modelName)"
+                  title="单独检测此模型是否存在服务器端 Prompt 注入"
                 >
-                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                    <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                  </svg>
+                  <span v-if="isModelCheckingInjection(activeModelLatencyChannel, modelName)" class="m26-spin-dot"></span>
+                  <span>{{ isModelCheckingInjection(activeModelLatencyChannel, modelName) ? '检测中' : '测注入' }}</span>
                 </button>
 
                 <!-- Delete Model button -->
                 <button
                   class="m26-btn-icon danger"
-                  @click.stop="removeModelFromChannel(activeModelLatencyChannel, modelName)"
+                  @click="removeModelFromChannel(activeModelLatencyChannel, modelName)"
                   title="从当前渠道删除此模型"
                 >
                   <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -5867,7 +5915,7 @@ function handleContextMenu(event: MouseEvent) {
 
         <div class="m26-modal-footer">
           <span class="m26-modal-hint text-xs text-slate-400">
-            💡 测速说明：HeiGate 会向模型发送真实轻量测试请求。不仅测试网络端到端往返耗时，同时严格验证密钥鉴权、账户额度与模型实际生成可用性。
+            💡 探活说明：HeiGate 会向模型发送真实轻量测试请求。不仅测试网络端到端往返耗时，同时严格验证密钥鉴权、账户额度与模型实际生成可用性。
           </span>
         </div>
       </div>
@@ -5917,7 +5965,7 @@ function handleContextMenu(event: MouseEvent) {
                 </button>
               </div>
               <p class="m26-modal-subtitle">
-                同一模型多供应商并发测速 · 检验该模型在各渠道的端到端真实生成响应与延迟梯度
+                同一模型多供应商并发探活 · 检验该模型在各渠道的端到端真实生成响应与延迟梯度
               </p>
             </div>
           </div>
@@ -5949,13 +5997,13 @@ function handleContextMenu(event: MouseEvent) {
               class="m26-action-btn primary"
               :disabled="isProbingModelProviders"
               @click="probeAllProvidersForModel(activeModelSpeedTestName)"
-              title="重新对该模型的所有供应商发起并发真实测速"
+              title="重新对该模型的所有供应商发起并发真实探活"
             >
               <svg v-if="!isProbingModelProviders" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
                 <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
               </svg>
               <span v-else class="m26-spin-dot"></span>
-              <span>{{ isProbingModelProviders ? '全渠道并发测速中...' : '重新测速全部供应商' }}</span>
+              <span>{{ isProbingModelProviders ? '全渠道并发探活中...' : '重新探活全部供应商' }}</span>
             </button>
           </div>
         </div>
@@ -6007,10 +6055,10 @@ function handleContextMenu(event: MouseEvent) {
                   class="m26-btn-micro probe"
                   :disabled="p.isProbing"
                   @click="probeSingleModel(p.channel, p.upstreamModel)"
-                  title="单独重新测速此供应商"
+                  title="单独重新探活此供应商"
                 >
                   <span v-if="p.isProbing" class="m26-spin-dot"></span>
-                  <span>{{ p.isProbing ? '测试中' : '测速' }}</span>
+                  <span>{{ p.isProbing ? '探活中' : '探活' }}</span>
                 </button>
 
                 <!-- Diagnostic details button -->
@@ -6106,12 +6154,12 @@ function handleContextMenu(event: MouseEvent) {
             <button
               class="m26-action-btn secondary"
               @click="openModelSpeedTestFor(activeAliasModalModel.name)"
-              title="并发测速此模型全部供应商的可用性与延迟"
+              title="并发探活此模型全部供应商的可用性与延迟"
             >
               <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
                 <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
               </svg>
-              <span>测速全部供应商</span>
+              <span>探活全部供应商</span>
             </button>
             <button
               class="m26-action-btn secondary"
@@ -8361,6 +8409,17 @@ function handleContextMenu(event: MouseEvent) {
   background: rgba(37, 99, 235, 0.12);
   color: #2563eb;
 }
+.m26-status-note-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(217, 119, 6, 0.12);
+  color: #b45309;
+  cursor: pointer;
+  white-space: nowrap;
+  margin-left: 6px;
+}
 .m26-inject-pill {
   font-size: 10px;
   font-weight: 700;
@@ -8709,7 +8768,7 @@ input:checked + .m26-slider:before {
 }
 .m26-table {
   width: 100%;
-  min-width: 1050px;
+  min-width: 880px;
   border-collapse: collapse;
   text-align: left;
   font-size: 13px;
@@ -8717,7 +8776,7 @@ input:checked + .m26-slider:before {
 }
 .m26-table th {
   background: #f8fafc;
-  padding: 10px 12px;
+  padding: 10px 10px;
   font-size: 11px;
   font-weight: 600;
   color: var(--m26-text-muted);
@@ -8725,7 +8784,7 @@ input:checked + .m26-slider:before {
   white-space: nowrap;
 }
 .m26-table td {
-  padding: 10px 12px;
+  padding: 10px 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.04);
   color: var(--m26-text-secondary);
   vertical-align: middle;
@@ -10531,12 +10590,15 @@ input:checked + .m26-slider:before {
 .m26-confirm-backdrop {
   z-index: 1200;
 }
+.m26-inject-backdrop {
+  z-index: 1100;
+}
 
 /* ==========================================================================
    Model Latency & Speed Test Sheet
    ========================================================================== */
 .m26-models-sheet {
-  max-width: 700px;
+  max-width: 860px;
   max-height: 85vh;
 }
 .m26-models-sheet .m26-modal-footer {
@@ -10560,6 +10622,50 @@ input:checked + .m26-slider:before {
   padding: 12px 20px;
   background: #f8fafc;
   border-bottom: 1px solid var(--m26-border);
+}
+.m26-action-btn.glass-subtle {
+  background: rgba(16, 185, 129, 0.08);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  box-shadow: none;
+}
+.m26-action-btn.glass-subtle:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #047857;
+}
+.m26-action-btn.glass-subtle:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.m26-select-all-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+  cursor: pointer;
+  user-select: none;
+}
+.m26-select-all-label:hover {
+  color: #0f172a;
+}
+.m26-select-all-label input[type="checkbox"],
+.m26-model-checkbox input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  cursor: pointer;
+  accent-color: #6366f1;
+}
+.m26-model-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
 }
 .m26-modal-search {
   display: flex;
@@ -10607,12 +10713,82 @@ input:checked + .m26-slider:before {
   background: #ffffff;
   border: 1px solid var(--m26-border);
   border-radius: 10px;
+  cursor: pointer;
   transition: all 0.15s ease;
 }
 .m26-model-item-card:hover {
   background: #f8fafc;
   border-color: rgba(79, 70, 229, 0.25);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+.m26-model-item-card.is-selected {
+  background: rgba(99, 102, 241, 0.04);
+  border-color: rgba(99, 102, 241, 0.35);
+}
+.m26-model-item-card.is-selected:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+.m26-primary-slot-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  width: 80px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.1);
+  color: #4f46e5;
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  white-space: nowrap;
+  user-select: none;
+  flex-shrink: 0;
+}
+.m26-btn-micro.set-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  color: #6366f1;
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(99, 102, 241, 0.22);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.m26-btn-micro.set-primary:hover {
+  color: #4f46e5;
+  background: rgba(99, 102, 241, 0.16);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+.m26-btn-micro.probe {
+  width: 60px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.m26-btn-micro.inject {
+  width: 62px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #059669;
+  background: rgba(5, 150, 105, 0.08);
+  border-color: rgba(5, 150, 105, 0.22);
+  font-weight: 500;
+}
+.m26-btn-micro.inject:hover:not(:disabled) {
+  color: #047857;
+  background: rgba(5, 150, 105, 0.16);
+  border-color: rgba(5, 150, 105, 0.38);
 }
 .m26-model-item-info {
   display: flex;
@@ -10663,8 +10839,12 @@ input:checked + .m26-slider:before {
 .m26-model-lat-pill {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  padding: 3px 8px;
+  min-width: 80px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 0 8px;
   border-radius: 99px;
   font-size: 11px;
   font-weight: 600;
@@ -10673,6 +10853,7 @@ input:checked + .m26-slider:before {
   color: #64748b;
   border: 1px solid rgba(100, 116, 139, 0.15);
   transition: all 0.15s ease;
+  flex-shrink: 0;
 }
 .m26-model-lat-pill .lat-dot {
   width: 6px;
@@ -10716,6 +10897,65 @@ input:checked + .m26-slider:before {
 .m26-model-lat-pill.has-err-link:hover {
   filter: brightness(0.95);
   box-shadow: 0 1px 4px rgba(225, 29, 72, 0.2);
+}
+
+.m26-model-inject-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 76px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+  background: rgba(100, 116, 139, 0.06);
+  color: #94a3b8;
+  border: 1px solid rgba(100, 116, 139, 0.14);
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+}
+.m26-model-inject-pill:hover {
+  filter: brightness(0.95);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+.m26-model-inject-pill.clean {
+  background: rgba(5, 150, 105, 0.1);
+  color: #059669;
+  border-color: rgba(5, 150, 105, 0.25);
+}
+.m26-model-inject-pill.suspected {
+  background: rgba(217, 119, 6, 0.12);
+  color: #d97706;
+  border-color: rgba(217, 119, 6, 0.25);
+}
+.m26-model-inject-pill.detected {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+  border-color: rgba(220, 38, 38, 0.25);
+}
+.m26-model-inject-pill.checking {
+  background: rgba(79, 70, 229, 0.1);
+  color: var(--m26-accent);
+  border-color: rgba(79, 70, 229, 0.25);
+}
+.m26-model-inject-pill.error {
+  background: rgba(100, 116, 139, 0.08);
+  color: #94a3b8;
+  border-color: rgba(100, 116, 139, 0.18);
+}
+.m26-model-inject-pill.idle {
+  background: rgba(100, 116, 139, 0.06);
+  color: #94a3b8;
+  border-color: rgba(100, 116, 139, 0.12);
+}
+.m26-model-inject-pill .inject-shield {
+  flex-shrink: 0;
 }
 
 /* ==========================================================================

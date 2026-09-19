@@ -157,10 +157,16 @@ export type ProbeResult = {
   message?: string
 }
 
+// Must exceed the server's worst-case single-model probe budget (probe.RunBudgetFor(1)
+// ≈ 198s: 8s ping + 60s first attempt + 2×60s retries + 10s slack), or the browser
+// aborts while the probe is still running and writes its result to the DB, so the UI
+// reports a failure the channel then silently recovers from.
+const PROBE_TIMEOUT_MS = 210_000
+
 export async function probeChannel(id: number, modelName?: string): Promise<boolean> {
   try {
     const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
-    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, 180_000)
+    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, PROBE_TIMEOUT_MS)
     return response.ok
   } catch {
     return false
@@ -170,7 +176,7 @@ export async function probeChannel(id: number, modelName?: string): Promise<bool
 export async function probeChannelDetails(id: number, modelName?: string): Promise<ProbeResult[] | null> {
   try {
     const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
-    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, 180_000)
+    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, PROBE_TIMEOUT_MS)
     if (!response.ok) return null
     const payload = (await response.json()) as { data?: any[] }
     if (!Array.isArray(payload.data)) return []
@@ -199,12 +205,28 @@ export type ModelInjectionResult = {
 // Checks the primary model, or every model the channel lists when all is true.
 // The call is synchronous and a full sweep runs one request per model (plus an
 // extraction for injected ones), hence the long deadlines.
-export async function injectionCheck(id: number, all = false): Promise<ModelInjectionResult[] | null> {
+export async function injectionCheck(
+  id: number,
+  options?: boolean | { all?: boolean; model?: string }
+): Promise<ModelInjectionResult[] | null> {
   try {
-    const query = all ? '?all=1' : ''
-    const response = await request(`/channels/${id}/injection-check${query}`, { method: 'POST' }, all ? 540_000 : 200_000)
+    let query = ''
+    let isAll = false
+    if (typeof options === 'boolean') {
+      isAll = options
+      query = options ? '?all=1' : ''
+    } else if (options) {
+      if (options.model) {
+        query = `?model=${encodeURIComponent(options.model)}`
+      } else if (options.all) {
+        isAll = true
+        query = '?all=1'
+      }
+    }
+    const timeoutMs = isAll ? 540_000 : 70_000
+    const response = await request(`/channels/${id}/injection-check${query}`, { method: 'POST' }, timeoutMs)
     if (!response.ok) return null
-    const payload = await response.json() as { data?: { results?: ModelInjectionResult[] } }
+    const payload = (await response.json()) as { data?: { results?: ModelInjectionResult[] } }
     return payload.data?.results ?? []
   } catch {
     return null
