@@ -22,7 +22,7 @@ If you juggle several AI API endpoints — official keys, a relay, a local Ollam
 - **Multi-channel routing** — pick a channel by latency, a quality score, or round robin
 - **Automatic failover** — when a channel errors, rate-limits, or times out, the request moves to the next one; repeated failures trip a circuit breaker with a cooldown
 - **Protocol translation** — talk to an OpenAI-compatible upstream with an Anthropic client; requests and responses (including streaming) are converted on the fly
-- **Health probes** — each model periodically gets a tiny arithmetic question, which proves the key, endpoint, and model name actually work together
+- **Health probes** — periodically exercise the primary model with a tiny arithmetic question, with on-demand queued checks for every configured model
 - **Usage tracking** — every request records its channel, model, tokens, time to first token, and failover chain locally, with daily/model/channel rollups
 - **Client integration** — point the Claude desktop app or Codex at HeiGate with one click
 

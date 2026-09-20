@@ -158,25 +158,35 @@ export type ProbeResult = {
 }
 
 // Must exceed the server's worst-case single-model probe budget (probe.RunBudgetFor(1)
-// ≈ 198s: 8s ping + 60s first attempt + 2×60s retries + 10s slack), or the browser
-// aborts while the probe is still running and writes its result to the DB, so the UI
-// reports a failure the channel then silently recovers from.
-const PROBE_TIMEOUT_MS = 210_000
+// = 70s: one 60s attempt + 10s slack).
+const PROBE_TIMEOUT_MS = 75_000
 
-export async function probeChannel(id: number, modelName?: string): Promise<boolean> {
+function probeTimeoutMs(modelCount = 1): number {
+  // Deep scans are explicit and sequential on the server. Keep a little more
+  // client-side slack than the Go budget: N×60s attempts + 20s.
+  return Math.max(PROBE_TIMEOUT_MS, 20_000 + Math.max(1, modelCount) * 60_000)
+}
+
+export async function probeChannel(id: number, modelName?: string, all = false, modelCount = 1): Promise<boolean> {
   try {
-    const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
-    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, PROBE_TIMEOUT_MS)
+    const query = modelName ? `?model=${encodeURIComponent(modelName)}` : all ? '?all=1' : ''
+    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, all ? probeTimeoutMs(modelCount) : PROBE_TIMEOUT_MS)
     return response.ok
   } catch {
     return false
   }
 }
 
-export async function probeChannelDetails(id: number, modelName?: string): Promise<ProbeResult[] | null> {
+export async function probeChannelDetails(
+  id: number,
+  modelName?: string,
+  options?: { all?: boolean; modelCount?: number },
+): Promise<ProbeResult[] | null> {
   try {
-    const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
-    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, PROBE_TIMEOUT_MS)
+    const all = !modelName && Boolean(options?.all)
+    const query = modelName ? `?model=${encodeURIComponent(modelName)}` : all ? '?all=1' : ''
+    const timeout = all ? probeTimeoutMs(options?.modelCount) : PROBE_TIMEOUT_MS
+    const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, timeout)
     if (!response.ok) return null
     const payload = (await response.json()) as { data?: any[] }
     if (!Array.isArray(payload.data)) return []

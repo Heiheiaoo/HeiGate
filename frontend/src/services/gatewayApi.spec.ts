@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createChannel, listChannels } from '@/services/gatewayApi'
+import { createChannel, listChannels, probeChannelDetails } from '@/services/gatewayApi'
 
 type FetchArgs = [input: string, init?: RequestInit]
 
@@ -60,5 +60,17 @@ describe('gatewayApi', () => {
       throw new Error('connection refused')
     }))
     await expect(listChannels()).resolves.toBeNull()
+  })
+
+  it('addresses single-model and explicit deep probes separately', async () => {
+    const spy = mockFetch({ data: [] })
+
+    await probeChannelDetails(7, 'model x')
+    await probeChannelDetails(7, undefined, { all: true, modelCount: 3 })
+
+    const [singleUrl] = spy.mock.calls[0] as unknown as FetchArgs
+    const [allUrl] = spy.mock.calls[1] as unknown as FetchArgs
+    expect(singleUrl).toBe('/api/channels/7/probe?model=model%20x')
+    expect(allUrl).toBe('/api/channels/7/probe?all=1')
   })
 })

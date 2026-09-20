@@ -228,11 +228,11 @@ function setChannelViewMode(mode: 'grid' | 'list') {
 
 // Interval Preset Options (0s = Manual Only, saves tokens)
 const intervalPresets = [
-  { label: '队列探活 · 仅手动 (不耗Token)', value: 0 },
-  { label: '队列探活 · 5分钟', value: 300 },
-  { label: '队列探活 · 15分钟', value: 900 },
-  { label: '队列探活 · 30分钟', value: 1800 },
-  { label: '队列探活 · 自定义间隔', value: -1 },
+  { label: '主模型探活 · 仅手动 (不耗Token)', value: 0 },
+  { label: '主模型探活 · 5分钟', value: 300 },
+  { label: '主模型探活 · 15分钟', value: 900 },
+  { label: '主模型探活 · 30分钟', value: 1800 },
+  { label: '主模型探活 · 自定义间隔', value: -1 },
 ]
 
 
@@ -269,14 +269,12 @@ const gatewayOnline = ref(false)
 const gatewayLatency = ref<number | null>(null)
 const gatewayLastChecked = ref('尚未检测')
 const gatewayApiKey = ref('')
-const showOverviewApiKey = ref(false)
 const maskedOverviewApiKey = computed(() => {
   const k = gatewayApiKey.value
   if (!k) return '••••••••'
   if (k.length <= 16) return '••••••••'
   return `${k.slice(0, 8)}••••••••${k.slice(-6)}`
 })
-const isTestingGateway = ref(false)
 
 // System Info & Storage & Logs
 const systemInfo = ref<SystemInfo | null>(null)
@@ -319,15 +317,6 @@ const gatewayBaseUrl = computed(() => {
     return 'http://127.0.0.1:8080/v1'
   }
   return `${window.location.origin}/v1`
-})
-
-const gatewayHostOnly = computed(() => {
-  try {
-    const parsed = new URL(gatewayBaseUrl.value)
-    return `${parsed.hostname}:${parsed.port || (parsed.protocol === 'https:' ? '443' : '80')}`
-  } catch {
-    return '127.0.0.1:8080'
-  }
 })
 
 
@@ -926,6 +915,9 @@ const models = computed(() => {
   }>()
 
   channels.value.forEach((channel) => {
+    // Disabled suppliers are completely absent from the model catalog: they
+    // must not advertise models, count as providers, or participate in probes.
+    if (!channel.enabled) return
     const list = channel.modelNames ?? []
     list.forEach((rawModelName) => {
       const groupKey = getCanonicalGroupKey(rawModelName)
@@ -1440,9 +1432,8 @@ async function probeChannel(channel: Channel) {
     }
     return
   }
-  await new Promise((r) => setTimeout(r, 600))
   channel.probing = false
-  showToast(`渠道“${channel.name}”测试完成`)
+  showToast(`渠道“${channel.name}”无法探活：本地网关未连接`)
 }
 
 const isProbingAllChannels = ref(false)
@@ -1454,7 +1445,7 @@ async function probeAllChannels() {
     for (const channel of enabledChannels.value) {
       await probeChannel(channel)
     }
-    showToast('全量渠道队列探活完成')
+    showToast('全部渠道主模型探活完成')
   } finally {
     isProbingAllChannels.value = false
   }
@@ -1494,6 +1485,18 @@ const injectionResults = ref<ModelInjectionResult[]>([])
 const modelInjections = ref<Record<string, ModelInjectionResult>>({})
 const modelCheckingInjection = ref<Record<string, boolean>>({})
 const isCheckingAllInjections = ref(false)
+const copiedInjectionText = ref('')
+
+function copyInjectionContent(content?: string) {
+  if (!content) return
+  navigator.clipboard.writeText(content).then(() => {
+    copiedInjectionText.value = content
+    showToast('已复制注入 Prompt 原文到剪贴板')
+    setTimeout(() => {
+      if (copiedInjectionText.value === content) copiedInjectionText.value = ''
+    }, 2000)
+  })
+}
 
 function getModelInjection(channel: Channel, modelName: string): ModelInjectionResult | null {
   const key = getModelKey(channel, modelName)
@@ -1931,6 +1934,12 @@ function toggleModelSelection(modelName: string) {
   }
 }
 
+function handleModelCardClick(modelName: string) {
+  const sel = window.getSelection()?.toString().trim()
+  if (sel) return
+  toggleModelSelection(modelName)
+}
+
 function openModelLatencyModal(channel: Channel) {
   activeModelLatencyChannel.value = channel
   selectedModelNames.value = []
@@ -1997,6 +2006,7 @@ function getModelLatencyDisplay(channel: Channel, modelName: string): string {
   }
   const key = getModelKey(channel, modelName)
   const entry = modelLatencies.value[key]
+  if (entry?.ttft != null) return formatLatencySec(entry.ttft)
   if (entry?.latency != null) return formatLatencySec(entry.latency)
   // The channel-level latency is measured on its primary model. Showing it for
   // every model would invent a number for models that were never measured —
@@ -2030,8 +2040,8 @@ function getModelTooltip(channel: Channel, modelName: string): string {
   if (isModelFailed(channel, modelName)) {
     return `探活异常：${getModelErrorMessage(channel, modelName)} (点击查看详情与诊断)`
   }
-  if (entry?.latency != null) {
-    return `模型工作正常，真实对话端到端响应耗时 ${formatLatencySec(entry.latency)}`
+  if (entry?.ttft != null || entry?.latency != null) {
+    return `模型工作正常，首字响应耗时 ${formatLatencySec(entry.ttft ?? entry.latency)}`
   }
   return '该模型响应就绪，点击可在弹窗中进行单个真实探活'
 }
@@ -2099,7 +2109,13 @@ const filteredModalModels = computed(() => {
   })
 })
 
-async function probeSingleModel(channel: Channel, modelName: string) {
+type ModelProbeOutcome = 'completed' | 'busy' | 'failed'
+
+async function probeSingleModel(
+  channel: Channel,
+  modelName: string,
+  options?: { silentBusy?: boolean },
+): Promise<ModelProbeOutcome> {
   const key = getModelKey(channel, modelName)
   modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: true }
   const t0 = performance.now()
@@ -2107,6 +2123,31 @@ async function probeSingleModel(channel: Channel, modelName: string) {
   try {
     if (gatewayApiActive.value && channel.gatewayId) {
       const probeRes = await probeChannelDetails(channel.gatewayId, modelName)
+      if (probeRes === null) {
+        const errMsg = '探活请求失败，请检查网关状态'
+        modelLatencies.value[key] = {
+          ...(modelLatencies.value[key] || {}),
+          probing: false,
+          status: 'error',
+          error: errMsg,
+          message: errMsg,
+        }
+        return 'failed'
+      }
+      if (probeRes.length === 0) {
+        // The server uses one in-flight slot per channel. Do not fall back to
+        // a browser-side /models request here: that only tests list access and
+        // can falsely mark an uncallable model as healthy.
+        modelLatencies.value[key] = {
+          ...(modelLatencies.value[key] || {}),
+          probing: false,
+          message: '渠道已有探活任务正在执行',
+        }
+        if (!options?.silentBusy) {
+          showToast(`渠道“${channel.name}”已有探活任务，请稍后重试`)
+        }
+        return 'busy'
+      }
       const res = probeRes?.[0]
       if (res) {
         const isOk = res.status === 'operational' || res.status === 'degraded' || res.status === 'healthy'
@@ -2132,38 +2173,28 @@ async function probeSingleModel(channel: Channel, modelName: string) {
             channel.lastError = errMsg!
           }
         }
-        return
+        return 'completed'
       }
     }
-    const testUrl = `${normalizeEndpointUrl(channel.url)}/models`
-    const resp = await fetch(testUrl, {
-      headers: {
-        Accept: 'application/json',
-        ...(channel.apiKey && !channel.apiKey.includes('***') ? { Authorization: `Bearer ${channel.apiKey}`, 'x-api-key': channel.apiKey } : {}),
-      },
-      signal: AbortSignal.timeout(5000),
-    })
-    const elapsed = Math.round(performance.now() - t0)
-    const isOk = resp.ok
-    const errMsg = isOk ? null : `上游 HTTP ${resp.status}`
+    // A successful /models response does not prove that this key can perform
+    // inference with this model. Without the local gateway we cannot run the
+    // protocol-aware arithmetic challenge, so report the check as unavailable.
+    const errMsg = '本地网关未连接，无法执行真实模型探活'
     modelLatencies.value[key] = {
-      latency: isOk ? elapsed : null,
+      latency: null,
+      ttft: null,
       probing: false,
-      status: isOk ? 'operational' : 'error',
+      status: 'error',
       error: errMsg,
-      message: isOk ? '' : errMsg!,
+      message: errMsg,
     }
     if (isPrimary) {
-      channel.latency = isOk ? elapsed : null
+      channel.latency = null
       channel.ttft = null
-      if (isOk) {
-        channel.status = 'healthy'
-        channel.lastError = ''
-      } else {
-        channel.status = 'offline'
-        channel.lastError = errMsg!
-      }
+      channel.status = 'offline'
+      channel.lastError = errMsg
     }
+    return 'failed'
   } catch (err: any) {
     const errMsg = err?.message || '请求超时或网络异常'
     modelLatencies.value[key] = {
@@ -2180,6 +2211,7 @@ async function probeSingleModel(channel: Channel, modelName: string) {
       channel.status = 'offline'
       channel.lastError = errMsg
     }
+    return 'failed'
   }
 }
 
@@ -2187,12 +2219,23 @@ async function probeAllChannelModels(channel: Channel) {
   if (isProbingAllModels.value) return
   isProbingAllModels.value = true
   const models = channel.modelNames ?? []
+  let completed = 0
+  let interrupted = false
 
   try {
     for (const m of models) {
-      await probeSingleModel(channel, m)
+      const outcome = await probeSingleModel(channel, m, { silentBusy: true })
+      if (outcome === 'busy') {
+        interrupted = true
+        break
+      }
+      if (outcome === 'completed') completed++
     }
-    showToast(`已完成渠道“${channel.name}”全量 ${models.length} 个模型的队列探活`)
+    if (interrupted) {
+      showToast(`渠道已有探活任务，本次完成 ${completed}/${models.length} 个模型`)
+    } else {
+      showToast(`已完成渠道“${channel.name}”全量 ${completed} 个模型的队列探活`)
+    }
   } catch (err: any) {
     showToast(`模型队列探活中断: ${err?.message || '未知异常'}`)
   } finally {
@@ -2383,36 +2426,29 @@ function extractErrorCode(rawError?: string): string {
   return 'FAIL'
 }
 
-// Advice strings are rendered with v-html so they can carry <strong>/<code>
-// markup. Any value that originates from user input (endpoint URLs, model
-// names, upstream error text) must be escaped before it is interpolated.
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
+type TroubleshootingAdvice = {
+  title: string
+  detail: string
 }
 
-function getTroubleshootingAdvice(c: Channel): string[] {
+function getTroubleshootingAdvice(c: Channel): TroubleshootingAdvice[] {
   const err = c.lastError || ''
-  const tips: string[] = []
+  const tips: TroubleshootingAdvice[] = []
   if (err.includes('404')) {
-    tips.push(`<strong>核对探活主模型</strong>：上游可能未开通当前主模型（<code>${escapeHtml(c.modelNames?.[0] || '未知')}</code>），或者官方已迭代该版本。若使用商汤建议切换为 <code>sensenova-6.8-flash-lite</code> 或 <code>deepseek-v4-flash</code>。`)
-    tips.push(`<strong>检查 Base URL 格式</strong>：当前为 <code>${escapeHtml(c.url)}</code>。请确认该地址是否需要或多加了版本路径（如 <code>/v1</code>）。`)
+    tips.push({ title: '核对探活主模型', detail: `上游可能未开通当前主模型（${c.primaryModel || c.modelNames?.[0] || '未知'}），或者官方已经迭代该版本。` })
+    tips.push({ title: '检查 Base URL 格式', detail: `当前为 ${c.url}。请确认该地址是否缺少或多加了版本路径（例如 /v1）。` })
   } else if (err.includes('401')) {
-    tips.push(`<strong>检查 API 密钥 (Key)</strong>：上游返回未授权。请点击下方「修改渠道配置」，确认填写的 API Key 是否正确、前后有无多余空格，或上游账号该 Key 是否已被删除。`)
-    tips.push(`<strong>检查 Key 权限与分组</strong>：部分上游服务（如 OneAPI / NewAPI / 中转站）要求令牌必须绑定特定模型或分组才能调用。`)
+    tips.push({ title: '检查 API 密钥', detail: '上游返回未授权。请确认 API Key 是否正确、前后有无多余空格，以及该 Key 是否仍然有效。' })
+    tips.push({ title: '检查 Key 权限与分组', detail: '部分 OneAPI、NewAPI 或中转服务要求令牌绑定对应模型或分组后才能调用。' })
   } else if (err.includes('429')) {
-    tips.push(`<strong>检查账号额度</strong>：上游返回并发或配额超限，请登录服务商控制台查看账户余额是否已用尽。`)
-    tips.push(`<strong>调大探活周期</strong>：在渠道设置中将探活频率从高频调整为「仅手动探活」或较长周期，避免探活本身占用频控配额。`)
+    tips.push({ title: '检查账号额度', detail: '上游返回并发或配额超限，请登录服务商控制台查看余额和频率限制。' })
+    tips.push({ title: '调大探活周期', detail: '将探活设置为仅手动或更长周期，避免探活本身占用频控配额。' })
   } else if (err.includes('timeout') || err.includes('deadline')) {
-    tips.push(`<strong>检查本地网络与代理</strong>：当前计算机到目标服务 <code>${escapeHtml(c.url)}</code> 连接超时，请确认网络代理或梯子配置。`)
+    tips.push({ title: '检查本地网络与代理', detail: `当前计算机连接 ${c.url} 超时，请确认网络和代理配置。` })
   } else {
-    tips.push(`<strong>查看原始报错信息</strong>：参考下方上游完整返回体，排查上游服务给出的具体错误原因。`)
+    tips.push({ title: '查看原始报错信息', detail: '参考下方上游完整返回内容，排查服务商给出的具体错误原因。' })
   }
-  tips.push(`<strong>一键修改并重试</strong>：您可以直接点击下方「修改渠道配置」更新模型或 Key，保存后点击「重新检测」验证。`)
+  tips.push({ title: '修改并重试', detail: '可以直接修改渠道模型或 Key，保存后重新检测验证。' })
   return tips
 }
 
@@ -2896,6 +2932,7 @@ const activeModelProviders = computed<ModelProviderSpeedTestItem[]>(() => {
 
   const list: ModelProviderSpeedTestItem[] = []
   channels.value.forEach((ch) => {
+    if (!ch.enabled) return
     const upstream = ch.modelNames?.find((n) => isModelEquivalentFrontend(n, modelName))
     if (!upstream) return
 
@@ -2979,6 +3016,7 @@ async function probeAllProvidersForModel(modelName?: string | null) {
 
   const matchingChannels: Array<{ channel: Channel; upstreamModel: string }> = []
   channels.value.forEach((ch) => {
+    if (!ch.enabled) return
     const upstream = ch.modelNames?.find((n) => isModelEquivalentFrontend(n, target))
     if (upstream) {
       matchingChannels.push({ channel: ch, upstreamModel: upstream })
@@ -3243,25 +3281,6 @@ function stopLogsStream() {
     logsUnsubscribe()
     logsUnsubscribe = null
     logsStreamConnected.value = false
-  }
-}
-
-async function runGatewaySelfTest() {
-  if (isTestingGateway.value) return
-  isTestingGateway.value = true
-  try {
-    const health = await checkGatewayHealth()
-    gatewayOnline.value = health.ok
-    gatewayLatency.value = health.latency
-    if (health.ok) {
-      showToast(`网关自测正常！本地服务 (${gatewayHostOnly.value}) 连通，时延 ${formatLatencySec(health.latency)}`)
-    } else {
-      showToast(`网关自测失败：无法连接到本地网关 (${gatewayHostOnly.value})`)
-    }
-  } catch (err: any) {
-    showToast(`网关自测异常: ${err?.message || '未知错误'}`)
-  } finally {
-    isTestingGateway.value = false
   }
 }
 
@@ -3706,13 +3725,14 @@ function handleBackdropClick(event: MouseEvent, closeCallback: () => void) {
 
 function handleContextMenu(event: MouseEvent) {
   const target = event.target as HTMLElement | null
+  const hasSelection = Boolean(window.getSelection()?.toString().trim())
   const isEditable = target && (
     target.tagName === 'INPUT' ||
     target.tagName === 'TEXTAREA' ||
     target.isContentEditable ||
     Boolean(target.closest('input, textarea, [contenteditable="true"]'))
   )
-  if (!isEditable) {
+  if (!isEditable && !hasSelection) {
     event.preventDefault()
   }
 }
@@ -3851,231 +3871,7 @@ function handleContextMenu(event: MouseEvent) {
       <div class="m26-viewport">
         <!-- SECTION 1: OVERVIEW -->
         <section v-if="activeSection === 'overview'" class="m26-section-view">
-          <!-- Gateway Quick Test & Connectivity Status & Credentials -->
-          <div class="m26-gateway-self-test-card">
-            <!-- Row 1: Status & Title & Self Test -->
-            <div class="m26-gateway-status-row">
-              <div class="flex items-center gap-3">
-                <div class="m26-test-pulse" :class="{ offline: !gatewayOnline }"></div>
-                <div class="flex items-center gap-2">
-                  <h4 class="text-sm font-semibold text-main">本地分发网关</h4>
-                  <span class="m26-gateway-status-badge" :class="{ offline: !gatewayOnline }">
-                    {{ gatewayOnline ? `健康运行中 · 当前时延 ${formatLatencySec(gatewayLatency)}` : '网关离线' }}
-                  </span>
-                </div>
-              </div>
-              <div class="flex items-center gap-2">
-                <button
-                  class="m26-glass-btn"
-                  :disabled="isTestingGateway"
-                  @click="runGatewaySelfTest"
-                  title="向本地网关发起一次连通性与模型校验"
-                >
-                  <span v-if="isTestingGateway" class="m26-spin-dot"></span>
-                  <span>{{ isTestingGateway ? '自测中...' : '网关连通性自测' }}</span>
-                </button>
-              </div>
-            </div>
-
-            <!-- Row 2: Credentials (URL & API Key) -->
-            <div class="m26-gateway-creds-row">
-              <!-- URL Block -->
-              <div class="m26-gateway-cred-item">
-                <span class="m26-gateway-cred-label">URL</span>
-                <span
-                  class="m26-gateway-cred-value"
-                  @click="copyGatewayUrl"
-                  :title="'点击复制 Base URL: ' + gatewayBaseUrl"
-                >
-                  {{ gatewayBaseUrl }}
-                </span>
-                <button class="m26-cred-copy-btn" @click="copyGatewayUrl" title="复制 Base URL">
-                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                  <span>复制</span>
-                </button>
-              </div>
-
-              <!-- API Key Block -->
-              <div class="m26-gateway-cred-item">
-                <span class="m26-gateway-cred-label">API KEY</span>
-                <span
-                  class="m26-gateway-cred-value"
-                  @click="copyApiKey"
-                  :title="'点击复制 API Key'"
-                >
-                  {{ showOverviewApiKey ? (gatewayApiKey || '暂无 Key') : (maskedOverviewApiKey || '••••••••') }}
-                </span>
-                <div class="m26-cred-actions">
-                  <button
-                    class="m26-cred-icon-btn"
-                    @click="showOverviewApiKey = !showOverviewApiKey"
-                    :title="showOverviewApiKey ? '隐藏 API Key' : '显示完整 API Key'"
-                  >
-                    <svg v-if="!showOverviewApiKey" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                      <circle cx="12" cy="12" r="3" />
-                    </svg>
-                    <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                      <line x1="1" y1="1" x2="23" y2="23" />
-                    </svg>
-                  </button>
-                  <button class="m26-cred-copy-btn" @click="copyApiKey" title="复制 API Key">
-                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                    </svg>
-                    <span>复制</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Clients Quick Integration Card (Claude & Codex) -->
-          <div class="m26-clients-integration-card">
-            <div class="m26-clients-card-header">
-              <div class="flex items-center gap-2.5">
-                <div class="m26-clients-icon-box">
-                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-                    <line x1="8" y1="21" x2="16" y2="21" />
-                    <line x1="12" y1="17" x2="12" y2="21" />
-                  </svg>
-                </div>
-                <div>
-                  <h4 class="text-sm font-semibold text-main">桌面客户端一键接入与启动</h4>
-                  <p class="text-xs text-muted">原生支持 Claude 桌面端与 Codex (ChatGPT) 桌面端，自动双向协议转译，一键配置生效</p>
-                </div>
-              </div>
-              <div class="flex items-center gap-2">
-                <button class="m26-glass-btn text-xs" :disabled="isLoadingClients" @click="loadDesktopClients" title="重新检测客户端状态">
-                  <span v-if="isLoadingClients" class="m26-spin-dot"></span>
-                  <span>{{ isLoadingClients ? '检测中...' : '刷新状态' }}</span>
-                </button>
-              </div>
-            </div>
-
-            <div class="m26-clients-grid">
-              <!-- Client 1: Claude Desktop -->
-              <div class="m26-client-item" :class="{ 'is-configured': claudeClientInfo?.configured }">
-                <div class="m26-client-top">
-                  <div class="flex items-center gap-2.5">
-                    <div class="m26-client-logo claude">
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M4.93 19.07l14.14-14.14" />
-                      </svg>
-                    </div>
-                    <div>
-                      <div class="flex items-center gap-2">
-                        <span class="font-semibold text-sm text-main">Claude 桌面端</span>
-                        <span class="m26-app-badge" :class="{ running: claudeClientInfo?.running, installed: claudeClientInfo?.installed }">
-                          {{ claudeClientInfo?.running ? '运行中' : (claudeClientInfo?.installed ? '已安装' : '未安装') }}
-                        </span>
-                      </div>
-                      <span class="text-xs text-muted">Anthropic 原生客户端 · 3P 扩展模式</span>
-                    </div>
-                  </div>
-                  <div class="m26-client-badge-pill" :class="{ active: claudeClientInfo?.configured }">
-                    {{ claudeClientInfo?.configured ? '已配置网关' : '未接入' }}
-                  </div>
-                </div>
-
-                <div class="m26-client-body">
-                  <div class="m26-client-meta-line">
-                    <span class="label">挂载槽位</span>
-                    <span class="value">{{ claudeClientInfo?.configured_models?.length ? `${claudeClientInfo.configured_models.length} 个模型已挂载` : '未挂载模型' }}</span>
-                  </div>
-                  <div class="m26-client-chips" v-if="claudeClientInfo?.configured_models?.length">
-                    <span v-for="m in claudeClientInfo.configured_models.slice(0, 3)" :key="m" class="m26-client-chip" :title="m">{{ m }}</span>
-                    <span v-if="claudeClientInfo.configured_models.length > 3" class="m26-client-chip more">+{{ claudeClientInfo.configured_models.length - 3 }}</span>
-                  </div>
-                  <div v-else class="text-xs text-slate-400 py-1">
-                    点击“配置模型”挑选要映射给 Claude 桌面端的模型
-                  </div>
-                </div>
-
-                <div class="m26-client-footer">
-                  <button class="m26-glass-btn text-xs flex-1" @click="openClaudeConfigModal">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                      <circle cx="12" cy="12" r="3" />
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                    </svg>
-                    <span>配置模型</span>
-                  </button>
-                  <button class="m26-launch-btn text-xs flex-1" :disabled="isLaunchingClaude" @click="handleLaunchClaude" title="调起 Claude 桌面端并以 3P 模式加载网关">
-                    <span v-if="isLaunchingClaude" class="m26-spin-dot"></span>
-                    <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                      <polygon points="5 3 19 12 5 21 5 3" />
-                    </svg>
-                    <span>{{ isLaunchingClaude ? '启动中...' : '一键启动' }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <!-- Client 2: Codex Desktop (ChatGPT) -->
-              <div class="m26-client-item" :class="{ 'is-configured': codexClientInfo?.configured }">
-                <div class="m26-client-top">
-                  <div class="flex items-center gap-2.5">
-                    <div class="m26-client-logo codex">
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="16 18 22 12 16 6" />
-                        <polyline points="8 6 2 12 8 18" />
-                      </svg>
-                    </div>
-                    <div>
-                      <div class="flex items-center gap-2">
-                        <span class="font-semibold text-sm text-main">Codex 桌面端</span>
-                        <span class="m26-app-badge" :class="{ running: codexClientInfo?.running, installed: codexClientInfo?.installed }">
-                          {{ codexClientInfo?.running ? '运行中' : (codexClientInfo?.installed ? '已安装' : '未安装') }}
-                        </span>
-                      </div>
-                      <span class="text-xs text-muted">ChatGPT 桌面端 / Codex CLI 原生支持</span>
-                    </div>
-                  </div>
-                  <div class="m26-client-badge-pill" :class="{ active: codexClientInfo?.configured }">
-                    {{ codexClientInfo?.configured ? '已配置网关' : '未接入' }}
-                  </div>
-                </div>
-
-                <div class="m26-client-body">
-                  <div class="m26-client-meta-line">
-                    <span class="label">默认模型</span>
-                    <span class="value font-mono text-xs">{{ codexClientInfo?.default_model || '未设定' }}</span>
-                  </div>
-                  <div class="m26-client-chips" v-if="codexClientInfo?.configured_models?.length">
-                    <span v-for="m in codexClientInfo.configured_models.slice(0, 3)" :key="m" class="m26-client-chip" :title="m">{{ m }}</span>
-                    <span v-if="codexClientInfo.configured_models.length > 3" class="m26-client-chip more">+{{ codexClientInfo.configured_models.length - 3 }}</span>
-                  </div>
-                  <div v-else class="text-xs text-slate-400 py-1">
-                    点击“配置模型”生成 Codex 专属模型目录
-                  </div>
-                </div>
-
-                <div class="m26-client-footer">
-                  <button class="m26-glass-btn text-xs flex-1" @click="openCodexConfigModal">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                      <circle cx="12" cy="12" r="3" />
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                    </svg>
-                    <span>配置模型</span>
-                  </button>
-                  <button class="m26-launch-btn text-xs flex-1" :disabled="isLaunchingCodex" @click="handleLaunchCodex" title="调起 ChatGPT.app 或终端启动 Codex">
-                    <span v-if="isLaunchingCodex" class="m26-spin-dot"></span>
-                    <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                      <polygon points="5 3 19 12 5 21 5 3" />
-                    </svg>
-                    <span>{{ isLaunchingCodex ? '启动中...' : '一键启动' }}</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Bento Grid Metrics -->
+          <!-- Bento Grid Metrics (At Top) -->
           <div class="m26-bento-grid">
             <div class="m26-bento-card">
               <div class="m26-bento-head">
@@ -4152,51 +3948,204 @@ function handleContextMenu(event: MouseEvent) {
             </div>
           </div>
 
-          <!-- Quick Actions & Status Strip -->
-          <div class="m26-quick-bar">
-            <div class="m26-bar-left">
-              <button class="m26-glass-btn" @click="probeAllChannels">
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M14 8A6 6 0 1 1 8 2" />
-                  <polyline points="14 3 14 8 9 8" />
-                </svg>
-                <span>全网一键探活</span>
-              </button>
-              <button class="m26-glass-btn" @click="exportConfig">
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M8 2v8M4 6l4 4 4-4M2 13h12" />
-                </svg>
-                <span>导出配置 JSON</span>
-              </button>
-            </div>
-            <div class="m26-bar-right">
-              <button class="m26-link-btn" @click="activeSection = 'channels'">查看全部渠道 ➔</button>
-            </div>
-          </div>
 
-          <!-- Live Channels Status Grid Preview -->
-          <div class="m26-card-section">
-            <h3 class="m26-section-title">活跃渠道状态矩阵</h3>
-            <div class="m26-mini-grid" v-if="channels.length">
-              <div
-                v-for="c in channels.slice(0, 6)"
-                :key="c.name"
-                class="m26-mini-card"
-                :class="[c.status, { disabled: !c.enabled }]"
-                @click="probeChannel(c)"
-              >
-                <div class="m26-mini-head">
-                  <span class="m26-status-dot" :class="c.status"></span>
-                  <span class="m26-mini-name">{{ c.name }}</span>
+
+          <!-- SECTION: Desktop Client Integration (Redesigned) -->
+          <div class="m26-clients-section">
+            <!-- Header Bar -->
+            <div class="m26-clients-header">
+              <div class="m26-clients-header-left">
+                <div class="flex items-center gap-2.5">
+                  <div class="m26-section-icon-badge">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                      <line x1="8" y1="21" x2="16" y2="21" />
+                      <line x1="12" y1="17" x2="12" y2="21" />
+                    </svg>
+                  </div>
+                  <h3 class="m26-clients-title">桌面客户端一键接入与启动</h3>
+                  <span class="m26-clients-tag">2 款原生客户端</span>
                 </div>
-                <div class="m26-mini-meta">
-                  <span class="m26-mini-proto">{{ c.protocol }}</span>
-                  <span class="m26-mini-lat">{{ c.ttft ? `首字 ${formatLatencySec(c.ttft)}` : formatLatencySec(c.latency) }}</span>
+                <p class="m26-clients-subtitle">原生支持 Claude 桌面端与 Codex (ChatGPT) 桌面端，自动双向协议转译，一键配置与快捷唤起</p>
+              </div>
+              <button
+                class="m26-glass-btn m26-clients-refresh-btn"
+                :disabled="isLoadingClients"
+                @click="loadDesktopClients"
+                title="重新检测本地客户端运行与配置状态"
+              >
+                <span v-if="isLoadingClients" class="m26-spin-dot"></span>
+                <svg v-else viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9L14 6" />
+                  <path d="M14 2.5v3.5h-3.5" />
+                </svg>
+                <span>{{ isLoadingClients ? '检测中...' : '刷新状态' }}</span>
+              </button>
+            </div>
+
+            <!-- Two Hero Integration Cards -->
+            <div class="m26-clients-grid">
+              <!-- Card 1: Claude Desktop -->
+              <div class="m26-client-card" :class="{ 'is-configured': claudeClientInfo?.configured }">
+                <div class="m26-client-card-top">
+                  <div class="flex items-center gap-3">
+                    <div class="m26-client-brand-logo claude">
+                      <!-- Official Anthropic Claude Sparkle Glyph -->
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                        <path d="M13.5 2.5a1.5 1.5 0 0 0-3 0v4.757L7.136 4.9A1.5 1.5 0 1 0 5.015 7.02l2.357 3.364H2.614a1.5 1.5 0 0 0 0 3h4.758l-2.357 3.364a1.5 1.5 0 1 0 2.121 2.121L10.5 15.508V21.5a1.5 1.5 0 0 0 3 0v-5.992l3.364 3.364a1.5 1.5 0 0 0 2.121-2.121L16.628 13.386h4.758a1.5 1.5 0 0 0 0-3h-4.758l2.357-3.364a1.5 1.5 0 0 0-2.121-2.121L13.5 7.257V2.5z" />
+                      </svg>
+                    </div>
+                    <div class="m26-client-title-block">
+                      <div class="flex items-center gap-2">
+                        <span class="m26-client-name">Claude 桌面端</span>
+                        <span class="m26-proc-pill" :class="{ running: claudeClientInfo?.running, installed: claudeClientInfo?.installed }">
+                          <span class="m26-proc-dot" :class="{ running: claudeClientInfo?.running }"></span>
+                          <span>{{ claudeClientInfo?.running ? '运行中' : (claudeClientInfo?.installed ? '已安装' : '未安装') }}</span>
+                        </span>
+                      </div>
+                      <span class="m26-client-sub">Anthropic 官方客户端 · 3P 协议模式</span>
+                    </div>
+                  </div>
+                  <div class="m26-gateway-conn-pill" :class="{ active: claudeClientInfo?.configured }">
+                    <svg v-if="claudeClientInfo?.configured" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
+                    </svg>
+                    <span v-else class="m26-unconn-dash"></span>
+                    <span>{{ claudeClientInfo?.configured ? '已接入网关' : '未接入网关' }}</span>
+                  </div>
+                </div>
+
+                <div class="m26-client-card-body">
+                  <div class="m26-client-slot-box">
+                    <div class="m26-slot-meta-row">
+                      <span class="m26-slot-label">挂载模型槽位</span>
+                      <span class="m26-slot-count" :class="{ active: claudeClientInfo?.configured_models?.length }">
+                        {{ claudeClientInfo?.configured_models?.length ? `${claudeClientInfo.configured_models.length} 个模型已挂载` : '未挂载模型' }}
+                      </span>
+                    </div>
+                    <div class="m26-slot-chips-wrap" v-if="claudeClientInfo?.configured_models?.length">
+                      <span v-for="m in claudeClientInfo.configured_models.slice(0, 3)" :key="m" class="m26-client-chip" :title="m">
+                        <span class="m26-chip-bullet"></span>
+                        <span class="m26-chip-text">{{ m }}</span>
+                      </span>
+                      <span v-if="claudeClientInfo.configured_models.length > 3" class="m26-client-chip more" :title="claudeClientInfo.configured_models.slice(3).join(', ')">
+                        +{{ claudeClientInfo.configured_models.length - 3 }}
+                      </span>
+                    </div>
+                    <div v-else class="m26-slot-empty-prompt" @click="openClaudeConfigModal">
+                      <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <circle cx="8" cy="8" r="7" />
+                        <line x1="8" y1="5" x2="8" y2="11" />
+                        <line x1="5" y1="8" x2="11" y2="8" />
+                      </svg>
+                      <span>尚未挂载模型 · 点击「配置模型」一键映射</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="m26-client-card-footer">
+                  <button class="m26-client-btn secondary" @click="openClaudeConfigModal">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <circle cx="8" cy="8" r="2.5" />
+                      <path d="M13.5 8c0-.3-.03-.6-.08-.9l1.4-1.1c.13-.1.17-.28.08-.43l-1.33-2.3c-.09-.15-.27-.2-.42-.15l-1.65.66c-.34-.26-.72-.48-1.13-.64L10.12 1.5c-.03-.17-.18-.3-.35-.3H7.1c-.17 0-.32.13-.35.3l-.25 1.74c-.41.16-.79.38-1.13.64l-1.65-.66c-.15-.05-.33 0-.42.15L2.07 5.57c-.09.15-.05.33.08.43l1.4 1.1c-.05.3-.08.6-.08.9s.03.6.08.9l-1.4 1.1c-.13.1-.17.28-.08.43l1.33 2.3c.09.15.27.2.42.15l1.65-.66c.34.26.72.48 1.13.64l.25 1.74c.03.17.18.3.35.3h2.67c.17 0 .32-.13.35-.3l.25-1.74c.41-.16.79-.38 1.13-.64l1.65.66c.15.05.33 0 .42-.15l1.33-2.3c.09-.15.05-.33-.08-.43l-1.4-1.1c.05-.3.08-.6.08-.9z" />
+                    </svg>
+                    <span>配置模型</span>
+                  </button>
+                  <button
+                    class="m26-client-btn primary claude"
+                    :disabled="isLaunchingClaude"
+                    @click="handleLaunchClaude"
+                    title="调起 Claude 桌面端并以 3P 模式加载网关"
+                  >
+                    <span v-if="isLaunchingClaude" class="m26-spin-dot white"></span>
+                    <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="currentColor">
+                      <polygon points="4,2 14,8 4,14" />
+                    </svg>
+                    <span>{{ isLaunchingClaude ? '启动中...' : '一键启动 Claude' }}</span>
+                  </button>
                 </div>
               </div>
-            </div>
-            <div class="m26-empty-state" v-else>
-              <p>尚未添加任何渠道，点击上方「添加渠道」开始接入。</p>
+
+              <!-- Card 2: Codex Desktop (ChatGPT) -->
+              <div class="m26-client-card" :class="{ 'is-configured': codexClientInfo?.configured }">
+                <div class="m26-client-card-top">
+                  <div class="flex items-center gap-3">
+                    <div class="m26-client-brand-logo codex">
+                      <!-- Official OpenAI Spiral Rosette Glyph -->
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                        <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1683a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4947zm-9.66-4.773a4.4755 4.4755 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1402-2.294zm-1.6628-9.1051a4.4708 4.4708 0 0 1 2.3418-1.9729l-.142.0852v5.5165a.8374.8374 0 0 0 .3879.6813l5.857 3.3685-2.02 1.1683a.071.071 0 0 1-.0615.0048L4.0374 15.025a4.4992 4.4992 0 0 1-2.438-6.4738zm16.597 3.8553l-5.857-3.3827 2.02-1.1683a.071.071 0 0 1 .0615-.0048l4.8306 2.7914a4.4992 4.4992 0 0 1-.6765 8.1042v-5.6548a.79.79 0 0 0-.3786-.685zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L8.809 9.8797V7.5473a.0804.0804 0 0 1 .0332-.0615l4.8969-2.8293a4.4992 4.4992 0 0 1 6.6702 4.7212zm-12.246 4.4566l-2.02-1.1683a.071.071 0 0 1-.038-.052V7.1868a4.4992 4.4992 0 0 1 7.3709-3.4539l-.142.0805-4.7783 2.7582a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.6069 1.4998-2.602-1.4998z"/>
+                      </svg>
+                    </div>
+                    <div class="m26-client-title-block">
+                      <div class="flex items-center gap-2">
+                        <span class="m26-client-name">Codex 桌面端</span>
+                        <span class="m26-proc-pill" :class="{ running: codexClientInfo?.running, installed: codexClientInfo?.installed }">
+                          <span class="m26-proc-dot" :class="{ running: codexClientInfo?.running }"></span>
+                          <span>{{ codexClientInfo?.running ? '运行中' : (codexClientInfo?.installed ? '已安装' : '未安装') }}</span>
+                        </span>
+                      </div>
+                      <span class="m26-client-sub">ChatGPT 桌面端 / Codex CLI 原生支持</span>
+                    </div>
+                  </div>
+                  <div class="m26-gateway-conn-pill" :class="{ active: codexClientInfo?.configured }">
+                    <svg v-if="codexClientInfo?.configured" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
+                    </svg>
+                    <span v-else class="m26-unconn-dash"></span>
+                    <span>{{ codexClientInfo?.configured ? '已接入网关' : '未接入网关' }}</span>
+                  </div>
+                </div>
+
+                <div class="m26-client-card-body">
+                  <div class="m26-client-slot-box">
+                    <div class="m26-slot-meta-row">
+                      <span class="m26-slot-label">默认主模型</span>
+                      <span class="m26-slot-model-val font-mono" :title="codexClientInfo?.default_model || '未设定'">
+                        {{ codexClientInfo?.default_model || '未设定' }}
+                      </span>
+                    </div>
+                    <div class="m26-slot-chips-wrap" v-if="codexClientInfo?.configured_models?.length">
+                      <span v-for="m in codexClientInfo.configured_models.slice(0, 3)" :key="m" class="m26-client-chip" :title="m">
+                        <span class="m26-chip-bullet"></span>
+                        <span class="m26-chip-text">{{ m }}</span>
+                      </span>
+                      <span v-if="codexClientInfo.configured_models.length > 3" class="m26-client-chip more" :title="codexClientInfo.configured_models.slice(3).join(', ')">
+                        +{{ codexClientInfo.configured_models.length - 3 }}
+                      </span>
+                    </div>
+                    <div v-else class="m26-slot-empty-prompt" @click="openCodexConfigModal">
+                      <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <circle cx="8" cy="8" r="7" />
+                        <line x1="8" y1="5" x2="8" y2="11" />
+                        <line x1="5" y1="8" x2="11" y2="8" />
+                      </svg>
+                      <span>尚未生成专属模型 · 点击「配置模型」一键映射</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="m26-client-card-footer">
+                  <button class="m26-client-btn secondary" @click="openCodexConfigModal">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <circle cx="8" cy="8" r="2.5" />
+                      <path d="M13.5 8c0-.3-.03-.6-.08-.9l1.4-1.1c.13-.1.17-.28.08-.43l-1.33-2.3c-.09-.15-.27-.2-.42-.15l-1.65.66c-.34-.26-.72-.48-1.13-.64L10.12 1.5c-.03-.17-.18-.3-.35-.3H7.1c-.17 0-.32.13-.35.3l-.25 1.74c-.41.16-.79.38-1.13.64l-1.65-.66c-.15-.05-.33 0-.42.15L2.07 5.57c-.09.15-.05.33.08.43l1.4 1.1c-.05.3-.08.6-.08.9s.03.6.08.9l-1.4 1.1c-.13.1-.17.28-.08.43l1.33 2.3c.09.15.27.2.42.15l1.65-.66c.34.26.72.48 1.13.64l.25 1.74c.03.17.18.3.35.3h2.67c.17 0 .32-.13.35-.3l.25-1.74c.41-.16.79-.38 1.13-.64l1.65.66c.15.05.33 0 .42-.15l1.33-2.3c.09-.15.05-.33-.08-.43l-1.4-1.1c.05-.3.08-.6.08-.9z" />
+                    </svg>
+                    <span>配置模型</span>
+                  </button>
+                  <button
+                    class="m26-client-btn primary codex"
+                    :disabled="isLaunchingCodex"
+                    @click="handleLaunchCodex"
+                    title="调起 ChatGPT.app 或终端启动 Codex"
+                  >
+                    <span v-if="isLaunchingCodex" class="m26-spin-dot white"></span>
+                    <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="currentColor">
+                      <polygon points="4,2 14,8 4,14" />
+                    </svg>
+                    <span>{{ isLaunchingCodex ? '启动中...' : '一键启动 Codex' }}</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -5444,30 +5393,33 @@ function handleContextMenu(event: MouseEvent) {
     <!-- Hidden Input for Import -->
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
 
-    <!-- MODAL: INJECTION CHECK -->
+    <!-- MODAL: INJECTION CHECK (Redesigned) -->
     <div v-if="showInjectionModal" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
       <div class="m26-modal-sheet m26-inject-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <h3 class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
-          <button class="m26-close-btn" data-no-drag @click="showInjectionModal = false">✕</button>
-        </div>
-
-        <div class="m26-modal-body">
-          <div class="m26-inject-summary">
+          <div class="flex items-center gap-2.5">
+            <h3 class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
             <span class="m26-inject-pill" :class="injectionChannel?.injectionState ?? 'unknown'">
               {{ injectionStateLabel(injectionChannel!) }}
             </span>
+          </div>
+          <button class="m26-close-btn" data-no-drag @click="showInjectionModal = false">✕</button>
+        </div>
+
+        <div class="m26-modal-body m26-inject-body">
+          <div class="m26-inject-summary">
             <span class="m26-inject-meta">
               {{ injectionChannel?.injectionCheckedAt
-                ? `上次检测: ${injectionChannel.injectionCheckedAt.slice(0, 19).replace('T', ' ')}`
-                : '尚未检测过' }}
+                ? `上次检测时间: ${injectionChannel.injectionCheckedAt.slice(0, 19).replace('T', ' ')}`
+                : '该渠道尚未执行过注入检测' }}
             </span>
           </div>
-          <p class="m26-inject-desc">
-            检测方法：向上游发送一条 1 token 的提问，比对上游返回的 prompt_tokens 与正常模板开销（约 20-80）。
-            膨胀即说明有服务器端注入的系统提示。内容提取依赖模型配合，拒绝复述不代表没有注入。
-            注入通常是站点级行为，只查主模型即可；若要确认该站是否按模型区别对待，可检测全部模型。
-          </p>
+          <div class="m26-inject-desc-box">
+            <p class="m26-inject-desc">
+              检测原理：向上游发送 1 token 简短提问，比对上游返回的 prompt_tokens 与正常模板开销（约 20-80）。膨胀即说明有服务器端注入的系统提示。
+              内容提取依赖模型配合，拒绝复述不代表没有注入。注入通常是站点级全局行为，一般仅测主模型即可确认；若要确认站点是否按模型区别对待，可检测全部模型。
+            </p>
+          </div>
 
           <div v-if="injectionResults.length" class="m26-inject-list">
             <div
@@ -5477,35 +5429,111 @@ function handleContextMenu(event: MouseEvent) {
               :class="{ expanded: r.content && (r.state === 'detected' || r.state === 'suspected') }"
             >
               <div class="m26-inject-row-head">
-                <span class="m26-inject-model" :title="r.model">{{ r.model }}</span>
-                <span class="m26-inject-pill" :class="r.state">{{ modelInjectionLabel(r) }}</span>
+                <div class="flex items-center gap-2 min-w-0 flex-1">
+                  <span class="m26-inject-model" :title="r.model">{{ r.model }}</span>
+                  <button
+                    class="m26-model-copy-btn"
+                    title="复制模型名称"
+                    @click.stop="copyModelId(r.model)"
+                  >
+                    <svg v-if="copiedModelId !== r.model" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <rect x="5" y="5" width="8" height="8" rx="1.5" />
+                      <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
+                    </svg>
+                    <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2">
+                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
+                    </svg>
+                    <span>{{ copiedModelId === r.model ? '已复制' : '复制' }}</span>
+                  </button>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span v-if="r.prompt_tokens" class="m26-tokens-pill">
+                    {{ r.prompt_tokens }} tokens
+                  </span>
+                  <span class="m26-inject-pill" :class="r.state">{{ modelInjectionLabel(r) }}</span>
+                </div>
               </div>
-              <pre
+
+              <div
                 v-if="r.content && (r.state === 'detected' || r.state === 'suspected')"
-                class="m26-inject-content"
-              >{{ r.content }}</pre>
+                class="m26-inject-content-container"
+              >
+                <div class="m26-inject-content-toolbar">
+                  <div class="flex items-center gap-1.5">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <path d="M2.5 3.5h11M2.5 6.5h11M2.5 9.5h7M2.5 12.5h5" />
+                    </svg>
+                    <span class="m26-inject-content-title">提取到的注入 Prompt 原文:</span>
+                  </div>
+                  <button
+                    class="m26-model-copy-btn"
+                    title="复制完整注入 Prompt 内容"
+                    @click.stop="copyInjectionContent(r.content)"
+                  >
+                    <svg v-if="copiedInjectionText !== r.content" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <rect x="5" y="5" width="8" height="8" rx="1.5" />
+                      <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
+                    </svg>
+                    <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#059669" stroke-width="2.2">
+                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
+                    </svg>
+                    <span>{{ copiedInjectionText === r.content ? '已复制 Prompt' : '复制 Prompt' }}</span>
+                  </button>
+                </div>
+                <pre class="m26-inject-content">{{ r.content }}</pre>
+              </div>
               <div v-else-if="r.state === 'clean'" class="m26-inject-row-note">
-                输入 token 数 {{ r.prompt_tokens }}，在正常范围内。
+                输入 token 数 {{ r.prompt_tokens }}，在正常模板开销范围内。
               </div>
               <div v-else-if="r.message" class="m26-inject-row-note">{{ r.message }}</div>
             </div>
           </div>
-          <div v-else class="m26-inject-empty">尚未检测。</div>
+          <div v-else class="m26-inject-empty">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" class="m26-empty-shield-icon">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </svg>
+            <p>该渠道尚未执行注入检测，点击下方按钮开始探测。</p>
+          </div>
+        </div>
 
-          <div class="m26-inject-actions">
+        <!-- FIXED FOOTER -->
+        <div class="m26-modal-footer m26-inject-footer">
+          <div class="m26-inject-footer-left">
+            <span v-if="isCheckingInjection" class="m26-inject-running-state">
+              <span class="m26-spin-dot"></span>
+              <span>正在向上游探测系统提示词注入，请稍候...</span>
+            </span>
+            <span v-else class="m26-inject-tip">
+              单 token 提问校验 · 注入通常为站点级行为，建议优先检测主模型
+            </span>
+          </div>
+          <div class="m26-inject-footer-actions">
             <button
-              class="m26-btn-micro"
+              class="m26-inject-btn secondary"
               :disabled="isCheckingInjection"
               @click="runInjectionCheck(false)"
+              title="仅检测主模型（推荐，速度快且省 Token）"
             >
-              {{ isCheckingInjection ? '检测中...' : '检测主模型' }}
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                <circle cx="8" cy="8" r="6" />
+                <circle cx="8" cy="8" r="2" />
+              </svg>
+              <span>{{ isCheckingInjection ? '检测中...' : '检测主模型' }}</span>
             </button>
             <button
-              class="m26-btn-micro probe"
+              class="m26-inject-btn primary"
               :disabled="isCheckingInjection"
               @click="runInjectionCheck(true)"
+              title="逐一检测全部模型（耗时可能较长）"
             >
-              {{ isCheckingInjection ? '检测中 (全部模型可能需数分钟)...' : '检测全部模型' }}
+              <span v-if="isCheckingInjection" class="m26-spin-dot white"></span>
+              <svg v-else viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                <rect x="2" y="2" width="5" height="5" rx="1" />
+                <rect x="9" y="2" width="5" height="5" rx="1" />
+                <rect x="2" y="9" width="5" height="5" rx="1" />
+                <rect x="9" y="9" width="5" height="5" rx="1" />
+              </svg>
+              <span>{{ isCheckingInjection ? '全量检测中...' : '检测全部模型' }}</span>
             </button>
           </div>
         </div>
@@ -5744,7 +5772,7 @@ function handleContextMenu(event: MouseEvent) {
                 {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
               </span>
             </div>
-            <p class="m26-modal-subtitle">
+            <p class="m26-modal-subtitle" :title="activeModelLatencyChannel.url">
               渠道 “{{ activeModelLatencyChannel.name }}” · 共 {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
             </p>
           </div>
@@ -5812,7 +5840,7 @@ function handleContextMenu(event: MouseEvent) {
               :key="modelName"
               class="m26-model-item-card"
               :class="{ 'is-selected': selectedModelNames.includes(modelName) }"
-              @click="toggleModelSelection(modelName)"
+              @click="handleModelCardClick(modelName)"
             >
               <div class="flex items-center gap-2.5 min-w-0 flex-1">
                 <!-- Checkbox -->
@@ -5828,8 +5856,21 @@ function handleContextMenu(event: MouseEvent) {
                   <div class="flex items-center gap-2">
                     <span class="m26-model-idx">#{{ idx + 1 }}</span>
                     <span class="m26-model-full-name" :title="modelName">{{ modelName }}</span>
+                    <button
+                      class="m26-model-copy-btn"
+                      title="复制模型名"
+                      @click.stop="copyModelId(modelName)"
+                    >
+                      <svg v-if="copiedModelId !== modelName" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <rect x="5" y="5" width="8" height="8" rx="1.5" />
+                        <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
+                      </svg>
+                      <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2">
+                        <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
+                      </svg>
+                      <span>{{ copiedModelId === modelName ? '已复制' : '复制' }}</span>
+                    </button>
                   </div>
-                  <span class="m26-model-ch-url">{{ activeModelLatencyChannel.url }}</span>
                 </div>
               </div>
 
@@ -6614,7 +6655,7 @@ function handleContextMenu(event: MouseEvent) {
             <div class="m26-diag-advice-list">
               <div v-for="(tip, i) in getTroubleshootingAdvice(activeDiagnosticChannel)" :key="i" class="m26-diag-tip-item">
                 <span class="tip-num">{{ i + 1 }}</span>
-                <span class="tip-txt" v-html="tip"></span>
+                <span class="tip-txt"><strong>{{ tip.title }}</strong>：{{ tip.detail }}</span>
               </div>
             </div>
           </div>
@@ -6939,7 +6980,7 @@ function handleContextMenu(event: MouseEvent) {
                 </div>
               </div>
               <div class="m26-shortcut-row">
-                <span class="m26-shortcut-desc">批量探活全部渠道所有模型</span>
+                <span class="m26-shortcut-desc">批量探活全部渠道的主模型</span>
                 <div class="m26-kbd-keys">
                   <span class="m26-kbd-badge">⌘</span>
                   <span class="m26-kbd-badge">⇧</span>
@@ -8450,92 +8491,272 @@ function handleContextMenu(event: MouseEvent) {
   background: rgba(100, 116, 139, 0.12);
   color: #94a3b8;
 }
-.m26-inject-sheet {
-  max-width: 720px;
+.m26-modal-sheet.m26-inject-sheet {
+  width: 860px !important;
+  max-width: min(920px, 92vw) !important;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
+
+.m26-modal-body.m26-inject-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: calc(88vh - 130px);
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
 .m26-inject-summary {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 10px;
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
-.m26-inject-summary .m26-inject-pill {
-  cursor: default;
-  font-size: 11px;
-}
+
 .m26-inject-meta {
   font-size: 12px;
   color: var(--m26-text-secondary);
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
+
+.m26-inject-desc-box {
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
 .m26-inject-desc {
   font-size: 12px;
   line-height: 1.6;
   color: var(--m26-text-secondary);
-  margin: 0 0 12px;
+  margin: 0;
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
+
 .m26-inject-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 420px;
-  overflow: auto;
-  margin-bottom: 12px;
+  gap: 12px;
+  /* NO internal scrollbar - expands naturally inside m26-inject-body */
+  overflow: visible !important;
+  max-height: none !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
+
 .m26-inject-row {
-  border: 1px solid rgba(0, 0, 0, 0.07);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
+
 .m26-inject-row-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
 }
+
 .m26-inject-model {
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   font-family: ui-monospace, SFMono-Regular, monospace;
-  color: var(--m26-text-main, #0f172a);
+  color: var(--m26-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
 }
-.m26-inject-row-head .m26-inject-pill {
-  cursor: default;
-  flex-shrink: 0;
-}
-.m26-inject-row-note {
-  font-size: 11.5px;
+
+.m26-tokens-pill {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
   color: var(--m26-text-secondary);
-  margin-top: 6px;
-}
-.m26-inject-row .m26-inject-content {
-  margin-top: 8px;
-  max-height: 240px;
-}
-.m26-inject-content {
-  max-height: 320px;
-  overflow: auto;
   background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 8px;
-  padding: 12px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.m26-inject-row-note {
   font-size: 12px;
-  line-height: 1.6;
+  color: var(--m26-text-secondary);
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.02);
+  border-radius: 6px;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.m26-inject-content-container {
+  margin-top: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.m26-inject-content-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.03);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.m26-inject-content-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--m26-text-secondary);
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.m26-inject-content {
+  /* NO internal scrollbar - expands naturally so user scrolls entire modal with ONE single scrollbar */
+  overflow: visible !important;
+  max-height: none !important;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
-  margin: 6px 0 0;
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--m26-text);
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
 }
+
 .m26-inject-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 20px;
+  color: var(--m26-text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.m26-empty-shield-icon {
+  opacity: 0.35;
+  color: var(--m26-accent);
+}
+
+.m26-inject-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 22px;
+  background: #f8fafc;
+  border-top: 1px solid var(--m26-border);
+  flex-shrink: 0;
+}
+
+.m26-inject-footer-left {
+  display: flex;
+  align-items: center;
   font-size: 12px;
   color: var(--m26-text-secondary);
-  padding: 16px 0;
+  min-width: 0;
 }
-.m26-inject-actions {
+
+.m26-inject-tip {
+  font-size: 11.5px;
+  color: var(--m26-text-muted);
+}
+
+.m26-inject-running-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--m26-accent);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.m26-inject-footer-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.m26-inject-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 7px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+
+.m26-inject-btn.secondary {
+  background: #ffffff;
+  color: var(--m26-text);
+  border: 1px solid var(--m26-border-bright);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.m26-inject-btn.secondary:hover:not(:disabled) {
+  border-color: var(--m26-accent);
+  color: var(--m26-accent);
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.1);
+}
+
+.m26-inject-btn.primary {
+  background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
+  color: #ffffff;
+  border: none;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.28);
+}
+
+.m26-inject-btn.primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4338ca 0%, #3730a3 100%);
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.36);
+  transform: translateY(-1px);
+}
+
+.m26-inject-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.m26-inject-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
 }
 .m26-interval-pill {
   font-size: 10px;
@@ -10273,6 +10494,8 @@ input:checked + .m26-slider:before {
   flex-direction: column;
   overflow: hidden;
   animation: sheetIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: text;
+  -webkit-user-select: text;
 }
 @keyframes sheetIn {
   from { opacity: 0; transform: scale(0.96) translateY(-10px); }
@@ -10312,6 +10535,8 @@ input:checked + .m26-slider:before {
   max-height: calc(85vh - 120px);
   overflow-y: auto;
   box-sizing: border-box;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .m26-form-group {
   display: flex;
@@ -10796,12 +11021,16 @@ input:checked + .m26-slider:before {
   gap: 3px;
   min-width: 0;
   flex: 1;
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
 .m26-model-idx {
   font-size: 11px;
   font-family: ui-monospace, monospace;
   color: var(--m26-text-muted);
   font-weight: 600;
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
 .m26-model-full-name {
   font-size: 13px;
@@ -10812,6 +11041,9 @@ input:checked + .m26-slider:before {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 320px;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
 }
 .m26-tag-primary {
   font-size: 10px;
@@ -10829,6 +11061,9 @@ input:checked + .m26-slider:before {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 380px;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
 }
 .m26-model-item-actions {
   display: flex;
@@ -11886,41 +12121,72 @@ input:checked + .m26-slider:before {
 /* ==========================================================================
    Client Integration (Claude & Codex) Styles
    ========================================================================== */
-.m26-clients-integration-card {
+.m26-clients-section {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px 20px;
-  background: #ffffff;
-  border: 1px solid var(--m26-border);
-  border-radius: 14px;
-  margin-bottom: 20px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.02);
+  gap: 14px;
 }
 
-.m26-clients-card-header {
+.m26-clients-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  padding: 0 2px;
 }
 
-.m26-clients-icon-box {
+.m26-clients-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.m26-section-icon-badge {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
   background: rgba(79, 70, 229, 0.08);
-  color: #4f46e5;
+  color: var(--m26-accent);
+}
+
+.m26-clients-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--m26-text);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.m26-clients-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--m26-accent);
+  background: rgba(79, 70, 229, 0.08);
+  border: 1px solid rgba(79, 70, 229, 0.16);
+  padding: 1px 7px;
+  border-radius: 6px;
+}
+
+.m26-clients-subtitle {
+  font-size: 12px;
+  color: var(--m26-text-secondary);
+  margin: 2px 0 0 0;
+}
+
+.m26-clients-refresh-btn {
+  font-size: 12px;
+  padding: 5px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .m26-clients-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 16px;
 }
 
 @media (max-width: 860px) {
@@ -11929,128 +12195,241 @@ input:checked + .m26-slider:before {
   }
 }
 
-.m26-client-item {
+.m26-client-card {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  background: rgba(248, 250, 252, 0.85);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 12px;
-  padding: 14px 16px;
-  gap: 12px;
-  transition: all 0.18s ease;
+  background: var(--m26-card-bg);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--m26-border);
+  border-radius: 16px;
+  padding: 18px 20px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.02), inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  gap: 14px;
 }
 
-.m26-client-item:hover {
-  background: #ffffff;
-  border-color: rgba(79, 70, 229, 0.25);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+.m26-client-card:hover {
+  background: var(--m26-card-hover);
+  border-color: var(--m26-border-bright);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05), inset 0 1px 0 0 rgba(255, 255, 255, 1);
+  transform: translateY(-2px);
 }
 
-.m26-client-item.is-configured {
-  border-color: rgba(79, 70, 229, 0.18);
-  background: linear-gradient(to bottom right, rgba(255, 255, 255, 0.95), rgba(245, 247, 255, 0.6));
+.m26-client-card.is-configured {
+  border-color: rgba(5, 150, 105, 0.2);
+  box-shadow: 0 2px 10px rgba(5, 150, 105, 0.03), inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
 }
 
-.m26-client-top {
+.m26-client-card.is-configured:hover {
+  border-color: rgba(5, 150, 105, 0.35);
+  box-shadow: 0 8px 24px rgba(5, 150, 105, 0.06), inset 0 1px 0 0 rgba(255, 255, 255, 1);
+}
+
+.m26-client-card-top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
 }
 
-.m26-client-logo {
+.m26-client-brand-logo {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
 }
 
-.m26-client-logo.claude {
-  background: #fff3eb;
-  color: #d97706;
-  border: 1px solid rgba(217, 119, 6, 0.15);
+.m26-client-card:hover .m26-client-brand-logo {
+  transform: scale(1.04);
 }
 
-.m26-client-logo.codex {
-  background: #ecfdf5;
+.m26-client-brand-logo.claude {
+  background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%);
+  color: #ea580c;
+  border: 1px solid rgba(234, 88, 12, 0.22);
+  box-shadow: 0 2px 6px rgba(234, 88, 12, 0.1);
+}
+
+.m26-client-brand-logo.codex {
+  background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
   color: #059669;
-  border: 1px solid rgba(5, 150, 105, 0.15);
+  border: 1px solid rgba(5, 150, 105, 0.22);
+  box-shadow: 0 2px 6px rgba(5, 150, 105, 0.1);
 }
 
-.m26-app-badge {
-  font-size: 10px;
+.m26-client-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.m26-client-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--m26-text);
+  letter-spacing: -0.01em;
+}
+
+.m26-proc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 5px;
-  background: rgba(0, 0, 0, 0.05);
-  color: #64748b;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--m26-text-muted);
 }
 
-.m26-app-badge.installed {
-  background: rgba(5, 150, 105, 0.08);
-  color: #059669;
+.m26-proc-pill.installed {
+  background: rgba(100, 116, 139, 0.1);
+  color: var(--m26-text-secondary);
 }
 
-.m26-app-badge.running {
-  background: rgba(79, 70, 229, 0.1);
-  color: #4f46e5;
-  box-shadow: 0 0 0 1px rgba(79, 70, 229, 0.2);
+.m26-proc-pill.running {
+  background: rgba(5, 150, 105, 0.1);
+  color: var(--m26-emerald);
 }
 
-.m26-client-badge-pill {
+.m26-proc-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--m26-text-muted);
+}
+
+.m26-proc-dot.running {
+  background: var(--m26-emerald);
+  box-shadow: 0 0 0 2px rgba(5, 150, 105, 0.25);
+  animation: m26-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes m26-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.9); }
+}
+
+.m26-client-sub {
+  font-size: 11.5px;
+  color: var(--m26-text-secondary);
+}
+
+.m26-gateway-conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 11px;
   font-weight: 600;
-  padding: 3px 8px;
-  border-radius: 12px;
+  padding: 3px 9px;
+  border-radius: 20px;
   background: rgba(148, 163, 184, 0.12);
-  color: #64748b;
+  color: var(--m26-text-muted);
+  border: 1px solid rgba(148, 163, 184, 0.2);
 }
 
-.m26-client-badge-pill.active {
-  background: rgba(79, 70, 229, 0.12);
-  color: #4f46e5;
-  border: 1px solid rgba(79, 70, 229, 0.25);
+.m26-gateway-conn-pill.active {
+  background: rgba(5, 150, 105, 0.1);
+  color: var(--m26-emerald);
+  border-color: rgba(5, 150, 105, 0.25);
 }
 
-.m26-client-body {
+.m26-unconn-dash {
+  width: 6px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.m26-client-card-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
-.m26-client-meta-line {
+.m26-client-slot-box {
+  background: rgba(248, 250, 252, 0.85);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-height: 82px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.m26-slot-meta-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   font-size: 11.5px;
 }
 
-.m26-client-meta-line .label {
-  color: #64748b;
+.m26-slot-label {
+  color: var(--m26-text-secondary);
+  font-weight: 500;
 }
 
-.m26-client-meta-line .value {
+.m26-slot-count {
   font-weight: 600;
-  color: #1e293b;
+  font-size: 11px;
+  color: var(--m26-text-muted);
 }
 
-.m26-client-chips {
+.m26-slot-count.active {
+  color: var(--m26-accent);
+}
+
+.m26-slot-model-val {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--m26-text);
+  background: rgba(0, 0, 0, 0.04);
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m26-slot-chips-wrap {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 5px;
 }
 
 .m26-client-chip {
-  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, monospace;
   padding: 2px 7px;
   border-radius: 5px;
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.08);
-  color: #334155;
+  color: var(--m26-text);
   max-width: 140px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.m26-chip-bullet {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--m26-accent);
+  opacity: 0.7;
+}
+
+.m26-chip-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -12058,42 +12437,114 @@ input:checked + .m26-slider:before {
 
 .m26-client-chip.more {
   background: rgba(0, 0, 0, 0.04);
-  color: #64748b;
+  color: var(--m26-text-secondary);
   font-weight: 600;
+  border-style: dashed;
 }
 
-.m26-client-footer {
+.m26-slot-empty-prompt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px dashed rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 11.5px;
+  color: var(--m26-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.m26-slot-empty-prompt:hover {
+  background: #ffffff;
+  border-color: var(--m26-accent);
+  color: var(--m26-accent);
+}
+
+.m26-client-card-footer {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding-top: 6px;
-  border-top: 1px solid rgba(0, 0, 0, 0.04);
+  gap: 10px;
+  padding-top: 2px;
 }
 
-.m26-launch-btn {
+.m26-client-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  background: #4f46e5;
-  color: #ffffff;
+  font-size: 12px;
   font-weight: 500;
-  border: none;
+  padding: 7px 14px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.15s ease;
-  box-shadow: 0 1px 2px rgba(79, 70, 229, 0.2);
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
 }
 
-.m26-launch-btn:hover:not(:disabled) {
-  background: #4338ca;
-  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.3);
+.m26-client-btn.secondary {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--m26-text);
+  border: 1px solid var(--m26-border-bright);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
-.m26-launch-btn:disabled {
-  opacity: 0.6;
+.m26-client-btn.secondary:hover {
+  background: #ffffff;
+  border-color: var(--m26-accent);
+  color: var(--m26-accent);
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.1);
+}
+
+.m26-client-btn.secondary:active {
+  transform: scale(0.98);
+}
+
+.m26-client-btn.primary {
+  flex: 1.25;
+  border: none;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.m26-client-btn.primary.claude {
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  box-shadow: 0 2px 8px rgba(234, 88, 12, 0.28);
+}
+
+.m26-client-btn.primary.claude:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);
+  box-shadow: 0 4px 12px rgba(234, 88, 12, 0.36);
+  transform: translateY(-1px);
+}
+
+.m26-client-btn.primary.codex {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  box-shadow: 0 2px 8px rgba(5, 150, 105, 0.28);
+}
+
+.m26-client-btn.primary.codex:hover:not(:disabled) {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.36);
+  transform: translateY(-1px);
+}
+
+.m26-client-btn.primary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.m26-client-btn.primary:disabled {
+  opacity: 0.65;
   cursor: not-allowed;
+  transform: none;
+}
+
+.m26-spin-dot.white {
+  border-color: rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
 }
 
 /* Modals for Client Config */

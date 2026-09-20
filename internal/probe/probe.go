@@ -48,13 +48,6 @@ const (
 const (
 	// RequestTimeout bounds a single probe request including body read.
 	RequestTimeout = 60 * time.Second
-	// RetryTimeout bounds a retry attempt. It matches the first attempt's
-	// window: reasoning models on free upstreams legitimately take 40+ seconds
-	// to first content, and a shorter retry window would re-fail a channel the
-	// first attempt merely lost to jitter.
-	RetryTimeout = 60 * time.Second
-	// PingTimeout bounds the HEAD request used to measure origin reachability.
-	PingTimeout = 8 * time.Second
 	// MinIntervalSeconds is the shortest automatic probe interval.
 	MinIntervalSeconds = 15
 	// MaxIntervalSeconds is the longest automatic probe interval (24h).
@@ -70,33 +63,26 @@ const (
 	maxAnswerTokens  = 16
 	maxErrorSnippet  = 300
 	maxErrorBodyRead = 64 << 10
-
-	// probeRetries is how many extra attempts a model gets after a transient
-	// failure. Shared upstreams return an empty 200 or a stray 5xx
-	// intermittently, and a single sample would flap the channel status.
-	probeRetries = 2
 )
 
 // DegradedThreshold is the latency at or above which a correct answer is
 // still reported as degraded. It is a variable so tests can tighten it.
 var DegradedThreshold = 6 * time.Second
 
-// RunBudget is the wall-clock a full Run may need for one model: the origin
-// ping, a first attempt, every retry, plus scheduling slack. Callers that
-// impose their own deadline must use this rather than RequestTimeout, or the
-// deadline cuts the retries short and reports a failure the retry was meant
-// to absorb.
+// RunBudget is the wall-clock a full Run may need for one model: one attempt
+// plus scheduling slack. All probe modes intentionally use one attempt; a
+// later manual click or scheduler tick is the next sample.
 func RunBudget() time.Duration {
 	return RunBudgetFor(1)
 }
 
-// RunBudgetFor calculates the outer deadline for probing modelCount models sequentially
-// in a queue, including origin ping, first attempts, retries, and slack buffer.
+// RunBudgetFor calculates the outer deadline for probing modelCount models
+// sequentially in a queue, including one attempt per model and slack.
 func RunBudgetFor(modelCount int) time.Duration {
-	if modelCount <= 1 {
-		return PingTimeout + RequestTimeout + probeRetries*RetryTimeout + ScheduleBuffer
+	if modelCount < 1 {
+		modelCount = 1
 	}
-	return PingTimeout + time.Duration(modelCount)*(RequestTimeout+probeRetries*RetryTimeout) + ScheduleBuffer
+	return time.Duration(modelCount)*RequestTimeout + ScheduleBuffer
 }
 
 // Validation errors. Messages intentionally contain "invalid" / "required"
@@ -129,20 +115,10 @@ type Result struct {
 	PingLatencyMs *int      `json:"ping_latency_ms,omitempty"`
 	Message       string    `json:"message,omitempty"`
 	CheckedAt     time.Time `json:"checked_at"`
-
-	// retryable marks a failure that may be upstream jitter rather than a real
-	// fault. It never leaves this package.
-	retryable bool
 }
 
 var (
 	requestClient = &http.Client{Timeout: RequestTimeout}
-	pingClient    = &http.Client{
-		Timeout: PingTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 )
 
 // NormalizeAPIMode maps an empty mode to chat_completions.
@@ -226,9 +202,19 @@ func validateEndpoint(raw string) error {
 // Run probes the primary model and every extra model sequentially in a queue and
 // returns one Result per distinct model, in configuration order. Requesting
 // sequentially avoids triggering upstream concurrency limits or rate limits.
-// The origin ping latency is measured once and attached to every result. A non-nil
-// error is only returned for invalid configuration.
+// A non-nil error is only returned for invalid configuration; upstream failures
+// are represented as per-model results.
 func Run(ctx context.Context, cfg Config) ([]*Result, error) {
+	return run(ctx, cfg)
+}
+
+// RunOnce is kept as an explicit name for scheduler callers. It has the same
+// single-attempt semantics as Run.
+func RunOnce(ctx context.Context, cfg Config) ([]*Result, error) {
+	return run(ctx, cfg)
+}
+
+func run(ctx context.Context, cfg Config) ([]*Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -246,47 +232,21 @@ func Run(ctx context.Context, cfg Config) ([]*Result, error) {
 		return nil, ErrMissingPrimaryModel
 	}
 
-	ping := Ping(ctx, cfg.Endpoint)
 	results := make([]*Result, len(models))
 	for i, model := range models {
 		if ctx.Err() != nil {
 			results[i] = &Result{
-				Model:         model,
-				Status:        StatusError,
-				PingLatencyMs: ping,
-				Message:       ctx.Err().Error(),
-				CheckedAt:     time.Now(),
+				Model:     model,
+				Status:    StatusError,
+				Message:   ctx.Err().Error(),
+				CheckedAt: time.Now(),
 			}
 			continue
 		}
 		res := checkModel(ctx, cfg, model)
-		res.PingLatencyMs = ping
 		results[i] = res
 	}
 	return results, nil
-}
-
-// Ping measures a HEAD round trip to the endpoint origin. It returns nil when
-// the origin cannot be reached; any HTTP status counts as reachable.
-func Ping(ctx context.Context, endpoint string) *int {
-	u, err := url.Parse(NormalizeEndpoint(endpoint))
-	if err != nil || u.Host == "" {
-		return nil
-	}
-	origin := u.Scheme + "://" + u.Host + "/"
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, origin, nil)
-	if err != nil {
-		return nil
-	}
-	started := time.Now()
-	resp, err := pingClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	_ = resp.Body.Close()
-	ms := int(time.Since(started) / time.Millisecond)
-	return &ms
 }
 
 type challenge struct {
@@ -330,29 +290,10 @@ func answerMatches(reply, expected string) bool {
 }
 
 func checkModel(ctx context.Context, cfg Config, model string) *Result {
-	var res *Result
-	for attempt := 0; attempt <= probeRetries; attempt++ {
-		attemptTimeout := RequestTimeout
-		if attempt > 0 {
-			attemptTimeout = RetryTimeout
-		}
-		res = checkModelOnce(ctx, cfg, model, attemptTimeout)
-		if !res.retryable {
-			break
-		}
-		// A wrong answer or an empty 200 costs no upstream quota to rule out;
-		// a transport error might, so stop retrying once the caller's context
-		// is done.
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	res.retryable = false
-	return res
+	return checkModelOnce(ctx, cfg, model, RequestTimeout)
 }
 
-// checkModelOnce performs a single challenge request. The unexported
-// retryable field tells checkModel whether another attempt is worthwhile.
+// checkModelOnce performs a single challenge request.
 func checkModelOnce(ctx context.Context, cfg Config, model string, attemptTimeout time.Duration) *Result {
 	res := &Result{Model: model, Status: StatusError, CheckedAt: time.Now()}
 	ch := newChallenge()
@@ -364,21 +305,24 @@ func checkModelOnce(ctx context.Context, cfg Config, model string, attemptTimeou
 	out, err := send(reqCtx, cfg, model, ch.prompt)
 	latency := time.Since(started)
 	latencyMs := int(latency / time.Millisecond)
-	res.LatencyMs = &latencyMs
 	if err == nil && out.hasTTFT {
 		ttftMs := int(out.ttft / time.Millisecond)
 		res.TTFTMs = &ttftMs
+		// Probes answer one question: when did the model first become usable?
+		// Expose that same first-token measurement as LatencyMs so every UI
+		// surface reports one consistent probe time instead of mixing TTFT and
+		// post-token stream duration.
+		latencyMs = ttftMs
 	}
+	res.LatencyMs = &latencyMs
 
 	switch {
 	case err != nil:
 		res.Message = redact(truncate(err.Error(), maxErrorSnippet), cfg.APIKey)
-		res.retryable = true
 	case out.status >= 500:
-		// 5xx from a shared upstream is usually transient; 4xx (bad key, unknown
-		// model) is deterministic and retrying only wastes time.
+		// Preserve the upstream status in the result; the caller will decide when
+		// to take the next independent sample.
 		res.Message = redact(fmt.Sprintf("upstream HTTP %d: %s", out.status, truncate(compactWhitespace(out.body), maxErrorSnippet)), cfg.APIKey)
-		res.retryable = true
 	case out.status < 200 || out.status >= 300:
 		res.Message = redact(fmt.Sprintf("upstream HTTP %d: %s", out.status, truncate(compactWhitespace(out.body), maxErrorSnippet)), cfg.APIKey)
 	case !out.sawContent && !out.sawReasoning:
@@ -388,9 +332,8 @@ func checkModelOnce(ctx context.Context, cfg Config, model string, attemptTimeou
 		// a slow thinker legitimately spends the whole budget before its first
 		// visible token, and it still proved the whole path works.
 		res.Status = StatusFailed
-		res.retryable = true
 		res.Message = "upstream returned 2xx but no content"
-	case latency >= DegradedThreshold:
+	case time.Duration(latencyMs)*time.Millisecond >= DegradedThreshold:
 		res.Status = StatusDegraded
 		res.Message = fmt.Sprintf("slow response: %dms", latencyMs)
 	default:

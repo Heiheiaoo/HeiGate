@@ -229,9 +229,120 @@ func TestProbeNowDoesNotClobberConcurrentEdit(t *testing.T) {
 	if loaded.PrimaryModel != "new-model" || len(loaded.ExtraModels) != 1 || loaded.ExtraModels[0] != "new-extra" {
 		t.Fatalf("probe resurrected stale models: primary=%q extra=%v", loaded.PrimaryModel, loaded.ExtraModels)
 	}
-	if loaded.LastStatus != probe.StatusOperational {
-		t.Fatalf("status = %q, want operational", loaded.LastStatus)
+	if loaded.LastStatus != "unknown" {
+		t.Fatalf("status = %q, want unknown: an old primary's result must not be assigned to the newly selected model", loaded.LastStatus)
 	}
+}
+
+func TestProbeNowChecksOnlyPrimaryUnlessDeepScanRequested(t *testing.T) {
+	var requested []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &req)
+		requested = append(requested, req.Model)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, sumFromProbeBody(t, body))+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	store := newTestStore(t, "desktop_primary_only_probe_test")
+	ch := &Channel{
+		Name: "lean", Provider: probe.ProviderOpenAI, Endpoint: server.URL,
+		APIKey: "k", PrimaryModel: "primary", ExtraModels: []string{"extra-a", "extra-b"},
+		Enabled: true, IntervalSeconds: 300,
+	}
+	require.NoError(t, store.Save(context.Background(), ch))
+	runner := NewProbeRunner(store)
+	defer runner.Stop()
+
+	_, err := runner.ProbeNow(context.Background(), ch.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"primary"}, requested)
+
+	requested = nil
+	_, err = runner.ProbeAllModelsNow(context.Background(), ch.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"primary", "extra-a", "extra-b"}, requested)
+}
+
+func TestProbeModelNowExtraDoesNotChangeChannelHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"message":"model not found"}}`)
+	}))
+	defer server.Close()
+
+	store := newTestStore(t, "desktop_extra_model_probe_test")
+	ch := &Channel{
+		Name: "extra", Provider: probe.ProviderOpenAI, Endpoint: server.URL,
+		APIKey: "k", PrimaryModel: "primary", ExtraModels: []string{"broken-extra"},
+		Enabled: true, IntervalSeconds: 300, LastStatus: probe.StatusOperational,
+	}
+	require.NoError(t, store.Save(context.Background(), ch))
+	runner := NewProbeRunner(store)
+	defer runner.Stop()
+
+	results, err := runner.ProbeModelNow(context.Background(), ch.ID, "broken-extra")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, probe.StatusError, results[0].Status)
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusOperational, loaded.LastStatus)
+	require.Zero(t, loaded.FailureCount)
+	require.Nil(t, loaded.CooldownUntil)
+}
+
+func TestProbeMethodsShareOneChannelInFlightSlot(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		close(started)
+		<-release
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, sumFromProbeBody(t, body))+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	store := newTestStore(t, "desktop_probe_inflight_test")
+	ch := &Channel{
+		Name: "locked", Provider: probe.ProviderOpenAI, Endpoint: server.URL,
+		APIKey: "k", PrimaryModel: "primary", ExtraModels: []string{"extra"},
+		Enabled: true, IntervalSeconds: 300,
+	}
+	require.NoError(t, store.Save(context.Background(), ch))
+	runner := NewProbeRunner(store)
+	defer runner.Stop()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := runner.ProbeNow(context.Background(), ch.ID)
+		done <- err
+	}()
+	<-started
+
+	results, err := runner.ProbeModelNow(context.Background(), ch.ID, "extra")
+	require.NoError(t, err)
+	require.Empty(t, results)
+
+	close(release)
+	require.NoError(t, <-done)
 }
 
 // Adaptive backoff stretches the interval of a stable channel, is capped, and
@@ -289,7 +400,10 @@ func TestProbeStreakSurvivesDegradedButNotFailure(t *testing.T) {
 	ch := &Channel{
 		Name: "flappy", Provider: probe.ProviderOpenAI, Endpoint: server.URL,
 		APIKey: "k", PrimaryModel: "m", Enabled: true, IntervalSeconds: 300,
+		FailureCount: 53, CircuitState: CircuitOpen,
 	}
+	cooldown := time.Now().Add(time.Hour)
+	ch.CooldownUntil = &cooldown
 	if err := store.Save(context.Background(), ch); err != nil {
 		t.Fatal(err)
 	}
@@ -316,6 +430,9 @@ func TestProbeStreakSurvivesDegradedButNotFailure(t *testing.T) {
 	}
 	if loaded.ProbeStreak != 2 {
 		t.Fatalf("degraded probe changed the streak to %d, want it held at 2", loaded.ProbeStreak)
+	}
+	if loaded.FailureCount != 0 || loaded.CircuitState != CircuitClosed || loaded.CooldownUntil != nil {
+		t.Fatalf("successful but slow probe left stale circuit state: failures=%d circuit=%q cooldown=%v", loaded.FailureCount, loaded.CircuitState, loaded.CooldownUntil)
 	}
 }
 
@@ -436,7 +553,7 @@ func TestPrimaryModelDrivesChannelStatus(t *testing.T) {
 
 	runner := NewProbeRunner(store)
 	defer runner.Stop()
-	if _, err := runner.ProbeNow(context.Background(), ch.ID); err != nil {
+	if _, err := runner.ProbeAllModelsNow(context.Background(), ch.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -492,7 +609,7 @@ func TestDeadPrimaryMarksChannelError(t *testing.T) {
 
 	runner := NewProbeRunner(store)
 	defer runner.Stop()
-	if _, err := runner.ProbeNow(context.Background(), ch.ID); err != nil {
+	if _, err := runner.ProbeAllModelsNow(context.Background(), ch.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -531,7 +648,7 @@ func TestAllModelsDeadIsError(t *testing.T) {
 
 	runner := NewProbeRunner(store)
 	defer runner.Stop()
-	if _, err := runner.ProbeNow(context.Background(), ch.ID); err != nil {
+	if _, err := runner.ProbeAllModelsNow(context.Background(), ch.ID); err != nil {
 		t.Fatal(err)
 	}
 

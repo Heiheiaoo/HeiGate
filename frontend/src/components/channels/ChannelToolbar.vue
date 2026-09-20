@@ -154,7 +154,7 @@ defineExpose({
       <button
         class="m26-ch-btn m26-ch-btn-secondary"
         :disabled="isProbingAll"
-        title="批量探活全部渠道 (⌘⇧P)"
+        title="批量探活全部渠道的主模型 (⌘⇧P)"
         @click="emit('probe-all')"
       >
         <span v-if="isProbingAll" class="m26-spin-dot mr-1.5"></span>

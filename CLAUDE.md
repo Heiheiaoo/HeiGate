@@ -60,7 +60,7 @@ desktop/macos       Swift 原生外壳
 
 **熔断是惰性恢复的。** 不起定时器。冷却期过后第一个请求会把渠道置为 `half_open` 放行当探针，成功就关闭熔断，失败重新打开。失败分类和冷却时长见 `internal/channel/resilience.go`（认证错误 10 分钟、模型不存在 2 分钟、限流看 `Retry-After`、网络和 5xx 指数退避 15s→5min 封顶）。
 
-**探活发算术题。** 只 ping 端点或调 `/v1/models` 无法证明「这个密钥能用这个模型跑推理」。两位数加法能一次覆盖端点、密钥、模型名、额度。超 6 秒记 degraded，答错记 failed，HTTP/网络错误记 error，三种状态在路由排序时权重不同。匹配答案时扫描所有数字串（模型常写成 `**42**` 或 `答案是 42`）。
+**探活发算术题。** 只 ping 端点或调 `/v1/models` 无法证明「这个密钥能用这个模型跑推理」。周期任务只检查主模型，每个时间点只尝试一次，失败交给下一周期恢复；手动探活也只执行一次，用户再次点击就是下一次独立采样。额外模型由用户显式触发队列检查，避免稳定渠道反复消耗所有模型额度。两位数加法能一次覆盖端点、密钥、模型名、额度；达到 6 秒记 degraded，没有任何文本或 reasoning 记 failed，HTTP/网络错误记 error。答案匹配只作为诊断提示，不作为可用性硬判据。
 
 **协议转换的坑位：**
 - `tool_result` 必须紧跟发起调用的 assistant 消息（OpenAI 要求），而 Anthropic 把它放在 user turn 里，转换时要提出来排前面
@@ -71,7 +71,7 @@ desktop/macos       Swift 原生外壳
 
 **SQLite 连接池限制为 1。** 桌面写入量小，串行化让探活更新和日志写入顺序确定。schema 迁移用 `CREATE TABLE IF NOT EXISTS` + 逐条 `ALTER TABLE`（忽略「列已存在」错误），没有迁移框架。
 
-**前端刻意不用路由和状态管理。** 只有一个页面，状态都在 `GatewayView.vue` 里用 `ref` 管着，`services/` 三个文件负责跟后端通信。日志实时更新走 SSE（`GET /api/logs/stream`），不是轮询。
+**前端刻意不用路由和全局状态管理。** 只有一个页面，主要状态仍由 `GatewayView.vue` 管理；渠道卡片、表格、工具栏和模型编辑器位于 `components/channels/`，`services/` 负责跟后端通信。日志实时更新走 SSE（`GET /api/logs/stream`），不是轮询。
 
 ## 安全模型
 
@@ -107,7 +107,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 - 应用未做代码签名和公证，首次打开需要用户在「隐私与安全性」里放行
 - 仅支持 Apple 芯片（arm64），没有 Intel 构建
-- `GatewayView.vue` 有 12k 行，可以考虑拆成组件（目前刻意保持单文件，拆之前想清楚收益）
+- `GatewayView.vue` 仍然较大；新增独立交互时优先继续拆到对应功能组件，避免把已经抽离的渠道 UI 再塞回主页面
 - 前端只有 API 层的 3 个测试，UI 交互没有测试覆盖
 - 探活和网关目前只支持 Anthropic 和 OpenAI 两种 provider，Gemini 等需要新增 adapter
 

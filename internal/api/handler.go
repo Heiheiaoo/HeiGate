@@ -291,53 +291,18 @@ func (h *Handler) probe(c *gin.Context) {
 		return
 	}
 	targetModel := strings.TrimSpace(c.Query("model"))
-	if targetModel != "" {
-		ch, err := h.store.Get(c.Request.Context(), id)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		// One model, but the budget must still cover the retries probe.Run
-		// runs to absorb slow-first-token jitter; a flat minute equals a single
-		// RequestTimeout and guarantees both retries get cut short.
-		probeCtx, cancel := context.WithTimeout(c.Request.Context(), probe.RunBudgetFor(1))
-		defer cancel()
-		results, err := probe.Run(probeCtx, probe.Config{
-			Provider:     ch.Provider,
-			APIMode:      ch.APIMode,
-			Endpoint:     ch.Endpoint,
-			APIKey:       ch.APIKey,
-			PrimaryModel: targetModel,
-		})
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		if len(results) > 0 {
-			primary := results[0]
-			// Re-read inside the update so a concurrent probe or edit is not
-			// clobbered, and skip the write if the primary model changed
-			// underneath us (this result is then about a different model).
-			_ = h.store.UpdateRuntime(c.Request.Context(), id, func(fresh *channel.Channel) {
-				if fresh.PrimaryModel != "" && targetModel != fresh.PrimaryModel {
-					return
-				}
-				fresh.LastStatus = primary.Status
-				fresh.LastError = primary.Message
-				fresh.LastLatencyMs = primary.LatencyMs
-				fresh.LastPingLatencyMs = primary.PingLatencyMs
-				fresh.LastCheckedAt = &primary.CheckedAt
-				if primary.Status == probe.StatusOperational {
-					fresh.FailureCount = 0
-					fresh.CircuitState = channel.CircuitClosed
-					fresh.CooldownUntil = nil
-				}
-			})
-		}
-		c.JSON(http.StatusOK, gin.H{"data": results})
-		return
+	checkAll := c.Query("all") == "1" || c.Query("all") == "true"
+
+	var results []*probe.Result
+	var err error
+	switch {
+	case targetModel != "":
+		results, err = h.runner.ProbeModelNow(c.Request.Context(), id, targetModel)
+	case checkAll:
+		results, err = h.runner.ProbeAllModelsNow(c.Request.Context(), id)
+	default:
+		results, err = h.runner.ProbeNow(c.Request.Context(), id)
 	}
-	results, err := h.runner.ProbeNow(c.Request.Context(), id)
 	if err != nil {
 		writeError(c, err)
 		return

@@ -167,9 +167,9 @@ func TestRunOpenAIChatOperational(t *testing.T) {
 	for _, res := range results {
 		require.Equal(t, StatusOperational, res.Status, res.Message)
 		require.NotNil(t, res.LatencyMs)
-		require.NotNil(t, res.PingLatencyMs)
+		require.Nil(t, res.PingLatencyMs, "probe no longer performs a separate HEAD ping")
 		require.NotNil(t, res.TTFTMs, "streaming probe must measure time to first token")
-		require.LessOrEqual(t, *res.TTFTMs, *res.LatencyMs)
+		require.Equal(t, *res.TTFTMs, *res.LatencyMs, "probe latency is intentionally the first-token time")
 	}
 }
 
@@ -397,54 +397,42 @@ func TestContentToTextHandlesParts(t *testing.T) {
 	require.Equal(t, "", contentToText(nil))
 }
 
-// A shared upstream may drop the first request and answer the second; the probe
-// should not report the channel as failed on that single bad sample.
-func TestRunRetriesEmptyAnswerThenSucceeds(t *testing.T) {
+func TestRunDoesNotRetryEmptyAnswer(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			return
 		}
 		calls++
-		if calls == 1 {
-			writeSSE(w, `{"choices":[{"delta":{}}]}`)
-			return
-		}
-		answer := answerFromPrompt(t, chatPrompt(t, r))
-		writeSSE(w, chatDelta(answer))
+		writeSSE(w, `{"choices":[{"delta":{}}]}`)
 	}))
 	defer server.Close()
 
 	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
 	require.NoError(t, err)
-	require.Equal(t, StatusOperational, results[0].Status)
-	require.Equal(t, 2, calls, "should have retried once after the empty answer")
+	require.Equal(t, StatusFailed, results[0].Status)
+	require.Equal(t, 1, calls)
 }
 
-func TestRunRetriesServerErrorThenSucceeds(t *testing.T) {
+func TestRunDoesNotRetryServerError(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			return
 		}
 		calls++
-		if calls == 1 {
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = io.WriteString(w, `{"error":"do request failed"}`)
-			return
-		}
-		answer := answerFromPrompt(t, chatPrompt(t, r))
-		writeSSE(w, chatDelta(answer))
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"do request failed"}`)
 	}))
 	defer server.Close()
 
 	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
 	require.NoError(t, err)
-	require.Equal(t, StatusOperational, results[0].Status)
-	require.Equal(t, 2, calls)
+	require.Equal(t, StatusError, results[0].Status)
+	require.Equal(t, 1, calls)
 }
 
-// A 4xx is deterministic (bad key, unknown model), so retrying only wastes time.
+// A 4xx is recorded immediately; every probe consists of one attempt.
 func TestRunDoesNotRetryClientError(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -463,8 +451,7 @@ func TestRunDoesNotRetryClientError(t *testing.T) {
 	require.Equal(t, 1, calls, "4xx should not be retried")
 }
 
-// Retries stop at the limit: a persistently broken channel still reports failed.
-func TestRunStopsRetryingAfterLimit(t *testing.T) {
+func TestRunStopsAfterOneAttempt(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
@@ -478,19 +465,15 @@ func TestRunStopsRetryingAfterLimit(t *testing.T) {
 	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
 	require.NoError(t, err)
 	require.Equal(t, StatusFailed, results[0].Status)
-	require.Equal(t, probeRetries+1, calls)
+	require.Equal(t, 1, calls)
 }
 
-// ProbeNow imposes RunBudget as the outer deadline. If that budget cannot fit a
-// first attempt plus every retry, the deadline silently truncates the retries
-// and a transient failure is reported as a hard one.
-func TestRunBudgetFitsEveryAttempt(t *testing.T) {
-	need := RequestTimeout + probeRetries*RetryTimeout
-	require.GreaterOrEqual(t, RunBudget(), need,
-		"RunBudget must cover the first attempt plus all retries")
+func TestRunBudgetFitsOneAttempt(t *testing.T) {
+	require.GreaterOrEqual(t, RunBudget(), RequestTimeout,
+		"RunBudget must cover the single attempt")
 }
 
-func TestRunUsesFullRetryAllowance(t *testing.T) {
+func TestRunUsesOneAttempt(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
@@ -507,7 +490,27 @@ func TestRunUsesFullRetryAllowance(t *testing.T) {
 
 	results, err := Run(ctx, Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
 	require.NoError(t, err)
-	require.Equal(t, probeRetries+1, calls, "all attempts should run within RunBudget")
+	require.Equal(t, 1, calls)
+	require.Equal(t, StatusFailed, results[0].Status)
+}
+
+func TestRunOnceDoesNotRetry(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		calls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	results, err := RunOnce(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, 1, calls)
 	require.Equal(t, StatusFailed, results[0].Status)
 }
 

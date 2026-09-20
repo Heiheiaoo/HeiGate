@@ -52,24 +52,24 @@ export function probeModeLabel(channel: Channel): string {
   const configured = channel.probeInterval ?? 0
   const effective = channel.effectiveIntervalSeconds ?? configured
   if (configured === 0) {
-    return '队列 · 手动'
+    return '主模型 · 手动'
   }
   const isAdaptive = effective !== configured && configured > 0
   const timeStr = formatIntervalText(effective)
-  return isAdaptive ? `队列 · ${timeStr}(自适应)` : `队列 · ${timeStr}`
+  return isAdaptive ? `主模型 · ${timeStr}(自适应)` : `主模型 · ${timeStr}`
 }
 
 export function probeModeTooltip(channel: Channel): string {
   const configured = channel.probeInterval ?? 0
   const effective = channel.effectiveIntervalSeconds ?? configured
   if (configured === 0) {
-    return '探活模式：串行单线程队列探活 · 仅手动触发（不消耗额度）'
+    return '探活模式：仅手动检查主模型（每次单独采样）；全部模型可在模型面板中按需检测'
   }
   const isAdaptive = effective !== configured && configured > 0
   if (isAdaptive) {
-    return `探活模式：串行单线程队列探活 · 配置周期 ${formatIntervalText(configured)}，当前自适应拉长至 ${formatIntervalText(effective)}`
+    return `探活模式：每个时间点只尝试一次主模型 · 配置周期 ${formatIntervalText(configured)}，当前自适应拉长至 ${formatIntervalText(effective)}`
   }
-  return `探活模式：串行单线程队列探活 · 每 ${formatIntervalText(configured)} 自动周期检测`
+  return `探活模式：每 ${formatIntervalText(configured)} 自动检查主模型（单次尝试）`
 }
 
 export function isPeriodicProbe(channel: Channel): boolean {

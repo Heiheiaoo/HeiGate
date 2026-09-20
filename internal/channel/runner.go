@@ -178,12 +178,42 @@ func AdaptiveProbeInterval(base time.Duration, streak int) time.Duration {
 }
 
 func (r *ProbeRunner) runOne(ctx context.Context, id int64) {
-	_, _ = r.ProbeNow(ctx, id)
+	_, _ = r.ProbeAutomatic(ctx, id)
 }
 
-// ProbeNow runs one challenge probe and persists the primary result. It is
-// shared by the scheduler and the local API's manual probe endpoint.
+// ProbeNow runs the lightweight channel health check: only the primary model
+// is called, because it is the model that drives the channel headline status,
+// routing priority, circuit breaker, and adaptive schedule. Extra models are
+// available through ProbeModelNow or ProbeAllModelsNow on explicit demand.
 func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, error) {
+	return r.probeNow(ctx, id, "", false)
+}
+
+// ProbeAutomatic is the scheduler-facing name for a single primary-model
+// sample. All probe modes are single-attempt; the next click or tick is the
+// next sample.
+func (r *ProbeRunner) ProbeAutomatic(ctx context.Context, id int64) ([]*probe.Result, error) {
+	return r.probeNow(ctx, id, "", false)
+}
+
+// ProbeModelNow checks one explicitly selected model. When it is the channel's
+// current primary model, the normal health/circuit bookkeeping is persisted;
+// checking an extra model is observational and does not bench the whole channel.
+func (r *ProbeRunner) ProbeModelNow(ctx context.Context, id int64, model string) ([]*probe.Result, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return r.ProbeNow(ctx, id)
+	}
+	return r.probeNow(ctx, id, model, false)
+}
+
+// ProbeAllModelsNow performs an explicit deep scan of every configured model.
+// Models are still checked sequentially by probe.Run to avoid upstream bursts.
+func (r *ProbeRunner) ProbeAllModelsNow(ctx context.Context, id int64) ([]*probe.Result, error) {
+	return r.probeNow(ctx, id, "", true)
+}
+
+func (r *ProbeRunner) probeNow(ctx context.Context, id int64, targetModel string, allModels bool) ([]*probe.Result, error) {
 	if r == nil || r.store == nil {
 		return nil, context.Canceled
 	}
@@ -201,44 +231,72 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		return nil, nil
 	}
 
-	modelCount := 1 + len(channel.ExtraModels)
+	probedPrimary := channel.PrimaryModel
+	cfg := probe.Config{
+		Provider: channel.Provider,
+		APIMode:  channel.APIMode,
+		Endpoint: channel.Endpoint,
+		APIKey:   channel.APIKey,
+	}
+	modelCount := 1
+	persistPrimary := true
+	switch {
+	case targetModel != "":
+		cfg.PrimaryModel = targetModel
+		persistPrimary = targetModel == probedPrimary
+	case allModels:
+		cfg.PrimaryModel = probedPrimary
+		cfg.ExtraModels = channel.ExtraModels
+		modelCount += len(channel.ExtraModels)
+	default:
+		cfg.PrimaryModel = probedPrimary
+	}
+
 	probeCtx, cancel := context.WithTimeout(ctx, probe.RunBudgetFor(modelCount))
 	defer cancel()
-	results, probeErr := probe.Run(probeCtx, probe.Config{
-		Provider:     channel.Provider,
-		APIMode:      channel.APIMode,
-		Endpoint:     channel.Endpoint,
-		APIKey:       channel.APIKey,
-		PrimaryModel: channel.PrimaryModel,
-		ExtraModels:  channel.ExtraModels,
-	})
+	results, probeErr := probe.Run(probeCtx, cfg)
 	if probeErr != nil {
-		failureInfo := FailureInfo{Class: FailureNetwork}
-		channel.FailureCount++
-		channel.LastStatus = probe.StatusError
-		channel.LastError = probeErr.Error()
-		cooldown := FailureCooldown(failureInfo, channel.FailureCount)
-		until := time.Now().UTC().Add(cooldown)
-		channel.CooldownUntil = &until
-		if channel.FailureCount >= 3 {
-			channel.CircuitState = CircuitOpen
-		}
-		channel.LastLatencyMs = nil
-		channel.LastTTFTMs = nil
-		channel.LastPingLatencyMs = nil
-		channel.ProbeStreak = 0
-		channel.LastCheckedAt = timePtr(time.Now().UTC())
-		if err := r.store.UpdateRuntime(context.Background(), id, func(fresh *Channel) {
-			copyRuntimeState(fresh, channel)
-		}); err != nil {
-			slog.Warn("desktop channel probe result save failed", "channel_id", id, "error", err)
+		if persistPrimary {
+			r.persistProbeError(id, probedPrimary, probeErr)
 		}
 		return nil, probeErr
 	}
 	if len(results) == 0 {
 		return results, nil
 	}
+	if persistPrimary {
+		r.persistProbeResults(id, probedPrimary, results)
+	}
+	return results, nil
+}
 
+func (r *ProbeRunner) persistProbeError(id int64, expectedPrimary string, probeErr error) {
+	if err := r.store.UpdateRuntime(context.Background(), id, func(fresh *Channel) {
+		// A user may change the primary model while a slow probe is in flight.
+		// A result for the old model must never become the new model's status.
+		if fresh.PrimaryModel != expectedPrimary {
+			return
+		}
+		fresh.FailureCount++
+		fresh.LastStatus = probe.StatusError
+		fresh.LastError = probeErr.Error()
+		cooldown := FailureCooldown(FailureInfo{Class: FailureNetwork}, fresh.FailureCount)
+		until := time.Now().UTC().Add(cooldown)
+		fresh.CooldownUntil = &until
+		if fresh.FailureCount >= 3 {
+			fresh.CircuitState = CircuitOpen
+		}
+		fresh.LastLatencyMs = nil
+		fresh.LastTTFTMs = nil
+		fresh.LastPingLatencyMs = nil
+		fresh.ProbeStreak = 0
+		fresh.LastCheckedAt = timePtr(time.Now().UTC())
+	}); err != nil {
+		slog.Warn("desktop channel probe result save failed", "channel_id", id, "error", err)
+	}
+}
+
+func (r *ProbeRunner) persistProbeResults(id int64, expectedPrimary string, results []*probe.Result) {
 	// Non-operational models are surfaced in the channel's message regardless of
 	// which one is primary; the headline status and latency come from the primary
 	// alone (resolved below), so per-model counters and latency sums aren't needed.
@@ -256,9 +314,9 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 	// out of the healthiest routing bucket and blocked adaptive probe backoff.
 	// Problems in the other models are carried in the message instead.
 	var primary *probe.Result
-	for _, r := range results {
-		if r.Model == channel.PrimaryModel {
-			primary = r
+	for _, result := range results {
+		if result.Model == expectedPrimary {
+			primary = result
 			break
 		}
 	}
@@ -266,61 +324,66 @@ func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, 
 		primary = results[0]
 	}
 	issueText := strings.Join(issues, "; ")
-
-	now := time.Now().UTC()
-	channel.LastCheckedAt = &now
-	if len(results) > 0 {
-		channel.LastPingLatencyMs = results[0].PingLatencyMs
+	if primary == nil {
+		return
 	}
 
-	if primary != nil {
+	if err := r.store.UpdateRuntime(context.Background(), id, func(fresh *Channel) {
+		if fresh.PrimaryModel != expectedPrimary {
+			return
+		}
+		now := time.Now().UTC()
+		fresh.LastCheckedAt = &now
+		fresh.LastPingLatencyMs = primary.PingLatencyMs
 		switch primary.Status {
 		case probe.StatusOperational:
-			channel.LastStatus = probe.StatusOperational
-			channel.LastLatencyMs = primary.LatencyMs
-			channel.LastTTFTMs = primary.TTFTMs
-			channel.LastError = issueText
-			channel.ProbeStreak++
-			channel.FailureCount = 0
-			channel.CircuitState = CircuitClosed
-			channel.CooldownUntil = nil
+			fresh.LastStatus = probe.StatusOperational
+			fresh.LastLatencyMs = primary.LatencyMs
+			fresh.LastTTFTMs = primary.TTFTMs
+			fresh.LastError = issueText
+			fresh.ProbeStreak++
+			fresh.FailureCount = 0
+			fresh.CircuitState = CircuitClosed
+			fresh.CooldownUntil = nil
 		case probe.StatusDegraded:
-			channel.LastStatus = probe.StatusDegraded
-			channel.LastLatencyMs = primary.LatencyMs
-			channel.LastTTFTMs = primary.TTFTMs
+			fresh.LastStatus = probe.StatusDegraded
+			fresh.LastLatencyMs = primary.LatencyMs
+			fresh.LastTTFTMs = primary.TTFTMs
+			// The request did complete successfully; it is slow, not broken.
+			// Clear stale failure/circuit state so a recovered but high-latency
+			// channel is not shown as both serving and still熔断中.
+			fresh.FailureCount = 0
+			fresh.CircuitState = CircuitClosed
+			fresh.CooldownUntil = nil
 			if primary.Message != "" {
-				channel.LastError = fmt.Sprintf("[%s] %s", primary.Model, primary.Message)
+				fresh.LastError = fmt.Sprintf("[%s] %s", primary.Model, primary.Message)
 			} else {
-				channel.LastError = issueText
+				fresh.LastError = issueText
 			}
 		default:
 			// Primary model failed / error. The channel status is error based on the primary model.
-			channel.LastStatus = probe.StatusError
-			channel.LastLatencyMs = nil
-			channel.LastTTFTMs = nil
+			fresh.LastStatus = probe.StatusError
+			fresh.LastLatencyMs = nil
+			fresh.LastTTFTMs = nil
 			if primary.Message != "" {
-				channel.LastError = fmt.Sprintf("[%s] %s", primary.Model, primary.Message)
+				fresh.LastError = fmt.Sprintf("[%s] %s", primary.Model, primary.Message)
 			} else if issueText != "" {
-				channel.LastError = issueText
+				fresh.LastError = issueText
 			} else {
-				channel.LastError = fmt.Sprintf("[%s] 探活失败", primary.Model)
+				fresh.LastError = fmt.Sprintf("[%s] 探活失败", primary.Model)
 			}
-			channel.FailureCount++
-			channel.ProbeStreak = 0
-			cooldown := FailureCooldown(FailureInfo{Class: FailureProvider}, channel.FailureCount)
+			fresh.FailureCount++
+			fresh.ProbeStreak = 0
+			cooldown := FailureCooldown(FailureInfo{Class: FailureProvider}, fresh.FailureCount)
 			until := time.Now().UTC().Add(cooldown)
-			channel.CooldownUntil = &until
-			if channel.FailureCount >= 3 {
-				channel.CircuitState = CircuitOpen
+			fresh.CooldownUntil = &until
+			if fresh.FailureCount >= 3 {
+				fresh.CircuitState = CircuitOpen
 			}
 		}
-	}
-	if err := r.store.UpdateRuntime(context.Background(), id, func(fresh *Channel) {
-		copyRuntimeState(fresh, channel)
 	}); err != nil {
 		slog.Warn("desktop channel probe result save failed", "channel_id", id, "error", err)
 	}
-	return results, nil
 }
 
 func (r *ProbeRunner) acquire(id int64) bool {

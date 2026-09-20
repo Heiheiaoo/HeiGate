@@ -73,6 +73,16 @@ const extraModelsCount = computed(() => {
   if (!c.value.modelNames || c.value.modelNames.length <= 1) return 0
   return c.value.modelNames.length - 1
 })
+
+function onCardClick() {
+  if (window.getSelection()?.toString().trim()) return
+  emit('select', c.value)
+}
+
+function onModelHighlightClick() {
+  if (window.getSelection()?.toString().trim()) return
+  emit('open-models', c.value)
+}
 </script>
 
 <template>
@@ -87,7 +97,7 @@ const extraModelsCount = computed(() => {
       }
     ]"
     tabindex="0"
-    @click="emit('select', c)"
+    @click="onCardClick"
   >
     <!-- Top Row: Name, Status Pill, and Toggle Switch -->
     <div class="m26-card-header">
@@ -132,7 +142,7 @@ const extraModelsCount = computed(() => {
     <div
       class="m26-model-highlight"
       title="点击打开此渠道模型面板与实时探活"
-      @click.stop="emit('open-models', c)"
+      @click.stop="onModelHighlightClick"
     >
       <div class="m26-model-info min-w-0">
         <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" class="m26-model-icon shrink-0">
@@ -316,6 +326,9 @@ const extraModelsCount = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   letter-spacing: -0.1px;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
 }
 
 
@@ -476,6 +489,9 @@ const extraModelsCount = computed(() => {
   font-size: 11.5px;
   font-weight: 500;
   color: #334155;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
 }
 
 .m26-models-count-chip {
