@@ -152,29 +152,29 @@ defineExpose({
     <!-- Right: Actions (Batch Probe, Add Channel) -->
     <div class="m26-ch-toolbar-right">
       <button
-        class="m26-ch-btn m26-ch-btn-secondary"
+        class="m26-ch-btn m26-ch-btn-secondary icon-only"
         :disabled="isProbingAll"
-        title="批量探活全部渠道的主模型 (⌘⇧P)"
+        :title="isProbingAll ? '探活中…' : '批量探活 (⌘⇧P)'"
+        :aria-label="isProbingAll ? '批量探活进行中' : '批量探活全部渠道'"
         @click="emit('probe-all')"
       >
-        <span v-if="isProbingAll" class="m26-spin-dot mr-1.5"></span>
-        <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" class="mr-1.5 inline-block">
+        <span v-if="isProbingAll" class="m26-spin-dot"></span>
+        <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="M23 4v6h-6M1 20v-6h6" />
           <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
         </svg>
-        <span>{{ isProbingAll ? '探活中...' : '批量探活' }}</span>
       </button>
 
       <button
-        class="m26-ch-btn m26-ch-btn-primary"
+        class="m26-ch-btn m26-ch-btn-primary icon-only"
         title="新建渠道 (⌘N)"
+        aria-label="添加渠道"
         @click="emit('add-channel')"
       >
-        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" class="mr-1 inline-block">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
           <line x1="8" y1="3" x2="8" y2="13" />
           <line x1="3" y1="8" x2="13" y2="8" />
         </svg>
-        <span>添加渠道</span>
       </button>
     </div>
   </div>
@@ -371,6 +371,12 @@ defineExpose({
   user-select: none;
   transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
   box-sizing: border-box;
+}
+
+.m26-ch-btn.icon-only {
+  width: 34px;
+  height: 34px;
+  padding: 0;
 }
 
 .m26-ch-btn-secondary {

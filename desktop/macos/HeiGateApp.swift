@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
     private var window: NSWindow?
     private var webView: WKWebView?
     private var statusItem: NSStatusItem?
+    private var statusMenu: NSMenu?
     private var autoStartMenuItem: NSMenuItem?
     private var stoppingServer = false
     private var port = 18080
@@ -144,6 +145,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
     @objc private func showWindow(_ sender: Any?) {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            guard let item = statusItem, let menu = statusMenu else { return }
+            item.menu = menu
+            sender.performClick(nil)
+            item.menu = nil
+        } else {
+            showWindow(sender)
+        }
     }
 
     @objc private func restartServer(_ sender: Any?) {
@@ -323,6 +335,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
             button.image = createStatusItemImage()
             button.imagePosition = .imageOnly
             button.toolTip = "HeiGate 本地网关"
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         let menu = NSMenu()
         menu.addItem(withTitle: "显示窗口", action: #selector(showWindow(_:)), keyEquivalent: "")
@@ -335,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         for menuItem in menu.items {
             menuItem.target = self
         }
-        item.menu = menu
+        statusMenu = menu
         statusItem = item
     }
 
@@ -391,7 +406,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         guard let server else { return }
         if server.isRunning {
             server.terminate()
-            server.waitUntilExit()
+            let deadline = Date().addingTimeInterval(2.0)
+            while server.isRunning && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+            if server.isRunning {
+                Darwin.kill(server.processIdentifier, SIGKILL)
+                server.waitUntilExit()
+            }
         }
         self.server = nil
     }
@@ -552,6 +574,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
 let application = NSApplication.shared
 let delegate = AppDelegate()
 application.delegate = delegate
-application.setActivationPolicy(.regular)
+application.setActivationPolicy(.accessory)
 application.activate(ignoringOtherApps: true)
 application.run()

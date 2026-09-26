@@ -17,7 +17,7 @@
 
 ## 这是什么
 
-你手上可能有好几个 AI API 渠道：官方的、中转的、自己搭的 Ollama。HeiGate 把它们收拢到一个本地地址后面，你的编程工具只需要连 `http://127.0.0.1:8080`，剩下的事情它来处理：
+你手上可能有好几个 AI API 渠道：官方的、中转的、自己搭的 Ollama。HeiGate 把它们收拢到一个本地地址后面，你的编程工具只需要连桌面版默认地址 `http://127.0.0.1:18080`，剩下的事情它来处理：
 
 - **多渠道路由** — 按延迟、质量评分或轮询挑选渠道
 - **自动故障转移** — 某个渠道报错、限流或超时，请求自动切到下一个；连续失败会触发熔断和冷却
@@ -26,13 +26,16 @@
 - **用量统计** — 每次请求的渠道、模型、token、首字延迟、失败链路都记在本地，可按天/模型/渠道汇总
 - **客户端集成** — 一键把 Claude 桌面端和 Codex 的配置指向 HeiGate
 
-数据保存在 `~/Library/Application Support/HeiGate` 下的一个 SQLite 文件里，不上传任何地方。网关只监听回环地址。
+数据保存在系统用户目录下的 SQLite 文件里（macOS：`~/Library/Application Support/HeiGate`，Windows：`%APPDATA%\HeiGate`），不上传任何地方。网关只监听回环地址。
 
 ## 安装
 
-从 [Releases](https://github.com/Heiheiaoo/heigate/releases) 下载 `.dmg`，拖进「应用程序」即可。当前发布包面向 Apple 芯片（arm64）。
+从 [Releases](https://github.com/Heiheiaoo/heigate/releases) 下载对应版本：
 
-安装包没有做代码签名和公证，首次打开时 macOS 会拦一下：到「系统设置 → 隐私与安全性」里点「仍要打开」。下载后建议用 `checksums.txt` 校验一下：
+- Apple 芯片 Mac（arm64）：下载 `.dmg`，拖进「应用程序」
+- Windows 10/11（x64）：下载 `Setup.exe` 安装；也可以下载便携版 `.zip`
+
+安装包暂未做代码签名。macOS 首次打开时需要到「系统设置 → 隐私与安全性」点「仍要打开」；Windows SmartScreen 可能需要点「更多信息 → 仍要运行」。下载后建议用 `checksums.txt` 校验：
 
 ```bash
 shasum -a 256 -c checksums.txt
@@ -47,28 +50,35 @@ shasum -a 256 -c checksums.txt
 **Claude Code**
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:18080"
 export ANTHROPIC_AUTH_TOKEN="<界面里的网关密钥>"
 ```
 
 **OpenAI 兼容客户端**（Cursor、各类 VS Code 插件等）
 
-- Base URL：`http://127.0.0.1:8080/v1`
+- Base URL：`http://127.0.0.1:18080/v1`
 - API Key：`<界面里的网关密钥>`
 
 网关提供这些端点：`POST /v1/messages`、`POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`。
 
 ## 从源码构建
 
-需要 Go 1.27+、Node 22+、pnpm 9+；构建 `.app` 还需要 Xcode Command Line Tools。
+需要 Go 1.27+、Node 22+、pnpm 9+。
 
 ```bash
-make app     # 构建 dist/HeiGate.app
+make app-macos-arm64  # macOS：还需要 Xcode Command Line Tools
 open dist/HeiGate.app
 
 make run     # 直接从源码跑，数据放在 ./desktop-data
 make test    # 后端 + 前端测试
 make help    # 看所有目标
+```
+
+Windows 10/11 需要 .NET 8 SDK；生成安装包还需要 NSIS：
+
+```powershell
+make windows          # 构建 dist/windows-x64
+make package-windows  # 生成便携 zip 和 Setup.exe
 ```
 
 开发时前后端分开跑更方便：
@@ -85,8 +95,8 @@ pnpm --dir frontend run dev       # 终端 2：Vite，5273，API 请求代理到
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `HEIGATE_HOST` | `127.0.0.1` | 监听地址。**改成非回环地址会关闭本地防护，不建议** |
-| `HEIGATE_PORT` | `8080` | 监听端口 |
-| `DATA_DIR` | `~/Library/Application Support/HeiGate` | 数据库和网关密钥的存放位置 |
+| `HEIGATE_PORT` | 源码运行 `8080`；桌面版优先 `18080` | 监听端口 |
+| `DATA_DIR` | 平台应用数据目录 | 数据库和网关密钥的存放位置 |
 
 ## 安全设计
 

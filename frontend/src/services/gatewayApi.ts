@@ -8,7 +8,6 @@ export type ApiChannel = {
   primaryModel: string
   extraModels: string[]
   enabled: boolean
-  intervalSeconds: number
   status: 'healthy' | 'degraded' | 'offline' | 'unknown'
   latency: number | null
   ttft: number | null
@@ -18,12 +17,18 @@ export type ApiChannel = {
   failureCount: number
   circuitState: 'closed' | 'open' | 'half_open'
   cooldownUntil: string | null
-  probeStreak: number
-  effectiveIntervalSeconds: number
   injectionState: 'unknown' | 'clean' | 'suspected' | 'detected' | 'error'
   injectionTokens: number | null
   injectionContent: string
   injectionCheckedAt: string | null
+  modelHealth: Array<{
+    model: string
+    status: string
+    latencyMs: number | null
+    ttftMs: number | null
+    error: string
+    checkedAt: string | null
+  }>
 }
 
 type ApiRecord = Record<string, unknown>
@@ -48,7 +53,6 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
     primaryModel: String(record.primary_model ?? ''),
     extraModels: Array.isArray(record.extra_models) ? record.extra_models.map(String) : [],
     enabled: Boolean(record.enabled),
-    intervalSeconds: Number(record.interval_seconds ?? 300),
     status,
     latency: record.last_latency_ms == null ? null : Number(record.last_latency_ms),
     ttft: record.last_ttft_ms == null ? null : Number(record.last_ttft_ms),
@@ -58,12 +62,18 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
     failureCount: Number(record.failure_count ?? 0),
     circuitState: record.circuit_state === 'open' || record.circuit_state === 'half_open' ? record.circuit_state : 'closed',
     cooldownUntil: record.cooldown_until ? String(record.cooldown_until) : null,
-    probeStreak: Number(record.probe_streak ?? 0),
-    effectiveIntervalSeconds: Number(record.effective_interval_seconds ?? record.interval_seconds ?? 300),
     injectionState: ['clean', 'suspected', 'detected', 'error'].includes(String(record.injection_state)) ? record.injection_state as ApiChannel['injectionState'] : 'unknown',
     injectionTokens: record.injection_tokens == null ? null : Number(record.injection_tokens),
     injectionContent: String(record.injection_content ?? ''),
     injectionCheckedAt: record.injection_checked_at ? String(record.injection_checked_at) : null,
+    modelHealth: Array.isArray(record.model_health) ? record.model_health.map((item: any) => ({
+      model: String(item.model ?? ''),
+      status: String(item.status ?? 'unknown'),
+      latencyMs: item.latency_ms == null ? null : Number(item.latency_ms),
+      ttftMs: item.ttft_ms == null ? null : Number(item.ttft_ms),
+      error: String(item.error ?? ''),
+      checkedAt: item.checked_at ? String(item.checked_at) : null,
+    })) : [],
   }
 }
 
@@ -181,13 +191,20 @@ export async function probeChannelDetails(
   id: number,
   modelName?: string,
   options?: { all?: boolean; modelCount?: number },
-): Promise<ProbeResult[] | null> {
+): Promise<ProbeResult[] | 'busy' | 'disabled' | null> {
   try {
     const all = !modelName && Boolean(options?.all)
     const query = modelName ? `?model=${encodeURIComponent(modelName)}` : all ? '?all=1' : ''
     const timeout = all ? probeTimeoutMs(options?.modelCount) : PROBE_TIMEOUT_MS
     const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, timeout)
-    if (!response.ok) return null
+    if (!response.ok) {
+      if (response.status === 409) {
+        const payload = await response.json().catch(() => ({})) as { code?: string }
+        if (payload.code === 'probe_busy') return 'busy'
+        if (payload.code === 'channel_disabled') return 'disabled'
+      }
+      return null
+    }
     const payload = (await response.json()) as { data?: any[] }
     if (!Array.isArray(payload.data)) return []
     return payload.data.map((item) => ({
@@ -556,7 +573,6 @@ function toPayload(channel: Partial<ApiChannel> & { apiKey?: string }) {
     primary_model: channel.primaryModel || '',
     extra_models: channel.extraModels ?? [],
     enabled: channel.enabled ?? true,
-    interval_seconds: channel.intervalSeconds ?? 300,
   }
 }
 

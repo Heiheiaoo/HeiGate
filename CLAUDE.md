@@ -98,7 +98,7 @@ desktop/macos       Swift 原生外壳
 更新根目录 `VERSION`，然后打 tag：
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v1.0.0 && git push origin v1.0.0
 ```
 
 `.github/workflows/release.yml` 会在 macOS runner 上构建 `.app`、打包 `.dmg` / `.zip`、生成 checksums 并创建 Release。产物未签名未公证。

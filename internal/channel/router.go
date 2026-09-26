@@ -143,6 +143,10 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 			channel.CircuitState = CircuitClosed
 			channel.CooldownUntil = nil
 			channel.LastLatencyMs = &latency
+			// The forwarder returns after the first upstream bytes are available.
+			// Until a separate TTFT value is supplied, keep routing metrics
+			// internally consistent instead of retaining an older TTFT.
+			channel.LastTTFTMs = &latency
 			channel.LastCheckedAt = timePtr(time.Now().UTC())
 			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
 				copyRuntimeState(fresh, channel)
@@ -168,6 +172,7 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 				channel.CircuitState = CircuitClosed
 			}
 			channel.LastLatencyMs = &latency
+			channel.LastTTFTMs = nil
 			channel.LastCheckedAt = timePtr(time.Now().UTC())
 			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
 				copyRuntimeState(fresh, channel)

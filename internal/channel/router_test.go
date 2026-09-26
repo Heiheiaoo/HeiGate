@@ -95,12 +95,18 @@ func TestChannelRouterCooldownAndRecovery(t *testing.T) {
 }
 
 func TestFailureClassification(t *testing.T) {
+	if info := FailureFromError(context.Canceled); info.Class != FailureClient {
+		t.Fatalf("context cancellation must be client-owned, got %#v", info)
+	}
 	info := ClassifyStatus(429)
 	if info.Class != FailureRateLimit {
 		t.Fatalf("expected rate limit classification, got %#v", info)
 	}
-	if FailureCooldown(info, 1) != 30*time.Second {
-		t.Fatalf("unexpected default rate limit cooldown")
+	if FailureCooldown(info, 1) != 0 {
+		t.Fatalf("rate limit should not impose a local cooldown")
+	}
+	if FailureIsRetryable(info) {
+		t.Fatal("rate limits must not be retried immediately on the same channel")
 	}
 	serverInfo := ClassifyStatus(503)
 	if !FailureIsCircuitEligible(serverInfo) {

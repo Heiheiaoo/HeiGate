@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -271,10 +272,9 @@ func TestRunAnthropicThinkingFallback(t *testing.T) {
 	require.NotNil(t, results[0].TTFTMs)
 }
 
-// Answer correctness is a soft signal: generation is capped and the probe stops
-// at the first content delta, so a truncated or chatty answer is normal. A
-// channel that streams content is usable, and the mismatch is only a note.
-func TestRunWrongAnswerStaysOperationalWithNote(t *testing.T) {
+// The probe only needs generated content; it must not reject a valid stream
+// because the first delta contains only a partial answer.
+func TestRunGeneratedContentStaysOperational(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			return
@@ -285,7 +285,7 @@ func TestRunWrongAnswerStaysOperationalWithNote(t *testing.T) {
 	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
 	require.NoError(t, err)
 	require.Equal(t, StatusOperational, results[0].Status)
-	require.Contains(t, results[0].Message, "answer not verified")
+	require.Empty(t, results[0].Message)
 }
 
 // A 2xx that streams nothing at all is the failure worth catching.
@@ -303,9 +303,8 @@ func TestRunEmptyStreamIsFailed(t *testing.T) {
 	require.Contains(t, results[0].Message, "no content")
 }
 
-// The probe must stop reading at the first content delta: the rest of the
-// stream costs upstream tokens and, on a slow model, tens of seconds.
-func TestRunStopsAtFirstContentDelta(t *testing.T) {
+// The probe reads the short capped stream so later stream errors are visible.
+func TestRunReadsCompletedContentStream(t *testing.T) {
 	var wroteAll bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
@@ -317,7 +316,7 @@ func TestRunStopsAtFirstContentDelta(t *testing.T) {
 		if flusher != nil {
 			flusher.Flush()
 		}
-		// The probe should be gone before these land.
+		// The capped probe should consume the complete short stream.
 		time.Sleep(300 * time.Millisecond)
 		for i := 0; i < 50; i++ {
 			if _, err := io.WriteString(w, "data: "+chatDelta("more")+"\n\n"); err != nil {
@@ -336,8 +335,34 @@ func TestRunStopsAtFirstContentDelta(t *testing.T) {
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 	require.Equal(t, StatusOperational, results[0].Status, results[0].Message)
-	require.Less(t, elapsed, 250*time.Millisecond, "probe should return at the first content delta, not read the whole stream")
-	require.False(t, wroteAll, "handler should not have finished writing the tail")
+	require.GreaterOrEqual(t, elapsed, 300*time.Millisecond, "probe should wait for the completed capped stream")
+	require.True(t, wroteAll, "handler should finish writing the capped stream")
+}
+
+func TestRunReadsPastReasoningDelta(t *testing.T) {
+	var wroteText atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			return
+		}
+		flusher, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"reasoning":"thinking"}}]}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(300 * time.Millisecond)
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"content":"later"}}]}`+"\n\n")
+		wroteText.Store(true)
+	}))
+	defer server.Close()
+
+	start := time.Now()
+	results, err := Run(context.Background(), Config{Provider: ProviderOpenAI, Endpoint: server.URL, PrimaryModel: "m"})
+	require.NoError(t, err)
+	require.Equal(t, StatusOperational, results[0].Status)
+	require.GreaterOrEqual(t, time.Since(start), 300*time.Millisecond)
+	require.True(t, wroteText.Load())
 }
 
 func TestRunHTTPErrorIsErrorAndRedacted(t *testing.T) {

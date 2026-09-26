@@ -47,9 +47,6 @@ export type Channel = {
   lastCheck: string
   accent: string
   enabled: boolean
-  probeInterval: number
-  probeStreak?: number
-  effectiveIntervalSeconds?: number
   apiKey?: string
   primaryModel?: string
   modelNames?: string[]
@@ -63,6 +60,14 @@ export type Channel = {
   injectionTokens?: number | null
   injectionContent?: string
   injectionCheckedAt?: string | null
+  modelHealth?: Array<{
+    model: string
+    status: string
+    latencyMs: number | null
+    ttftMs: number | null
+    error: string
+    checkedAt: string | null
+  }>
 }
 
 export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
@@ -121,6 +126,7 @@ const modelLatencies = ref<Record<string, {
   status?: string
   error?: string | null
   message?: string
+  checkedAt?: string | null
 }>>({})
 const isProbingAllModels = ref(false)
 
@@ -218,25 +224,12 @@ function setChannelViewMode(mode: 'grid' | 'list') {
   }
 }
 
-// Interval Preset Options (0s = Manual Only, saves tokens)
-const intervalPresets = [
-  { label: '主模型探活 · 仅手动 (不耗Token)', value: 0 },
-  { label: '主模型探活 · 5分钟', value: 300 },
-  { label: '主模型探活 · 15分钟', value: 900 },
-  { label: '主模型探活 · 30分钟', value: 1800 },
-  { label: '主模型探活 · 自定义间隔', value: -1 },
-]
-
-
-
 // Add Channel Form State
 const newChannelName = ref('')
 const newChannelUrl = ref('')
 const newChannelKey = ref('')
 const newChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const newChannelEnabled = ref(true)
-const newChannelProbePreset = ref<number>(0)
-const newChannelProbeCustom = ref<number>(60)
 const newChannelPrimaryModel = ref('gpt-4o-mini')
 const newChannelModelNames = ref<string[]>(['gpt-4o-mini'])
 const isFetchingNewModels = ref(false)
@@ -248,8 +241,6 @@ const editChannelUrl = ref('')
 const editChannelKey = ref('')
 const editChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const editChannelEnabled = ref(true)
-const editChannelProbePreset = ref<number>(0)
-const editChannelProbeCustom = ref<number>(60)
 const editChannelPrimaryModel = ref('')
 const editChannelModelNames = ref<string[]>([])
 const isFetchingEditModels = ref(false)
@@ -568,10 +559,13 @@ const models = computed(() => {
 
       const modelKey = getModelKey(channel, rawModelName)
       const specificEntry = modelLatencies.value[modelKey]
-      const effectiveLat = specificEntry?.latency != null ? specificEntry.latency : channel.latency
+      const isPrimary = isPrimaryModel(channel, rawModelName)
+      const effectiveLat = specificEntry?.latency != null
+        ? (specificEntry.ttft ?? specificEntry.latency)
+        : (isPrimary ? (channel.ttft ?? channel.latency) : null)
       const effectiveStatus = specificEntry?.status
         ? (specificEntry.status === 'operational' ? 'healthy' : specificEntry.status === 'degraded' ? 'degraded' : 'offline')
-        : channel.status
+        : (isPrimary ? channel.status : 'offline')
 
       if (!current.providers.includes(channel.name)) {
         current.providers.push(channel.name)
@@ -615,6 +609,35 @@ const models = computed(() => {
       latency: formatLatencySec(avgLat),
     })
   })
+
+  const autoChannels = enabledChannels.value
+  if (autoChannels.length > 0) {
+    const details = autoChannels.map((channel) => ({
+      name: channel.name,
+      status: channel.status,
+      latency: channel.ttft ?? channel.latency,
+      protocol: channel.protocol,
+      upstreamModel: channel.primaryModel || channel.modelNames?.[0] || '',
+    }))
+    const latencies = details.map((item) => item.latency).filter((value): value is number => value != null && value > 0)
+    const status = details.some((item) => item.status === 'healthy')
+      ? 'healthy'
+      : details.some((item) => item.status === 'degraded') ? 'degraded' : 'offline'
+    const avgLatency = latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : null
+    list.unshift({
+      name: 'Auto',
+      canonicalKey: 'auto',
+      rawNames: ['Auto'],
+      aliases: [],
+      providerCount: details.length,
+      status,
+      latencies,
+      providers: details.map((item) => item.name),
+      channelDetails: details,
+      avgLatency,
+      latency: formatLatencySec(avgLatency),
+    })
+  }
 
   return list.sort((a, b) => {
     const statusWeight = (s: 'healthy' | 'degraded' | 'offline') => (s === 'healthy' ? 0 : s === 'degraded' ? 1 : 2)
@@ -940,9 +963,6 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     lastCheck: item.lastCheck,
     accent: item.provider === 'anthropic' ? '#f59e0b' : item.provider === 'openai-responses' ? '#3b82f6' : '#10b981',
     enabled: item.enabled,
-    probeInterval: item.intervalSeconds,
-    probeStreak: item.probeStreak ?? 0,
-    effectiveIntervalSeconds: item.effectiveIntervalSeconds ?? item.intervalSeconds,
     apiKey: item.apiKey,
     primaryModel: item.primaryModel,
     modelNames,
@@ -956,6 +976,7 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     injectionTokens: item.injectionTokens ?? null,
     injectionContent: item.injectionContent ?? '',
     injectionCheckedAt: item.injectionCheckedAt ?? null,
+    modelHealth: item.modelHealth ?? [],
   }
 }
 
@@ -972,7 +993,6 @@ function toDesktopChannel(channel: Channel): ApiChannel {
     primaryModel: primary,
     extraModels: extras,
     enabled: channel.enabled,
-    intervalSeconds: channel.probeInterval,
     status: channel.status,
     latency: channel.latency,
     ttft: channel.ttft ?? null,
@@ -982,12 +1002,11 @@ function toDesktopChannel(channel: Channel): ApiChannel {
     failureCount: channel.failureCount ?? 0,
     circuitState: channel.circuitState ?? 'closed',
     cooldownUntil: channel.cooldownUntil ?? null,
-    probeStreak: channel.probeStreak ?? 0,
-    effectiveIntervalSeconds: channel.effectiveIntervalSeconds ?? channel.probeInterval,
     injectionState: channel.injectionState ?? 'unknown',
     injectionTokens: channel.injectionTokens ?? null,
     injectionContent: channel.injectionContent ?? '',
     injectionCheckedAt: channel.injectionCheckedAt ?? null,
+    modelHealth: channel.modelHealth ?? [],
   }
 }
 
@@ -996,6 +1015,22 @@ async function refreshChannels() {
   if (remote === null) return false
   gatewayApiActive.value = true
   channels.value = remote.map(fromDesktopChannel)
+  for (const channel of channels.value) {
+    for (const health of channel.modelHealth ?? []) {
+      const key = getModelKey(channel, health.model)
+      if (!modelLatencies.value[key]?.probing) {
+        modelLatencies.value[key] = {
+          latency: health.latencyMs,
+          ttft: health.ttftMs,
+          probing: false,
+          status: health.status,
+          error: health.error || null,
+          message: health.error || (health.status === 'degraded' ? '响应稍慢' : ''),
+          checkedAt: health.checkedAt,
+        }
+      }
+    }
+  }
   return true
 }
 
@@ -1015,6 +1050,16 @@ async function probeChannel(channel: Channel) {
   channel.probing = true
   if (gatewayApiActive.value && channel.gatewayId) {
     const details = await probeChannelDetails(channel.gatewayId)
+    if (details === 'busy') {
+      channel.probing = false
+      showToast(`渠道“${channel.name}”已有探活正在进行，请稍候刷新查看`)
+      return
+    }
+    if (details === 'disabled') {
+      channel.probing = false
+      showToast(`渠道“${channel.name}”已停用，无法探活`)
+      return
+    }
     if (details === null) {
       channel.probing = false
       showToast(`渠道“${channel.name}”探活请求失败，请检查网关状态`)
@@ -1039,6 +1084,7 @@ async function probeChannel(channel: Channel) {
           status: res.status,
           error: errMsg,
           message: hasErr ? errMsg! : (res.status === 'degraded' ? '响应稍慢' : ''),
+          checkedAt: new Date().toISOString(),
         }
       }
       const primaryRes = details.find((d) => isPrimaryModel(channel, d.model)) || details[0]
@@ -1164,22 +1210,23 @@ function getModelInjectionClass(channel: Channel, modelName: string): string {
 function getModelInjectionLabel(channel: Channel, modelName: string): string {
   if (isModelCheckingInjection(channel, modelName)) return '检测中...'
   const inj = getModelInjection(channel, modelName)
-  if (!inj) return '待测注入'
+  if (!inj) return '未检测'
   switch (inj.state) {
-    case 'clean': return '无注入'
-    case 'suspected': return `疑似 ${inj.prompt_tokens}tok`
-    case 'detected': return `注入 ${inj.prompt_tokens}tok`
+    case 'clean': return '输入正常'
+    case 'suspected': return `输入偏高 · ${inj.prompt_tokens} tok`
+    case 'detected': return `显著偏高 · ${inj.prompt_tokens} tok`
     case 'error': return '检测异常'
-    default: return '待测注入'
+    default: return '未检测'
   }
 }
 
 function getModelInjectionTooltip(channel: Channel, modelName: string): string {
   const inj = getModelInjection(channel, modelName)
-  if (!inj) return '尚未检测。点击单独检测此模型的 Prompt 注入'
-  if (inj.state === 'clean') return `输入 token 数 ${inj.prompt_tokens}，在正常模板范围内。点击查看详情`
-  if (inj.state === 'suspected') return `输入 token 数 ${inj.prompt_tokens}，疑似轻微注入。点击查看详情`
-  if (inj.state === 'detected') return `输入 token 数 ${inj.prompt_tokens}，明确发现服务器注入！点击查看提取内容`
+  if (!inj) return '尚未检测。检测会向供应商发送真实请求'
+  const checkedAt = inj.checked_at ? ` 检测时间：${formatModelCheckedAt(inj.checked_at)}。` : ''
+  if (inj.state === 'clean') return `最小探针请求的输入统计为 ${inj.prompt_tokens} tokens，处于正常模板参考范围。${checkedAt}点击查看详情`
+  if (inj.state === 'suspected') return `最小探针请求的输入统计为 ${inj.prompt_tokens} tokens，超过正常模板参考范围；这不能单独证明存在注入。${checkedAt}点击查看详情`
+  if (inj.state === 'detected') return `最小探针请求的输入统计为 ${inj.prompt_tokens} tokens，超过检测阈值；内容提取结果仅作辅助证据。${checkedAt}点击查看详情`
   if (inj.state === 'error') return `检测失败：${inj.message || '上游接口异常'}。点击查看详情`
   return '点击检测此模型的 Prompt 注入'
 }
@@ -1204,11 +1251,11 @@ async function checkSingleModelInjection(channel: Channel, modelName: string) {
       channel.injectionCheckedAt = r.checked_at
     }
     if (r.state === 'detected') {
-      showToast(`⚠️ 警告：模型 [${modelName}] 发现服务器端 Prompt 注入 (${r.prompt_tokens} tokens)`)
+      showToast(`模型 [${modelName}] 输入统计显著偏高 (${r.prompt_tokens} tokens)，请查看检测详情`)
     } else if (r.state === 'suspected') {
-      showToast(`模型 [${modelName}] 疑似轻度注入 (${r.prompt_tokens} tokens)`)
+      showToast(`模型 [${modelName}] 输入统计偏高 (${r.prompt_tokens} tokens)，这不能单独证明注入`)
     } else if (r.state === 'clean') {
-      showToast(`模型 [${modelName}] 检测完成：无系统提示词注入 (${r.prompt_tokens} tokens)`)
+      showToast(`模型 [${modelName}] 输入统计在正常参考范围 (${r.prompt_tokens} tokens)`)
     } else {
       showToast(`模型 [${modelName}] 注入检测失败：${r.message || '上游返回异常'}`)
     }
@@ -1219,38 +1266,67 @@ async function checkSingleModelInjection(channel: Channel, modelName: string) {
   }
 }
 
-async function checkAllChannelModelsInjection(channel: Channel) {
-  if (!channel || !channel.gatewayId || isCheckingAllInjections.value) return
+function requestBatchModelAction(channel: Channel, action: 'probe' | 'injection') {
+  const allModels = channel.modelNames ?? []
+  const selected = selectedModelNames.value.filter((model) => allModels.includes(model))
+  const models = selected.length > 0 ? selected : allModels
+  if (models.length === 0) return
+
+  const isProbe = action === 'probe'
+  confirmModal.value = {
+    title: isProbe ? '批量探活确认' : '批量注入检测确认',
+    message: `将对渠道“${channel.name}”的 ${models.length} 个模型发送真实${isProbe ? '探活' : '检测'}请求。`,
+    description: isProbe
+      ? '请求会逐个执行，每个模型 1 次。可能消耗供应商额度；供应商自身的频率限制仍可能生效。'
+      : '请求会逐个执行，每个模型至少 1 次；输入统计偏高时还会追加内容提取请求。可能消耗供应商额度，供应商自身的频率限制仍可能生效。',
+    confirmText: `继续 (${models.length} 个模型)`,
+    onConfirm: async () => {
+      if (isProbe) await probeAllChannelModels(channel, models)
+      else await checkModelsInjection(channel, models)
+    },
+  }
+}
+
+async function checkModelsInjection(channel: Channel, models: string[]): Promise<ModelInjectionResult[]> {
+  if (!channel.gatewayId || isCheckingAllInjections.value || models.length === 0) return []
   isCheckingAllInjections.value = true
+  const results: ModelInjectionResult[] = []
   try {
-    const results = await injectionCheck(channel.gatewayId, { all: true })
-    if (!results) {
-      showToast('全模型注入检测失败，请检查网络')
-      return
+    let failed = 0
+    for (const model of models) {
+      const key = getModelKey(channel, model)
+      modelCheckingInjection.value[key] = true
+      try {
+        const modelResults = await injectionCheck(channel.gatewayId, { model })
+        if (!modelResults?.length) {
+          failed++
+          continue
+        }
+        for (const result of modelResults) {
+          modelInjections.value[getModelKey(channel, result.model)] = result
+          results.push(result)
+          if (isPrimaryModel(channel, result.model)) {
+            channel.injectionState = result.state
+            channel.injectionTokens = result.prompt_tokens
+            channel.injectionContent = result.content || result.message || ''
+            channel.injectionCheckedAt = result.checked_at
+          }
+        }
+      } finally {
+        modelCheckingInjection.value[key] = false
+      }
     }
-    for (const r of results) {
-      const k = getModelKey(channel, r.model)
-      modelInjections.value[k] = r
-    }
-    const primary = results.find((r) => isPrimaryModel(channel, r.model)) ?? results[0]
-    if (primary) {
-      channel.injectionState = primary.state
-      channel.injectionTokens = primary.prompt_tokens
-      channel.injectionContent = primary.content || primary.message || ''
-      channel.injectionCheckedAt = primary.checked_at
-    }
-    const injected = results.filter((r) => r.state === 'detected').length
-    const suspected = results.filter((r) => r.state === 'suspected').length
-    if (injected > 0) showToast(`检测到 ${injected} 个模型存在注入${suspected ? `，${suspected} 个疑似` : ''}`)
-    else if (suspected > 0) showToast(`${suspected} 个模型疑似轻度注入`)
-    else if (results.every((r) => r.state === 'clean')) showToast(`全部 ${results.length} 个模型均无注入`)
-    else showToast('注入检测完成')
+    const injected = results.filter((result) => result.state === 'detected').length
+    const elevated = results.filter((result) => result.state === 'suspected').length
+    const errorCount = failed + results.filter((result) => result.state === 'error').length
+    showToast(`检测完成 ${results.length}/${models.length}：显著偏高 ${injected}，输入偏高 ${elevated}${errorCount ? `，失败 ${errorCount}` : ''}`)
   } catch (err: any) {
-    showToast(`注入检测异常: ${err?.message || '未知错误'}`)
+    showToast(`注入检测异常：${err?.message || '未知错误'}`)
   } finally {
     isCheckingAllInjections.value = false
     await refreshChannels()
   }
+  return results
 }
 
 function openModelInjectionDetail(channel: Channel, modelName: string) {
@@ -1276,20 +1352,19 @@ function openModelInjectionDetail(channel: Channel, modelName: string) {
 
 function modelInjectionLabel(r: ModelInjectionResult): string {
   switch (r.state) {
-    case 'clean': return '无注入'
-    case 'suspected': return `疑似 ${r.prompt_tokens}tok`
-    case 'detected': return `注入 ${r.prompt_tokens}tok`
+    case 'clean': return '输入正常'
+    case 'suspected': return `输入偏高 · ${r.prompt_tokens} tok`
+    case 'detected': return `显著偏高 · ${r.prompt_tokens} tok`
     case 'error': return '失败'
     default: return '未知'
   }
 }
 
-// 列宽有限，标签只带数字；单位与详情在 title 里说清楚。
 function injectionStateLabel(c: Channel): string {
   switch (c.injectionState) {
-    case 'clean': return '无注入'
-    case 'suspected': return `疑似 ${c.injectionTokens ?? '?'}`
-    case 'detected': return `注入 ${c.injectionTokens ?? '?'}`
+    case 'clean': return '输入正常'
+    case 'suspected': return `输入偏高 · ${c.injectionTokens ?? '?'} tok`
+    case 'detected': return `显著偏高 · ${c.injectionTokens ?? '?'} tok`
     case 'error': return '检测失败'
     default: return '未检测'
   }
@@ -1324,8 +1399,26 @@ function openInjectionModal(channel: Channel) {
 async function runInjectionCheck(all: boolean) {
   const channel = injectionChannel.value
   if (!channel || !channel.gatewayId || isCheckingInjection.value) return
+  if (all) {
+    const models = channel.modelNames ?? []
+    confirmModal.value = {
+      title: '全模型检测确认',
+      message: `将对渠道“${channel.name}”的 ${models.length} 个模型逐个发送真实检测请求。`,
+      description: '每个模型至少 1 次请求；输入统计偏高时还会追加内容提取请求。操作按顺序执行，可能消耗供应商额度，供应商自身的频率限制仍可能生效。',
+      confirmText: `检测 ${models.length} 个模型`,
+      onConfirm: async () => {
+        isCheckingInjection.value = true
+        try {
+          injectionResults.value = await checkModelsInjection(channel, models)
+        } finally {
+          isCheckingInjection.value = false
+        }
+      },
+    }
+    return
+  }
   isCheckingInjection.value = true
-  const results = await injectionCheck(channel.gatewayId, all)
+  const results = await injectionCheck(channel.gatewayId, false)
   isCheckingInjection.value = false
   if (!results) {
     showToast('注入检测请求失败，请检查网关状态')
@@ -1347,9 +1440,9 @@ async function runInjectionCheck(all: boolean) {
 
   const injected = results.filter((r) => r.state === 'detected').length
   const suspected = results.filter((r) => r.state === 'suspected').length
-  if (injected > 0) showToast(`检测到 ${injected} 个模型有注入${suspected ? `，${suspected} 个疑似` : ''}`)
-  else if (suspected > 0) showToast(`${suspected} 个模型疑似轻度注入`)
-  else if (results.every((r) => r.state === 'clean')) showToast(`全部 ${results.length} 个模型均无注入`)
+  if (injected > 0) showToast(`${injected} 个模型输入统计显著偏高${suspected ? `，${suspected} 个模型输入偏高` : ''}，请查看详情`)
+  else if (suspected > 0) showToast(`${suspected} 个模型输入统计偏高；这不能单独证明注入`)
+  else if (results.every((r) => r.state === 'clean')) showToast(`${results.length} 个模型的输入统计均处于正常模板参考范围`)
   else showToast('注入检测完成，部分模型未能检测')
 }
 
@@ -1370,13 +1463,6 @@ async function openEditChannel(channel: Channel) {
   editChannelProtocol.value = channel.protocol
   editChannelEnabled.value = channel.enabled
   showEditKey.value = false
-  const interval = channel.probeInterval ?? 0
-  if (interval === 0 || interval === 300 || interval === 900 || interval === 1800) {
-    editChannelProbePreset.value = interval
-  } else {
-    editChannelProbePreset.value = -1
-    editChannelProbeCustom.value = interval
-  }
   const primary = channel.primaryModel || channel.modelNames?.[0] || 'gpt-4o-mini'
   editChannelPrimaryModel.value = primary
   editChannelModelNames.value = channel.modelNames?.length ? [...channel.modelNames] : [primary]
@@ -1391,13 +1477,8 @@ async function saveEditChannel() {
   const modelNames = editChannelModelNames.value.includes(primaryModel)
     ? [primaryModel, ...editChannelModelNames.value.filter(m => m !== primaryModel)]
     : [primaryModel, ...editChannelModelNames.value]
-  const interval = editChannelProbePreset.value === -1 ? Number(editChannelProbeCustom.value) : editChannelProbePreset.value
   if (!name || !rawUrl || !primaryModel) {
-    showToast('请完整填写渠道名称、Base URL 与探活主模型')
-    return
-  }
-  if (editChannelProbePreset.value === -1 && (interval < 15 || isNaN(interval))) {
-    showToast('自定义探活间隔必须大于等于 15 秒')
+    showToast('请完整填写渠道名称、Base URL 与主模型')
     return
   }
   const finalUrl = normalizeEndpointUrl(rawUrl)
@@ -1407,7 +1488,6 @@ async function saveEditChannel() {
   target.url = finalUrl
   target.protocol = editChannelProtocol.value
   target.enabled = editChannelEnabled.value
-  target.probeInterval = interval
   target.primaryModel = primaryModel
   target.modelNames = modelNames
   target.models = target.modelNames.length
@@ -1441,9 +1521,6 @@ async function saveEditChannel() {
   showEditChannel.value = false
   editingChannel.value = null
   showToast(`渠道“${name}”配置已保存`)
-  if (primaryChanged && target.enabled) {
-    void probeChannel(target)
-  }
 }
 
 async function handleConfirmModalAction() {
@@ -1586,8 +1663,10 @@ function openModelLatencyModal(channel: Channel) {
       const isFailed = channel.status === 'offline' && Boolean(channel.lastError)
       modelLatencies.value[key] = {
         latency: channel.latency,
+        ttft: channel.ttft ?? null,
         status: channel.status || 'healthy',
         error: isFailed ? channel.lastError : null,
+        checkedAt: channel.lastCheck !== '尚未探活' ? channel.lastCheck : null,
       }
     }
   }
@@ -1610,7 +1689,7 @@ function isModelFailed(channel: Channel, modelName: string): boolean {
   const entry = modelLatencies.value[key]
   if (entry) {
     if (entry.probing) return false
-    return Boolean(entry.error || entry.status === 'error' || entry.status === 'failed' || entry.status === 'timeout')
+    return entry.status === 'error' || entry.status === 'failed' || entry.status === 'timeout'
   }
   if (channel.lastError && (channel.lastError.includes(`[${modelName}]`) || channel.lastError.includes(modelName))) {
     return true
@@ -1629,17 +1708,20 @@ function getModelErrorMessage(channel: Channel, modelName: string): string {
   return channel.lastError || '模型调用异常'
 }
 
+function formatModelCheckedAt(value?: string | null): string {
+  if (!value) return ''
+  const checked = new Date(value)
+  if (Number.isNaN(checked.getTime())) return ''
+  const ageMs = Math.max(0, Date.now() - checked.getTime())
+  if (ageMs < 60_000) return '刚刚'
+  if (ageMs < 60 * 60_000) return `${Math.floor(ageMs / 60_000)} 分钟前`
+  if (ageMs < 24 * 60 * 60_000) return `${Math.floor(ageMs / (60 * 60_000))} 小时前`
+  return formatLogDateTime(value).slice(5, 16)
+}
+
 function getModelLatencyDisplay(channel: Channel, modelName: string): string {
-  if (isModelProbing(channel, modelName)) return '探活中...'
-  if (isModelFailed(channel, modelName)) {
-    const err = getModelErrorMessage(channel, modelName)
-    const codeMatch = err.match(/HTTP(?:\/[0-9.]+)?\s*([1-5]\d{2})\b/i) || err.match(/\b([45]\d{2})\b/)
-    if (codeMatch) return `HTTP ${codeMatch[1]}`
-    if (err.includes('timeout') || err.includes('超时') || err.includes('slow response')) return '超时'
-    if (err.includes('mismatch')) return '校验失败'
-    if (err.includes('refused') || err.includes('reset')) return '网络中断'
-    return '异常'
-  }
+  if (isModelProbing(channel, modelName)) return '—'
+  if (isModelFailed(channel, modelName)) return '—'
   const key = getModelKey(channel, modelName)
   const entry = modelLatencies.value[key]
   if (entry?.ttft != null) return formatLatencySec(entry.ttft)
@@ -1648,9 +1730,9 @@ function getModelLatencyDisplay(channel: Channel, modelName: string): string {
   // every model would invent a number for models that were never measured —
   // which is why a whole list used to display one identical value.
   if (isPrimaryModel(channel, modelName) && channel.latency != null && channel.status !== 'offline') {
-    return formatLatencySec(channel.latency)
+    return formatLatencySec(channel.ttft ?? channel.latency)
   }
-  return '待探活'
+  return '—'
 }
 
 function getModelLatencyClass(channel: Channel, modelName: string): string {
@@ -1676,10 +1758,11 @@ function getModelTooltip(channel: Channel, modelName: string): string {
   if (isModelFailed(channel, modelName)) {
     return `探活异常：${getModelErrorMessage(channel, modelName)} (点击查看详情与诊断)`
   }
+  const checkedAt = entry?.checkedAt ? ` 最近检测：${formatModelCheckedAt(entry.checkedAt)}。` : ''
   if (entry?.ttft != null || entry?.latency != null) {
-    return `模型工作正常，首字响应耗时 ${formatLatencySec(entry.ttft ?? entry.latency)}`
+    return `模型调用成功，首字响应耗时 ${formatLatencySec(entry.ttft ?? entry.latency)}。${checkedAt}点击查看详情`
   }
-  return '该模型响应就绪，点击可在弹窗中进行单个真实探活'
+  return '尚无该模型的探活记录，点击可查看状态或单独发送真实探活请求'
 }
 
 function isModelProbing(channel: Channel, modelName: string): boolean {
@@ -1759,6 +1842,16 @@ async function probeSingleModel(
   try {
     if (gatewayApiActive.value && channel.gatewayId) {
       const probeRes = await probeChannelDetails(channel.gatewayId, modelName)
+      if (probeRes === 'busy') {
+        modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: false, message: '渠道已有探活任务正在执行' }
+        if (!options?.silentBusy) showToast(`渠道“${channel.name}”已有探活任务，请稍后重试`)
+        return 'busy'
+      }
+      if (probeRes === 'disabled') {
+        const errMsg = '渠道已停用，无法执行探活'
+        modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: false, status: 'error', error: errMsg, message: errMsg }
+        return 'failed'
+      }
       if (probeRes === null) {
         const errMsg = '探活请求失败，请检查网关状态'
         modelLatencies.value[key] = {
@@ -1823,6 +1916,7 @@ async function probeSingleModel(
       status: 'error',
       error: errMsg,
       message: errMsg,
+      checkedAt: new Date().toISOString(),
     }
     if (isPrimary) {
       channel.latency = null
@@ -1840,6 +1934,7 @@ async function probeSingleModel(
       status: 'timeout',
       error: errMsg,
       message: errMsg,
+      checkedAt: new Date().toISOString(),
     }
     if (isPrimary) {
       channel.latency = null
@@ -1851,11 +1946,12 @@ async function probeSingleModel(
   }
 }
 
-async function probeAllChannelModels(channel: Channel) {
+async function probeAllChannelModels(channel: Channel, requestedModels = channel.modelNames ?? []) {
   if (isProbingAllModels.value) return
   isProbingAllModels.value = true
-  const models = channel.modelNames ?? []
+  const models = requestedModels
   let completed = 0
+  let failed = 0
   let interrupted = false
 
   try {
@@ -1866,11 +1962,12 @@ async function probeAllChannelModels(channel: Channel) {
         break
       }
       if (outcome === 'completed') completed++
+      if (outcome === 'failed') failed++
     }
     if (interrupted) {
       showToast(`渠道已有探活任务，本次完成 ${completed}/${models.length} 个模型`)
     } else {
-      showToast(`已完成渠道“${channel.name}”全量 ${completed} 个模型的队列探活`)
+      showToast(`探活完成 ${completed}/${models.length}${failed ? `，失败 ${failed}` : ''}`)
     }
   } catch (err: any) {
     showToast(`模型队列探活中断: ${err?.message || '未知异常'}`)
@@ -1886,54 +1983,6 @@ function toChannelStatus(s?: string): 'healthy' | 'degraded' | 'offline' | 'unkn
   if (s === 'degraded') return 'degraded'
   if (s === 'offline' || s === 'error' || s === 'failed' || s === 'timeout') return 'offline'
   return 'unknown'
-}
-
-async function removeModelFromChannel(channel?: Channel | null, modelName?: string) {
-  if (!channel || !modelName) return
-  if (!channel.modelNames || channel.modelNames.length <= 1) {
-    showToast('渠道至少需要保留一个模型，无法继续删除')
-    return
-  }
-
-  const isPrimary = isPrimaryModel(channel, modelName)
-  confirmModal.value = {
-    title: '删除模型确认',
-    message: `确定要从渠道 “${channel.name}” 中移除模型 “${modelName}” 吗？`,
-    description: isPrimary
-      ? '注意：该模型是当前渠道的探活主模型，删除后将自动将下一顺位模型提升为主模型。'
-      : '删除后，网关将不再通过该渠道分发该模型的请求。',
-    danger: true,
-    confirmText: '确认删除',
-    onConfirm: async () => {
-      const remaining = (channel.modelNames || []).filter((m) => m !== modelName)
-      channel.modelNames = remaining
-      channel.models = remaining.length
-      if (isPrimary || channel.primaryModel === modelName) {
-        channel.primaryModel = remaining[0]
-        const newKey = getModelKey(channel, remaining[0])
-        const cached = modelLatencies.value[newKey]
-        if (cached) {
-          channel.latency = cached.latency ?? null
-          channel.ttft = cached.ttft ?? null
-          if (cached.status) channel.status = toChannelStatus(cached.status)
-          if (cached.error) channel.lastError = cached.error
-        }
-      }
-      const key = getModelKey(channel, modelName)
-      delete modelLatencies.value[key]
-      selectedModelNames.value = selectedModelNames.value.filter((m) => m !== modelName)
-
-      await persistChannel(channel)
-      await refreshChannels()
-
-      const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
-      if (fresh) {
-        activeModelLatencyChannel.value = fresh
-      }
-
-      showToast(`已从渠道“${channel.name}”删除模型“${modelName}”`)
-    },
-  }
 }
 
 async function batchDeleteSelectedModels(channel?: Channel | null) {
@@ -1953,7 +2002,7 @@ async function batchDeleteSelectedModels(channel?: Channel | null) {
     title: '批量删除模型确认',
     message: `确定要从渠道 “${channel.name}” 中批量删除已选的 ${toDelete.length} 个模型吗？`,
     description: isDeletingPrimary
-      ? `注意：已选模型中包含当前探活主模型，删除后将自动将 “${remaining[0]}” 设为新的主模型。`
+      ? `注意：已选模型中包含当前主模型，删除后将自动将 “${remaining[0]}” 设为新的主模型。`
       : `删除后，网关将不再通过渠道 “${channel.name}” 分发这 ${toDelete.length} 个模型的请求。`,
     danger: true,
     confirmText: `确认删除 (${toDelete.length})`,
@@ -2014,8 +2063,11 @@ async function setAsPrimaryModel(channel?: Channel | null, modelName?: string) {
     activeModelLatencyChannel.value = fresh
   }
 
-  showToast(`已将 “${modelName}” 设为探活主模型`)
-  probeSingleModel(channel, modelName)
+  showToast(`已将 “${modelName}” 设为主模型；如需验证，请手动探活`)
+}
+
+function setPrimaryFromRow(channel: Channel, modelName: string) {
+  void setAsPrimaryModel(channel, modelName)
 }
 
 // ============================================================================
@@ -3052,13 +3104,8 @@ async function addChannel() {
     modelNames.unshift(primaryModel)
   }
   const model = primaryModel || modelNames[0] || ''
-  const interval = newChannelProbePreset.value === -1 ? Number(newChannelProbeCustom.value) : newChannelProbePreset.value
   if (!name || !rawUrl || !newChannelProtocol.value || !model) {
     showToast('请完整填写渠道名称、接口协议与主模型')
-    return
-  }
-  if (newChannelProbePreset.value === -1 && (interval < 15 || isNaN(interval))) {
-    showToast('自定义探活间隔必须大于等于 15 秒')
     return
   }
   const finalUrl = normalizeEndpointUrl(rawUrl)
@@ -3072,10 +3119,9 @@ async function addChannel() {
     latency: null,
     ttft: null,
     models: modelNames.length,
-    lastCheck: interval <= 0 ? '仅手动探活' : '待探活',
+    lastCheck: '尚未探活',
     accent: newChannelProtocol.value === 'anthropic' ? '#f59e0b' : newChannelProtocol.value === 'openai-responses' ? '#3b82f6' : '#10b981',
     enabled: newChannelEnabled.value,
-    probeInterval: interval,
     modelNames,
   }
   if (gatewayApiActive.value) {
@@ -3101,7 +3147,6 @@ async function addChannel() {
   newChannelProtocol.value = 'openai-compatible'
   showAddChannel.value = false
   newChannelEnabled.value = true
-  newChannelProbePreset.value = 0
   activeSection.value = 'channels'
 }
 
@@ -4228,6 +4273,7 @@ function handleContextMenu(event: MouseEvent) {
               <div class="m26-model-card-footer">
                 <div class="flex items-center gap-2">
                   <button
+                    v-if="m.name !== 'Auto'"
                     class="m26-model-test-btn"
                     @click="openModelSpeedTestFor(m.name)"
                     title="在全部支持此模型的渠道中发起并发探活"
@@ -4238,6 +4284,7 @@ function handleContextMenu(event: MouseEvent) {
                     <span>探活此模型</span>
                   </button>
                   <button
+                    v-if="m.name !== 'Auto'"
                     class="m26-model-classify-btn"
                     @click.stop="openClassifyDialog(m.name)"
                     title="将此模型归入或合并到其他标准模型"
@@ -4832,8 +4879,7 @@ function handleContextMenu(event: MouseEvent) {
           </div>
           <div class="m26-inject-desc-box">
             <p class="m26-inject-desc">
-              检测原理：向上游发送 1 token 简短提问，比对上游返回的 prompt_tokens 与正常模板开销（约 20-80）。膨胀即说明有服务器端注入的系统提示。
-              内容提取依赖模型配合，拒绝复述不代表没有注入。注入通常是站点级全局行为，一般仅测主模型即可确认；若要确认站点是否按模型区别对待，可检测全部模型。
+              检测会发送真实请求，并参考最小提问的输入 token 数（常见模板开销约 20–80）。超出参考范围只代表输入统计偏高，不能单独证明注入；明显超出阈值时会尝试提取提示内容，结果受模型回答影响。
             </p>
           </div>
 
@@ -4879,7 +4925,7 @@ function handleContextMenu(event: MouseEvent) {
                     <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
                       <path d="M2.5 3.5h11M2.5 6.5h11M2.5 9.5h7M2.5 12.5h5" />
                     </svg>
-                    <span class="m26-inject-content-title">提取到的注入 Prompt 原文:</span>
+                    <span class="m26-inject-content-title">模型返回的提示词内容（需人工判断）:</span>
                   </div>
                   <button
                     class="m26-model-copy-btn"
@@ -4899,7 +4945,7 @@ function handleContextMenu(event: MouseEvent) {
                 <pre class="m26-inject-content">{{ r.content }}</pre>
               </div>
               <div v-else-if="r.state === 'clean'" class="m26-inject-row-note">
-                输入 token 数 {{ r.prompt_tokens }}，在正常模板开销范围内。
+                最小探针的输入 token 统计为 {{ r.prompt_tokens }}，处于正常模板参考范围内。
               </div>
               <div v-else-if="r.message" class="m26-inject-row-note">{{ r.message }}</div>
             </div>
@@ -4920,7 +4966,7 @@ function handleContextMenu(event: MouseEvent) {
               <span>正在向上游探测系统提示词注入，请稍候...</span>
             </span>
             <span v-else class="m26-inject-tip">
-              单 token 提问校验 · 注入通常为站点级行为，建议优先检测主模型
+              真实上游请求 · 输入 token 数仅作参考，建议优先检测主模型
             </span>
           </div>
           <div class="m26-inject-footer-actions">
@@ -4978,25 +5024,6 @@ function handleContextMenu(event: MouseEvent) {
                 <option value="anthropic">Anthropic Claude (/v1/messages)</option>
                 <option value="openai-responses">OpenAI Responses API (原生补全)</option>
               </select>
-            </div>
-            <div class="m26-form-group">
-              <label class="m26-label">探活模式与频率</label>
-              <select v-model="newChannelProbePreset" class="m26-select">
-                <option v-for="opt in intervalPresets" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-              </select>
-              <div v-if="newChannelProbePreset === -1" class="m26-custom-interval-wrap mt-1.5">
-                <div class="flex items-center gap-2">
-                  <input
-                    v-model.number="newChannelProbeCustom"
-                    type="number"
-                    min="15"
-                    max="86400"
-                    class="m26-input text-xs"
-                    placeholder="间隔秒数 (≥15)"
-                  />
-                  <span class="text-xs text-slate-500 shrink-0">秒/次</span>
-                </div>
-              </div>
             </div>
           </div>
 
@@ -5072,25 +5099,6 @@ function handleContextMenu(event: MouseEvent) {
                 <option value="anthropic">Anthropic Claude (/v1/messages)</option>
                 <option value="openai-responses">OpenAI Responses API (原生补全)</option>
               </select>
-            </div>
-            <div class="m26-form-group">
-              <label class="m26-label">探活模式与频率</label>
-              <select v-model="editChannelProbePreset" class="m26-select">
-                <option v-for="opt in intervalPresets" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-              </select>
-              <div v-if="editChannelProbePreset === -1" class="m26-custom-interval-wrap mt-1.5">
-                <div class="flex items-center gap-2">
-                  <input
-                    v-model.number="editChannelProbeCustom"
-                    type="number"
-                    min="15"
-                    max="86400"
-                    class="m26-input text-xs"
-                    placeholder="间隔秒数 (≥15)"
-                  />
-                  <span class="text-xs text-slate-500 shrink-0">秒/次</span>
-                </div>
-              </div>
             </div>
           </div>
 
@@ -5183,13 +5191,13 @@ function handleContextMenu(event: MouseEvent) {
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div>
             <div class="flex items-center gap-2">
-              <h3 class="m26-modal-title">全部模型与实时探活</h3>
+              <h3 class="m26-modal-title">模型管理</h3>
               <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
                 {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
               </span>
             </div>
             <p class="m26-modal-subtitle" :title="activeModelLatencyChannel.url">
-              渠道 “{{ activeModelLatencyChannel.name }}” · 共 {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
+            {{ activeModelLatencyChannel.name }} · {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
             </p>
           </div>
           <button class="m26-close-btn" data-no-drag @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
@@ -5212,39 +5220,45 @@ function handleContextMenu(event: MouseEvent) {
               v-if="selectedModelNames.length > 0"
               class="m26-action-btn danger-subtle"
               @click="batchDeleteSelectedModels(activeModelLatencyChannel)"
-              title="批量删除已选中的模型"
+              :title="`删除已选 ${selectedModelNames.length} 个模型`"
+              :aria-label="`删除已选 ${selectedModelNames.length} 个模型`"
             >
               <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
                 <path d="M3 4h10M6 4V2h4v2M5 6v7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V6" />
               </svg>
-              <span>批量删除 ({{ selectedModelNames.length }})</span>
+              <span>{{ selectedModelNames.length }}</span>
             </button>
           </div>
 
-          <div class="flex items-center gap-2">
+          <div class="m26-model-batch-actions">
+            <span class="m26-model-batch-count">
+              {{ selectedModelNames.length ? `已选 ${selectedModelNames.length}/${activeModelLatencyChannel.modelNames?.length || 0}` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0}` }}
+            </span>
             <button
-              class="m26-action-btn glass-subtle text-xs"
-              :disabled="isCheckingAllInjections || isProbingAllModels"
-              title="一键对当前渠道全部模型进行 Prompt 注入排查"
-              @click="checkAllChannelModelsInjection(activeModelLatencyChannel)"
-            >
-              <span v-if="isCheckingAllInjections" class="m26-spin-dot mr-1"></span>
-              <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" class="mr-1 inline-block">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-              </svg>
-              <span>{{ isCheckingAllInjections ? '全模型测注入中...' : '一键测全模型注入' }}</span>
-            </button>
-
-            <button
-              class="m26-action-btn primary text-xs"
+              class="m26-model-batch-btn probe"
+              :class="{ 'is-loading': isProbingAllModels }"
               :disabled="isProbingAllModels || isCheckingAllInjections"
-              @click="probeAllChannelModels(activeModelLatencyChannel)"
+              :title="`${isProbingAllModels ? '探活中' : '探活'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
+              :aria-label="`${isProbingAllModels ? '探活中' : '批量探活'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
+              @click="requestBatchModelAction(activeModelLatencyChannel, 'probe')"
             >
-              <svg v-if="!isProbingAllModels" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
+              <span v-if="isProbingAllModels" class="m26-spin-dot"></span>
+              <svg v-else viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                <path d="M2 10h3l2-5 4 10 2-5h5" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
-              <span v-else class="m26-spin-dot"></span>
-              <span>{{ isProbingAllModels ? '全模型队列探活中...' : '一键探活全部模型' }}</span>
+            </button>
+            <button
+              class="m26-model-batch-btn injection"
+              :disabled="isProbingAllModels || isCheckingAllInjections"
+              :title="`${isCheckingAllInjections ? '检测中' : '检测输入统计'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
+              :aria-label="`${isCheckingAllInjections ? '检测中' : '批量检测输入统计'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
+              @click="requestBatchModelAction(activeModelLatencyChannel, 'injection')"
+            >
+              <span v-if="isCheckingAllInjections" class="m26-spin-dot"></span>
+              <svg v-else viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                <path d="M10 2 16 4.3v4.6c0 4.1-2.5 6.8-6 9.1-3.5-2.3-6-5-6-9.1V4.3L10 2Z" />
+                <path d="m7.2 9.7 1.8 1.8 3.8-4" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
             </button>
           </div>
         </div>
@@ -5273,7 +5287,7 @@ function handleContextMenu(event: MouseEvent) {
                     <span class="m26-model-idx">#{{ idx + 1 }}</span>
                     <span class="m26-model-full-name" :title="modelName">{{ modelName }}</span>
                     <button
-                      class="m26-model-copy-btn"
+                      class="m26-model-copy-btn m26-model-row-copy"
                       title="复制模型名"
                       @click.stop="copyModelId(modelName)"
                     >
@@ -5284,9 +5298,12 @@ function handleContextMenu(event: MouseEvent) {
                       <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2">
                         <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
                       </svg>
-                      <span>{{ copiedModelId === modelName ? '已复制' : '复制' }}</span>
+                      <span>{{ copiedModelId === modelName ? '已复制' : '复制模型名' }}</span>
                     </button>
                   </div>
+                  <span v-if="modelLatencies[getModelKey(activeModelLatencyChannel, modelName)]?.checkedAt" class="m26-model-checked-at">
+                    最近检测 {{ formatModelCheckedAt(modelLatencies[getModelKey(activeModelLatencyChannel, modelName)]?.checkedAt) }}
+                  </span>
                 </div>
               </div>
 
@@ -5300,7 +5317,10 @@ function handleContextMenu(event: MouseEvent) {
                 >
                   <span class="lat-dot"></span>
                   <span class="lat-text">{{ getModelLatencyDisplay(activeModelLatencyChannel, modelName) }}</span>
-                  <span v-if="isModelFailed(activeModelLatencyChannel, modelName)" class="lat-view-err">报错 ➔</span>
+                  <svg v-if="isModelFailed(activeModelLatencyChannel, modelName)" class="lat-view-err" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <circle cx="8" cy="8" r="6" />
+                    <path d="M8 4.5v4M8 11.3v.2" />
+                  </svg>
                 </div>
 
                 <!-- Injection Badge -->
@@ -5316,32 +5336,42 @@ function handleContextMenu(event: MouseEvent) {
                   <span class="inject-text">{{ getModelInjectionLabel(activeModelLatencyChannel, modelName) }}</span>
                 </div>
 
-                <!-- Primary Model Slot: Badge if primary, Button if not -->
+                <!-- The current primary is marked; other rows can promote themselves with one tap. -->
                 <span
                   v-if="isPrimaryModel(activeModelLatencyChannel, modelName)"
                   class="m26-primary-slot-badge"
-                  title="当前渠道的探活主模型"
+                  title="当前主模型"
+                  aria-label="当前主模型"
                 >
-                  探活主模型
+                  <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true">
+                    <path d="m8 1.5 1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.3l-3.8 2 .7-4.3-3.1-3 4.3-.6L8 1.5Z" />
+                  </svg>
                 </span>
                 <button
                   v-else
                   class="m26-btn-micro set-primary"
-                  @click="setAsPrimaryModel(activeModelLatencyChannel, modelName)"
-                  title="将此模型设为当前渠道的探活主模型"
+                  :title="`设 ${modelName} 为主模型`"
+                  :aria-label="`设 ${modelName} 为主模型`"
+                  @click="setPrimaryFromRow(activeModelLatencyChannel, modelName)"
                 >
-                  设为主模型
+                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path d="m8 1.5 1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.3l-3.8 2 .7-4.3-3.1-3 4.3-.6L8 1.5Z" />
+                  </svg>
                 </button>
 
                 <!-- Test button -->
                 <button
                   class="m26-btn-micro probe"
+                  :class="{ 'is-loading': isModelProbing(activeModelLatencyChannel, modelName) }"
                   :disabled="isModelProbing(activeModelLatencyChannel, modelName) || isProbingAllModels"
                   @click="probeSingleModel(activeModelLatencyChannel, modelName)"
-                  title="单独探活此模型真实可用性与时延"
+                  :title="isModelProbing(activeModelLatencyChannel, modelName) ? '探活中…' : '探活模型'"
+                  :aria-label="isModelProbing(activeModelLatencyChannel, modelName) ? '探活中' : `探活 ${modelName}`"
                 >
                   <span v-if="isModelProbing(activeModelLatencyChannel, modelName)" class="m26-spin-dot"></span>
-                  <span>{{ isModelProbing(activeModelLatencyChannel, modelName) ? '探活中' : '探活' }}</span>
+                  <svg v-else viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                    <path d="M2 10h3l2-5 4 10 2-5h5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
                 </button>
 
                 <!-- Injection test button -->
@@ -5349,22 +5379,16 @@ function handleContextMenu(event: MouseEvent) {
                   class="m26-btn-micro inject"
                   :disabled="isModelCheckingInjection(activeModelLatencyChannel, modelName) || isCheckingAllInjections"
                   @click="checkSingleModelInjection(activeModelLatencyChannel, modelName)"
-                  title="单独检测此模型是否存在服务器端 Prompt 注入"
+                  :title="isModelCheckingInjection(activeModelLatencyChannel, modelName) ? '检测中…' : '检测输入统计'"
+                  :aria-label="isModelCheckingInjection(activeModelLatencyChannel, modelName) ? '检测中' : `检测 ${modelName} 的输入统计`"
                 >
                   <span v-if="isModelCheckingInjection(activeModelLatencyChannel, modelName)" class="m26-spin-dot"></span>
-                  <span>{{ isModelCheckingInjection(activeModelLatencyChannel, modelName) ? '检测中' : '测注入' }}</span>
-                </button>
-
-                <!-- Delete Model button -->
-                <button
-                  class="m26-btn-icon danger"
-                  @click="removeModelFromChannel(activeModelLatencyChannel, modelName)"
-                  title="从当前渠道删除此模型"
-                >
-                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <path d="M3 4h10M6 4V2h4v2M5 6v7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V6" />
+                  <svg v-else viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                    <path d="M10 2 16 4.3v4.6c0 4.1-2.5 6.8-6 9.1-3.5-2.3-6-5-6-9.1V4.3L10 2Z" />
+                    <path d="m7.2 9.7 1.8 1.8 3.8-4" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
                 </button>
+
               </div>
             </div>
           </div>
@@ -5372,7 +5396,7 @@ function handleContextMenu(event: MouseEvent) {
 
         <div class="m26-modal-footer">
           <span class="m26-modal-hint text-xs text-slate-400">
-            💡 探活说明：HeiGate 会向模型发送真实轻量测试请求。不仅测试网络端到端往返耗时，同时严格验证密钥鉴权、账户额度与模型实际生成可用性。
+            探活会发送真实请求；批量操作前会显示数量与额度提示。
           </span>
         </div>
       </div>
@@ -5504,7 +5528,10 @@ function handleContextMenu(event: MouseEvent) {
                 >
                   <span class="lat-dot"></span>
                   <span class="lat-text">{{ p.latencyDisplay }}</span>
-                  <span v-if="p.isFailed" class="lat-view-err">报错 ➔</span>
+                  <svg v-if="p.isFailed" class="lat-view-err" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <circle cx="8" cy="8" r="6" />
+                    <path d="M8 4.5v4M8 11.3v.2" />
+                  </svg>
                 </div>
 
                 <!-- Test single provider button -->
@@ -8498,6 +8525,23 @@ input:checked + .m26-slider:before {
   border-color: rgba(79, 70, 229, 0.25);
   background: rgba(79, 70, 229, 0.05);
 }
+.m26-model-item-info > div:hover .m26-model-row-copy,
+.m26-model-row-copy:focus-visible {
+  opacity: 1;
+}
+.m26-model-row-copy {
+  width: 22px;
+  height: 22px;
+  justify-content: center;
+  padding: 0;
+  overflow: hidden;
+  opacity: 0;
+  background: transparent;
+  border-color: transparent;
+}
+.m26-model-row-copy span {
+  display: none;
+}
 
 /* Compact & Clickable Aliases Row */
 .m26-model-aliases-bar {
@@ -10076,6 +10120,70 @@ input:checked + .m26-slider:before {
   padding: 12px 20px;
   background: #f8fafc;
   border-bottom: 1px solid var(--m26-border);
+  overflow: visible;
+  position: relative;
+  z-index: 2;
+}
+.m26-model-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.m26-model-batch-count {
+  padding-right: 3px;
+  color: var(--m26-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.m26-model-batch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--m26-border-bright);
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+.m26-model-batch-btn:hover:not(:disabled) {
+  border-color: rgba(79, 70, 229, 0.35);
+  background: rgba(79, 70, 229, 0.05);
+  color: var(--m26-accent);
+}
+.m26-model-batch-btn.injection {
+  color: #059669;
+  border-color: rgba(5, 150, 105, 0.22);
+  background: rgba(5, 150, 105, 0.05);
+}
+.m26-model-batch-btn.injection:hover:not(:disabled) {
+  border-color: rgba(5, 150, 105, 0.38);
+  background: rgba(5, 150, 105, 0.1);
+  color: #047857;
+}
+.m26-model-batch-btn:focus-visible {
+  outline: 2px solid rgba(79, 70, 229, 0.55);
+  outline-offset: 2px;
+}
+.m26-model-batch-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.m26-model-batch-btn.probe.is-loading {
+  opacity: 1;
+  color: #4f46e5;
+  border-color: rgba(79, 70, 229, 0.42);
+  background: rgba(79, 70, 229, 0.1);
+}
+.m26-model-batch-btn.probe.is-loading .m26-spin-dot {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
 }
 .m26-action-btn.glass-subtle {
   background: rgba(16, 185, 129, 0.08);
@@ -10187,11 +10295,10 @@ input:checked + .m26-slider:before {
   align-items: center;
   justify-content: center;
   height: 26px;
-  width: 80px;
+  width: 28px;
   box-sizing: border-box;
-  padding: 0 6px;
-  border-radius: 6px;
-  font-size: 11px;
+  padding: 0;
+  border-radius: 7px;
   font-weight: 600;
   background: rgba(99, 102, 241, 0.1);
   color: #4f46e5;
@@ -10204,10 +10311,10 @@ input:checked + .m26-slider:before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 80px;
-  height: 26px;
+  width: 30px;
+  height: 28px;
   box-sizing: border-box;
-  padding: 0 6px;
+  padding: 0;
   color: #6366f1;
   background: rgba(99, 102, 241, 0.08);
   border-color: rgba(99, 102, 241, 0.22);
@@ -10220,18 +10327,31 @@ input:checked + .m26-slider:before {
   border-color: rgba(99, 102, 241, 0.4);
 }
 .m26-btn-micro.probe {
-  width: 60px;
-  height: 26px;
+  width: 30px;
+  height: 28px;
   box-sizing: border-box;
-  padding: 0 4px;
+  padding: 0;
   justify-content: center;
   flex-shrink: 0;
 }
+.m26-btn-micro.probe.is-loading,
+.m26-btn-micro.probe.is-loading:hover {
+  color: #4f46e5;
+  background: rgba(79, 70, 229, 0.1);
+  border-color: rgba(79, 70, 229, 0.42);
+  opacity: 1;
+  cursor: wait;
+}
+.m26-model-item-actions .m26-btn-micro.probe.is-loading .m26-spin-dot {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
 .m26-btn-micro.inject {
-  width: 62px;
-  height: 26px;
+  width: 30px;
+  height: 28px;
   box-sizing: border-box;
-  padding: 0 4px;
+  padding: 0;
   justify-content: center;
   flex-shrink: 0;
   color: #059669;
@@ -10252,6 +10372,11 @@ input:checked + .m26-slider:before {
   flex: 1;
   user-select: text !important;
   -webkit-user-select: text !important;
+}
+.m26-model-checked-at {
+  color: var(--m26-text-muted);
+  font-size: 10px;
+  line-height: 1.2;
 }
 .m26-model-idx {
   font-size: 11px;
@@ -10297,15 +10422,19 @@ input:checked + .m26-slider:before {
 .m26-model-item-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
+}
+.m26-model-item-actions .m26-btn-micro:focus-visible {
+  outline: 2px solid rgba(79, 70, 229, 0.55);
+  outline-offset: 2px;
 }
 .m26-model-lat-pill {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-width: 80px;
+  min-width: 66px;
   height: 26px;
   box-sizing: border-box;
   padding: 0 8px;
@@ -10318,6 +10447,7 @@ input:checked + .m26-slider:before {
   border: 1px solid rgba(100, 116, 139, 0.15);
   transition: all 0.15s ease;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 .m26-model-lat-pill .lat-dot {
   width: 6px;
@@ -10383,6 +10513,7 @@ input:checked + .m26-slider:before {
   flex-shrink: 0;
   cursor: pointer;
   user-select: none;
+  white-space: nowrap;
 }
 .m26-model-inject-pill:hover {
   filter: brightness(0.95);
@@ -10663,10 +10794,9 @@ input:checked + .m26-slider:before {
   line-height: 1.4;
 }
 .lat-view-err {
-  font-size: 10px;
   color: var(--m26-rose);
-  font-weight: 700;
   margin-left: 2px;
+  flex-shrink: 0;
 }
 
 /* ==========================================================================

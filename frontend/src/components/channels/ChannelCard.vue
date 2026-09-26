@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { Channel } from './types'
-import { probeModeLabel, probeModeTooltip, isPeriodicProbe } from './types'
 
 const props = defineProps<{
   channel: Channel
@@ -58,9 +57,10 @@ function injectionClass(state?: string): string {
 
 function injectionLabel(state?: string): string {
   switch (state) {
-    case 'clean': return '无注入'
-    case 'suspected': return '疑似注入'
-    case 'detected': return '发现注入'
+    case 'clean': return '输入正常'
+    case 'suspected': return '输入偏高'
+    case 'detected': return '输入显著偏高'
+    case 'error': return '检测异常'
     default: return '未检测'
   }
 }
@@ -165,13 +165,13 @@ function onModelHighlightClick() {
       </button>
       <button
         v-else
-        class="m26-models-count-chip single"
-        title="点击打开模型面板并进行实时探活"
+        class="m26-models-count-chip single icon-only"
+        title="打开模型管理与探活"
+        aria-label="打开模型管理与探活"
         @click.stop="emit('open-models', c)"
       >
-        <span>探活</span>
-        <svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M6 3.5l4.5 4.5L6 12.5" />
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M2 10h3l2-5 4 10 2-5h5" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </button>
     </div>
@@ -183,14 +183,14 @@ function onModelHighlightClick() {
         <!-- Error Pill -->
         <button
           v-if="c.status !== 'healthy' && c.lastError"
-          class="m26-metric-pill error"
-          :title="`主模型调用异常，点击查看报错排查建议: ${c.lastError}`"
+          class="m26-metric-pill error icon-only"
+          :title="`查看主模型报错排障建议: ${c.lastError}`"
+          :aria-label="`查看主模型报错排障建议: ${c.lastError}`"
           @click.stop="emit('open-diagnostic', c)"
         >
-          <span class="metric-dot red"></span>
-          <span class="truncate max-w-[110px]">报错排障</span>
-          <svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M6 3.5l4.5 4.5L6 12.5" />
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <circle cx="8" cy="8" r="6" />
+            <path d="M8 4.5v4M8 11.3v.2" />
           </svg>
         </button>
 
@@ -206,19 +206,6 @@ function onModelHighlightClick() {
           </svg>
           <span class="font-mono">{{ formatLatencySec(c.ttft ?? c.latency) }}</span>
         </div>
-
-        <!-- Probe Mode Pill -->
-        <button
-          class="m26-metric-pill probe-mode"
-          :class="{ periodic: isPeriodicProbe(c) }"
-          :title="probeModeTooltip(c)"
-          @click.stop="emit('edit', c)"
-        >
-          <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" class="metric-icon">
-            <path d="M2.5 4h11M2.5 8h7M2.5 12h5" stroke-linecap="round" />
-          </svg>
-          <span>{{ probeModeLabel(c) }}</span>
-        </button>
 
         <!-- Injection Shield Pill -->
         <button
@@ -525,6 +512,13 @@ function onModelHighlightClick() {
   font-weight: 600;
 }
 
+.m26-models-count-chip.single.icon-only {
+  width: 27px;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+}
+
 .m26-models-count-chip.single:hover {
   background: rgba(99, 102, 241, 0.14);
   color: #4f46e5;
@@ -561,6 +555,13 @@ function onModelHighlightClick() {
   border: 1px solid rgba(220, 38, 38, 0.18);
   cursor: pointer;
   font-weight: 500;
+}
+
+.m26-metric-pill.error.icon-only {
+  width: 24px;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
 }
 
 .m26-metric-pill.error:hover {

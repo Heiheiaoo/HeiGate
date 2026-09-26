@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,174 +12,37 @@ import (
 	"github.com/Heiheiaoo/heigate/internal/probe"
 )
 
+var (
+	ErrProbeBusy       = errors.New("probe already in progress")
+	ErrChannelDisabled = errors.New("channel is disabled")
+)
+
 // ProbeRunner schedules health probes for local channels. Each channel owns
 // one timer and one in-flight slot, so a slow upstream can never pile up
 // overlapping probes for the same channel.
 type ProbeRunner struct {
-	store  *Store
-	ctx    context.Context
-	cancel context.CancelFunc
+	store *Store
 
 	mu       sync.Mutex
-	tasks    map[int64]context.CancelFunc
 	inFlight map[int64]struct{}
 }
 
 func NewProbeRunner(store *Store) *ProbeRunner {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &ProbeRunner{
 		store:    store,
-		ctx:      ctx,
-		cancel:   cancel,
-		tasks:    make(map[int64]context.CancelFunc),
 		inFlight: make(map[int64]struct{}),
 	}
 }
 
-// Start loads enabled channels and schedules each one. Existing channels run
-// one probe immediately, then continue at their configured interval.
+// Start is retained for the desktop host lifecycle. Probes are manual-only;
+// startup never schedules upstream requests.
 func (r *ProbeRunner) Start(ctx context.Context) error {
-	if r == nil || r.store == nil {
-		return nil
-	}
-	channels, err := r.store.List(ctx)
-	if err != nil {
-		return err
-	}
-	for _, channel := range channels {
-		r.Schedule(channel)
-	}
 	return nil
 }
 
-// Schedule creates or replaces the timer for one channel. Disabled channels
-// are unscheduled and never generate upstream traffic.
-func (r *ProbeRunner) Schedule(channel *Channel) {
-	if r == nil || channel == nil || channel.ID == 0 {
-		return
-	}
-	if !channel.Enabled || channel.IntervalSeconds <= 0 {
-		r.Unschedule(channel.ID)
-		return
-	}
-	interval := time.Duration(channel.IntervalSeconds) * time.Second
-	if interval < 15*time.Second {
-		interval = 15 * time.Second
-	}
-	r.Unschedule(channel.ID)
-	ctx, cancel := context.WithCancel(r.ctx)
-	r.mu.Lock()
-	r.tasks[channel.ID] = cancel
-	r.mu.Unlock()
-	go r.runScheduled(ctx, channel.ID, interval)
-}
-
-// ProbeOnce runs a single probe in the background, independent of the timer
-// set up by Schedule. A newly created channel would otherwise show "unknown"
-// until its first interval elapses, and a manual-only channel (interval 0)
-// has no timer at all, so it would never be probed without this.
-func (r *ProbeRunner) ProbeOnce(channel *Channel) {
-	if r == nil || channel == nil || channel.ID == 0 || !channel.Enabled {
-		return
-	}
-	if channel.IntervalSeconds > 0 {
-		// Schedule already fires an immediate probe; a second one would just
-		// duplicate upstream traffic.
-		return
-	}
-	go r.runOne(r.ctx, channel.ID)
-}
-
-func (r *ProbeRunner) Unschedule(id int64) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	cancel := r.tasks[id]
-	delete(r.tasks, id)
-	r.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
+// Stop is retained for the desktop host lifecycle. Manual probes are bounded
+// by their request context and do not own background scheduler goroutines.
 func (r *ProbeRunner) Stop() {
-	if r == nil {
-		return
-	}
-	r.cancel()
-	r.mu.Lock()
-	r.tasks = make(map[int64]context.CancelFunc)
-	r.mu.Unlock()
-}
-
-func (r *ProbeRunner) runScheduled(ctx context.Context, id int64, base time.Duration) {
-	for {
-		r.runOne(ctx, id)
-		timer := time.NewTimer(r.nextInterval(ctx, id, base))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-	}
-}
-
-// nextInterval re-reads the channel each tick so the wait reflects the streak
-// the probe just updated. Capturing the interval once would freeze the backoff
-// and stop a recovered channel from being re-checked promptly.
-func (r *ProbeRunner) nextInterval(ctx context.Context, id int64, base time.Duration) time.Duration {
-	ch, err := r.store.Get(ctx, id)
-	if err != nil {
-		return base
-	}
-	return AdaptiveProbeInterval(base, ch.ProbeStreak)
-}
-
-// probeBackoffCap bounds how far a quiet channel's interval is stretched. Two
-// hours is a backstop, not the primary health signal: real traffic trips the
-// circuit breaker within seconds, so the probe only has to notice a channel
-// that nothing is routing to. A lower cap would do nothing for the common
-// case of a channel already configured to probe every 30 minutes.
-const probeBackoffCap = 2 * time.Hour
-
-// AdaptiveProbeInterval returns how long to wait before the next automatic
-// probe, given how many consecutive fully-healthy probes the channel has had.
-// Every probe is a real billed inference request and some upstreams charge a
-// large fixed input prompt on each one, so a stable channel is polled less
-// often. Any non-operational result resets the streak, dropping the interval
-// straight back to the configured value so recovery is noticed promptly.
-func AdaptiveProbeInterval(base time.Duration, streak int) time.Duration {
-	if base <= 0 {
-		return base
-	}
-	var factor float64
-	switch {
-	case streak >= 20:
-		factor = 4
-	case streak >= 10:
-		factor = 2
-	case streak >= 5:
-		factor = 1.5
-	default:
-		return base
-	}
-	interval := time.Duration(float64(base) * factor)
-	// The cap is a ceiling on escalation, never a shortening: a channel the
-	// user already configured slower than the cap keeps its own cadence.
-	limit := probeBackoffCap
-	if base > limit {
-		limit = base
-	}
-	if interval > limit {
-		return limit
-	}
-	return interval
-}
-
-func (r *ProbeRunner) runOne(ctx context.Context, id int64) {
-	_, _ = r.ProbeAutomatic(ctx, id)
 }
 
 // ProbeNow runs the lightweight channel health check: only the primary model
@@ -186,13 +50,6 @@ func (r *ProbeRunner) runOne(ctx context.Context, id int64) {
 // routing priority, circuit breaker, and adaptive schedule. Extra models are
 // available through ProbeModelNow or ProbeAllModelsNow on explicit demand.
 func (r *ProbeRunner) ProbeNow(ctx context.Context, id int64) ([]*probe.Result, error) {
-	return r.probeNow(ctx, id, "", false)
-}
-
-// ProbeAutomatic is the scheduler-facing name for a single primary-model
-// sample. All probe modes are single-attempt; the next click or tick is the
-// next sample.
-func (r *ProbeRunner) ProbeAutomatic(ctx context.Context, id int64) ([]*probe.Result, error) {
 	return r.probeNow(ctx, id, "", false)
 }
 
@@ -218,7 +75,7 @@ func (r *ProbeRunner) probeNow(ctx context.Context, id int64, targetModel string
 		return nil, context.Canceled
 	}
 	if !r.acquire(id) {
-		return nil, nil
+		return nil, ErrProbeBusy
 	}
 	defer r.release(id)
 
@@ -227,10 +84,8 @@ func (r *ProbeRunner) probeNow(ctx context.Context, id int64, targetModel string
 		return nil, err
 	}
 	if !channel.Enabled {
-		r.Unschedule(id)
-		return nil, nil
+		return nil, ErrChannelDisabled
 	}
-
 	probedPrimary := channel.PrimaryModel
 	cfg := probe.Config{
 		Provider: channel.Provider,
@@ -255,6 +110,12 @@ func (r *ProbeRunner) probeNow(ctx context.Context, id int64, targetModel string
 	probeCtx, cancel := context.WithTimeout(ctx, probe.RunBudgetFor(modelCount))
 	defer cancel()
 	results, probeErr := probe.Run(probeCtx, cfg)
+	// A browser refresh, window close, or client-side timeout cancels the
+	// request context. That is not evidence of an upstream failure and must not
+	// increment failure_count or open a circuit.
+	if ctx.Err() != nil {
+		return results, ctx.Err()
+	}
 	if probeErr != nil {
 		if persistPrimary {
 			r.persistProbeError(id, probedPrimary, probeErr)
@@ -264,10 +125,36 @@ func (r *ProbeRunner) probeNow(ctx context.Context, id int64, targetModel string
 	if len(results) == 0 {
 		return results, nil
 	}
+	for _, result := range results {
+		h := ModelHealthFromProbe(result)
+		if err := r.store.SetModelHealth(context.Background(), id, h); err != nil {
+			slog.Warn("desktop model probe result save failed", "channel_id", id, "model", result.Model, "error", err)
+		}
+	}
 	if persistPrimary {
 		r.persistProbeResults(id, probedPrimary, results)
 	}
 	return results, nil
+}
+
+func probeFailureInfo(result *probe.Result) FailureInfo {
+	if result == nil {
+		return FailureInfo{Class: FailureProvider}
+	}
+	message := strings.ToLower(result.Message)
+	for _, marker := range []string{"429", "rate limit", "rate_limit", "rpm", "tpm", "quota exceeded", "too many requests"} {
+		if strings.Contains(message, marker) {
+			return FailureInfo{Class: FailureRateLimit, StatusCode: 429}
+		}
+	}
+	return FailureInfo{Class: FailureProvider}
+}
+
+func ModelHealthFromProbe(result *probe.Result) ModelHealth {
+	if result == nil {
+		return ModelHealth{}
+	}
+	return ModelHealth{Model: result.Model, Status: result.Status, LatencyMs: result.LatencyMs, TTFTMs: result.TTFTMs, Error: result.Message, CheckedAt: &result.CheckedAt}
 }
 
 func (r *ProbeRunner) persistProbeError(id int64, expectedPrimary string, probeErr error) {
@@ -374,10 +261,11 @@ func (r *ProbeRunner) persistProbeResults(id int64, expectedPrimary string, resu
 			}
 			fresh.FailureCount++
 			fresh.ProbeStreak = 0
-			cooldown := FailureCooldown(FailureInfo{Class: FailureProvider}, fresh.FailureCount)
+			failureInfo := probeFailureInfo(primary)
+			cooldown := FailureCooldown(failureInfo, fresh.FailureCount)
 			until := time.Now().UTC().Add(cooldown)
 			fresh.CooldownUntil = &until
-			if fresh.FailureCount >= 3 {
+			if FailureIsCircuitEligible(failureInfo) && fresh.FailureCount >= 3 {
 				fresh.CircuitState = CircuitOpen
 			}
 		}

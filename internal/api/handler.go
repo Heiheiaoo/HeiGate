@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,8 +158,6 @@ func (h *Handler) create(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	h.runner.Schedule(ch)
-	h.runner.ProbeOnce(ch)
 	c.JSON(http.StatusCreated, gin.H{"data": sanitizeChannel(ch)})
 }
 
@@ -189,7 +188,6 @@ func (h *Handler) update(c *gin.Context) {
 	// A probe or forward that finished while this handler was running keeps its
 	// result instead of being overwritten by the runtime state read above.
 	var updated *channel.Channel
-	var primaryChanged bool
 	if err := h.store.UpdateRuntime(c.Request.Context(), id, func(fresh *channel.Channel) {
 		// Changing the cadence is an explicit instruction: drop the adaptive
 		// backoff so the new interval takes effect immediately instead of the
@@ -198,7 +196,6 @@ func (h *Handler) update(c *gin.Context) {
 			fresh.ProbeStreak = 0
 		}
 		if fresh.PrimaryModel != ch.PrimaryModel {
-			primaryChanged = true
 			fresh.ProbeStreak = 0
 		}
 		channel.CopyConfigState(fresh, ch)
@@ -206,10 +203,6 @@ func (h *Handler) update(c *gin.Context) {
 	}); err != nil {
 		writeError(c, err)
 		return
-	}
-	h.runner.Schedule(updated)
-	if primaryChanged {
-		h.runner.ProbeOnce(updated)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": sanitizeChannel(updated)})
 }
@@ -223,7 +216,6 @@ func (h *Handler) remove(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	h.runner.Unschedule(id)
 	c.Status(http.StatusNoContent)
 }
 
@@ -304,6 +296,14 @@ func (h *Handler) probe(c *gin.Context) {
 		results, err = h.runner.ProbeNow(c.Request.Context(), id)
 	}
 	if err != nil {
+		if errors.Is(err, channel.ErrProbeBusy) {
+			c.JSON(http.StatusConflict, gin.H{"code": "probe_busy", "error": err.Error()})
+			return
+		}
+		if errors.Is(err, channel.ErrChannelDisabled) {
+			c.JSON(http.StatusConflict, gin.H{"code": "channel_disabled", "error": err.Error()})
+			return
+		}
 		writeError(c, err)
 		return
 	}
@@ -321,10 +321,12 @@ func (h *Handler) models(c *gin.Context) {
 		Channels []string `json:"channels"`
 	}
 	entries := make(map[string]*modelEntry)
+	hasEnabled := false
 	for _, ch := range channels {
 		if !ch.Enabled {
 			continue
 		}
+		hasEnabled = true
 		for _, model := range append([]string{ch.PrimaryModel}, ch.ExtraModels...) {
 			model = strings.TrimSpace(model)
 			if model == "" {
@@ -339,6 +341,9 @@ func (h *Handler) models(c *gin.Context) {
 		}
 	}
 	data := make([]*modelEntry, 0, len(entries))
+	if hasEnabled {
+		data = append(data, &modelEntry{Name: "Auto", Channels: []string{"HeiGate 自动路由"}})
+	}
 	for _, entry := range entries {
 		data = append(data, entry)
 	}
@@ -418,11 +423,9 @@ func requestToChannel(input channelRequest) (*channel.Channel, error) {
 		Endpoint: endpoint, APIKey: input.APIKey,
 		PrimaryModel: input.PrimaryModel, ExtraModels: input.ExtraModels, Enabled: enabled,
 	}
-	if input.IntervalSeconds != nil {
-		ch.IntervalSeconds = *input.IntervalSeconds
-	} else {
-		ch.IntervalSeconds = 300
-	}
+	// Automatic probes are disabled globally. Keep the persisted value at zero
+	// so old clients cannot accidentally re-enable quota-consuming probes.
+	ch.IntervalSeconds = 0
 	if err := probe.ValidateInterval(ch.IntervalSeconds); err != nil {
 		return nil, err
 	}
@@ -489,14 +492,13 @@ func (h *Handler) duplicate(c *gin.Context) {
 	dup := *existing
 	dup.ID = 0
 	dup.Name = fmt.Sprintf("%s (副本)", existing.Name)
+	dup.ModelHealth = nil
 	dup.CreatedAt = time.Time{}
 	dup.UpdatedAt = time.Time{}
 	if err := h.store.Save(c.Request.Context(), &dup); err != nil {
 		writeError(c, err)
 		return
 	}
-	h.runner.Schedule(&dup)
-	h.runner.ProbeOnce(&dup)
 	c.JSON(http.StatusCreated, gin.H{"data": sanitizeChannel(&dup)})
 }
 

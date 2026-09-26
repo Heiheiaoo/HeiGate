@@ -61,6 +61,8 @@ const (
 	protocolResponses gatewayProtocol = "responses"
 )
 
+const autoModelName = "Auto"
+
 func channelSupportsModel(ch *channel.Channel, model string) bool {
 	if strings.EqualFold(ch.PrimaryModel, model) {
 		return true
@@ -125,6 +127,75 @@ func (h *Handler) resolveModelAlias(ctx context.Context, requestedModel string) 
 		}
 	}
 	return requestedModel
+}
+
+// bestAutoModel selects the best configured upstream model for one already
+// eligible channel. Model-level probe state wins over the channel headline so
+// an operational extra model can be used even when the primary is slow or
+// unavailable. Unknown models remain eligible as a last resort.
+type autoModelChoice struct {
+	name  string
+	rank  int
+	lat   int
+	order int
+}
+
+func bestAutoChoice(ch *channel.Channel) autoModelChoice {
+	if ch == nil {
+		return autoModelChoice{rank: 99, lat: int(^uint(0) >> 1)}
+	}
+	models := append([]string{ch.PrimaryModel}, ch.ExtraModels...)
+	best := autoModelChoice{rank: 99, lat: int(^uint(0) >> 1), order: len(models) + 1}
+	for index, name := range models {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		current := autoModelChoice{name: name, rank: 2, lat: int(^uint(0) >> 1), order: index}
+		if strings.EqualFold(name, ch.PrimaryModel) {
+			if ch.LastStatus == probe.StatusOperational || ch.LastStatus == "healthy" {
+				current.rank = 0
+			} else if ch.LastStatus == probe.StatusDegraded {
+				current.rank = 1
+			} else if ch.LastStatus == probe.StatusError || ch.LastStatus == probe.StatusFailed {
+				current.rank = 3
+			}
+			if ch.LastTTFTMs != nil && *ch.LastTTFTMs > 0 {
+				current.lat = *ch.LastTTFTMs
+			} else if ch.LastLatencyMs != nil && *ch.LastLatencyMs > 0 {
+				current.lat = *ch.LastLatencyMs
+			}
+		}
+		for _, health := range ch.ModelHealth {
+			if !strings.EqualFold(strings.TrimSpace(health.Model), name) {
+				continue
+			}
+			switch health.Status {
+			case probe.StatusOperational, "healthy":
+				current.rank = 0
+			case probe.StatusDegraded:
+				current.rank = 1
+			case probe.StatusError, probe.StatusFailed:
+				current.rank = 3
+			default:
+				current.rank = 2
+			}
+			if health.TTFTMs != nil && *health.TTFTMs > 0 {
+				current.lat = *health.TTFTMs
+			} else if health.LatencyMs != nil && *health.LatencyMs > 0 {
+				current.lat = *health.LatencyMs
+			}
+			break
+		}
+		if current.rank < best.rank || (current.rank == best.rank && current.lat < best.lat) || (current.rank == best.rank && current.lat == best.lat && current.order < best.order) {
+			best = current
+		}
+	}
+	return best
+}
+
+func bestAutoModel(ch *channel.Channel) string {
+	return bestAutoChoice(ch).name
 }
 
 // channelServingTraffic reports whether a channel is a sensible target right
@@ -215,27 +286,21 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	isAuto := strings.EqualFold(model, autoModelName)
 	effectiveModel := h.resolveModelAlias(c.Request.Context(), model)
+	if isAuto {
+		effectiveModel = autoModelName
+	}
 	strategy := h.routeStrategy(c)
-	candidates, err := h.router.CandidatesMatching(c.Request.Context(), effectiveModel, strategy, gatewayCandidateMatcher(proto))
+	candidateModel := effectiveModel
+	if isAuto {
+		candidateModel = ""
+	}
+	candidates, err := h.router.CandidatesMatching(c.Request.Context(), candidateModel, strategy, gatewayCandidateMatcher(proto))
 	if err != nil {
-		// Intelligent fallback: if no channel matches this specific model (e.g. out-of-balance or cooldown),
-		// fall back to any operational channel in the system so the client request succeeds!
-		fallbackCandidates, fbErr := h.router.CandidatesMatching(c.Request.Context(), "", strategy, gatewayCandidateMatcher(proto))
-		if fbErr == nil && len(fallbackCandidates) > 0 {
-			candidates = fallbackCandidates
-			for _, fb := range candidates {
-				if fb.PrimaryModel != "" {
-					effectiveModel = fb.PrimaryModel
-					break
-				}
-				if len(fb.ExtraModels) > 0 {
-					effectiveModel = fb.ExtraModels[0]
-					break
-				}
-			}
-			err = nil
-		}
+		// Never silently replace a client's requested model with an unrelated
+		// healthy model. Explicit aliases are resolved above; everything else
+		// must fail clearly so callers can decide how to recover.
 	}
 	if err != nil {
 		if proto == protocolAnthropic {
@@ -250,6 +315,18 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		}
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
+	}
+	if isAuto {
+		sort.SliceStable(candidates, func(i, j int) bool {
+			a, b := bestAutoChoice(candidates[i]), bestAutoChoice(candidates[j])
+			if a.rank != b.rank {
+				return a.rank < b.rank
+			}
+			if a.lat != b.lat {
+				return a.lat < b.lat
+			}
+			return candidates[i].Name < candidates[j].Name
+		})
 	}
 	var upstream upstreamResponse
 	var winningChannel *channel.Channel
@@ -286,8 +363,13 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 
 	winChan, routeErr := h.router.RouteCandidates(c.Request.Context(), effectiveModel, candidates, func(ctx context.Context, ch *channel.Channel) error {
 		upstreamModel := effectiveModel
-		if actual, _, ok := channel.FindChannelModelForRequest(ch, effectiveModel); ok && actual != "" {
+		if isAuto {
+			upstreamModel = bestAutoModel(ch)
+		} else if actual, _, ok := channel.FindChannelModelForRequest(ch, effectiveModel); ok && actual != "" {
 			upstreamModel = actual
+		}
+		if upstreamModel == "" {
+			return fmt.Errorf("channel %q has no usable model", ch.Name)
 		}
 		var lastCandidateErr error
 		for attempt := 0; attempt <= 1; attempt++ {
@@ -300,7 +382,6 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			attemptStart := time.Now()
 			response, requestErr := forwardUpstream(ctx, c.Request, body, ch, proto, effectiveModel, upstreamModel)
 			attemptLatency := int(time.Since(attemptStart) / time.Millisecond)
-
 			step := TraceStep{
 				Index:       len(traceSteps) + 1,
 				ChannelName: ch.Name,
@@ -366,6 +447,11 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				return streamErr
 			}
 			winningTtft = int(time.Since(startOverall) / time.Millisecond)
+			// RouteCandidates persists the channel runtime state after this
+			// callback returns. Carry the measured first-byte time through the
+			// channel object so an old TTFT cannot survive a new request.
+			winningTtftCopy := winningTtft
+			ch.LastTTFTMs = &winningTtftCopy
 			response.body = &prefixedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix[:n]), response.body), closer: response.body}
 			upstream = *response
 			winningChannel = ch
@@ -397,173 +483,16 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		return lastCandidateErr
 	})
 
-	if routeErr != nil && h.store != nil {
-		// If all candidates for this specific model failed (after retry),
-		// attempt fallback to another operational channel that supports a different model!
-		allChannels, listErr := h.store.List(c.Request.Context())
-		if listErr == nil {
-			matcher := gatewayCandidateMatcher(proto)
-			var fallbackChannels []*channel.Channel
-			for _, altChan := range allChannels {
-				if !altChan.Enabled || (winChan != nil && altChan.ID == winChan.ID) {
-					continue
-				}
-				if altChan.LastStatus != probe.StatusOperational && altChan.LastStatus != "healthy" {
-					continue
-				}
-				if matcher != nil && !matcher(altChan) {
-					continue
-				}
-				// Skip channels that already failed during the primary model loop
-				alreadyTried := false
-				for _, cand := range candidates {
-					if cand.ID == altChan.ID {
-						alreadyTried = true
-						break
-					}
-				}
-				if alreadyTried {
-					continue
-				}
-				// Look for an alternate model not equivalent to requested model
-				hasAltModel := false
-				for _, m := range append([]string{altChan.PrimaryModel}, altChan.ExtraModels...) {
-					m = strings.TrimSpace(m)
-					if m != "" && !channel.AreModelsEquivalent(m, effectiveModel) {
-						hasAltModel = true
-						break
-					}
-				}
-				if hasAltModel {
-					fallbackChannels = append(fallbackChannels, altChan)
-				}
-			}
-
-			// Sort fallback candidates by lowest time-to-first-token first,
-			// falling back to total latency when the probe measured none.
-			sort.SliceStable(fallbackChannels, func(i, j int) bool {
-				latI := 999999
-				if fallbackChannels[i].LastTTFTMs != nil && *fallbackChannels[i].LastTTFTMs > 0 {
-					latI = *fallbackChannels[i].LastTTFTMs
-				} else if fallbackChannels[i].LastLatencyMs != nil && *fallbackChannels[i].LastLatencyMs > 0 {
-					latI = *fallbackChannels[i].LastLatencyMs
-				}
-				latJ := 999999
-				if fallbackChannels[j].LastTTFTMs != nil && *fallbackChannels[j].LastTTFTMs > 0 {
-					latJ = *fallbackChannels[j].LastTTFTMs
-				} else if fallbackChannels[j].LastLatencyMs != nil && *fallbackChannels[j].LastLatencyMs > 0 {
-					latJ = *fallbackChannels[j].LastLatencyMs
-				}
-				return latI < latJ
-			})
-
-			for _, altChan := range fallbackChannels {
-				altModel := altChan.PrimaryModel
-				if altModel == "" || channel.AreModelsEquivalent(altModel, effectiveModel) {
-					for _, m := range altChan.ExtraModels {
-						m = strings.TrimSpace(m)
-						if m != "" && !channel.AreModelsEquivalent(m, effectiveModel) {
-							altModel = m
-							break
-						}
-					}
-				}
-				if altModel == "" {
-					continue
-				}
-
-				var fallbackSucceeded bool
-				for fbAttempt := 0; fbAttempt <= 1; fbAttempt++ {
-					if fbAttempt > 0 {
-						if c.Request.Context().Err() != nil {
-							break
-						}
-						time.Sleep(100 * time.Millisecond)
-					}
-					fbStart := time.Now()
-					altResp, altErr := forwardUpstream(c.Request.Context(), c.Request, body, altChan, proto, effectiveModel, altModel)
-					fbLatency := int(time.Since(fbStart) / time.Millisecond)
-					step := TraceStep{
-						Index:       len(traceSteps) + 1,
-						ChannelName: altChan.Name,
-						ChannelID:   altChan.ID,
-						Endpoint:    altChan.Endpoint,
-						Model:       altModel,
-						Attempt:     fbAttempt + 1,
-						LatencyMs:   fbLatency,
-					}
-					if altErr != nil {
-						step.Error = altErr.Error()
-						step.RawError = altErr.Error()
-						traceSteps = append(traceSteps, step)
-						continue
-					}
-					if altResp.status < http.StatusOK || altResp.status >= http.StatusMultipleChoices {
-						errBytes, _ := io.ReadAll(io.LimitReader(altResp.body, 4096))
-						_ = altResp.body.Close()
-						rawErr := string(errBytes)
-						parsedErr := parseUpstreamErrorMessage(rawErr)
-						if parsedErr == "" {
-							parsedErr = fmt.Sprintf("HTTP %d", altResp.status)
-						}
-						step.StatusCode = altResp.status
-						step.Error = parsedErr
-						step.RawError = rawErr
-						traceSteps = append(traceSteps, step)
-						continue
-					}
-					prefix := make([]byte, 4096)
-					n, rErr := altResp.body.Read(prefix)
-					if n > 0 || rErr == nil || rErr == io.EOF {
-						winningTtft = int(time.Since(startOverall) / time.Millisecond)
-						altResp.body = &prefixedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix[:n]), altResp.body), closer: altResp.body}
-						upstream = *altResp
-						winningChannel = altChan
-						winChan = altChan
-						failedAttempts = append(failedAttempts, fmt.Sprintf("%s 降级至备用模型 [%s](%s)", effectiveModel, altChan.Name, altModel))
-						routeErr = nil
-						step.StatusCode = altResp.status
-						step.TtftMs = winningTtft
-						step.Succeeded = true
-						traceSteps = append(traceSteps, step)
-
-						if requestLog != nil && requestLog.ID > 0 {
-							requestLog.ChannelName = altChan.Name
-							requestLog.UpstreamModel = altModel
-							requestLog.Endpoint = altChan.Endpoint
-							requestLog.TtftMs = winningTtft
-							requestLog.LatencyMs = winningTtft
-							requestLog.IsFailover = true
-							requestLog.FailoverFrom = strings.Join(failedAttempts, " → ")
-							traceBytes, _ := json.Marshal(traceSteps)
-							requestLog.TraceJSON = string(traceBytes)
-							_ = h.store.UpdateLog(context.Background(), requestLog)
-						}
-						fallbackSucceeded = true
-						break
-					}
-					// Transport died before the first byte: the next attempt may
-					// still succeed, but the abandoned body must be closed or the
-					// keep-alive connection leaks (the primary loop closes this
-					// path; the fallback loop must too).
-					_ = altResp.body.Close()
-					step.StatusCode = altResp.status
-					step.Error = fmt.Sprintf("传输首字节中断: %v", rErr)
-					step.RawError = rErr.Error()
-					traceSteps = append(traceSteps, step)
-				}
-				if fallbackSucceeded {
-					break
-				}
-			}
-		}
-	}
-
 	totalLatency := int(time.Since(startOverall) / time.Millisecond)
 
 	if routeErr != nil {
-		if info := channel.FailureFromError(routeErr); info.RetryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(int(info.RetryAfter/time.Second)))
+		failureInfo := channel.FailureFromError(routeErr)
+		responseStatus := http.StatusBadGateway
+		if failureInfo.StatusCode == http.StatusTooManyRequests {
+			responseStatus = http.StatusTooManyRequests
+		}
+		if failureInfo.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(int(failureInfo.RetryAfter/time.Second)))
 		}
 		failoverDesc := ""
 		if len(failedAttempts) > 0 {
@@ -572,7 +501,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		traceBytes, _ := json.Marshal(traceSteps)
 		if requestLog != nil && requestLog.ID > 0 {
 			requestLog.ChannelName = "全渠道失败"
-			requestLog.StatusCode = http.StatusBadGateway
+			requestLog.StatusCode = responseStatus
 			requestLog.LatencyMs = totalLatency
 			requestLog.TtftMs = totalLatency
 			requestLog.ErrorMessage = routeErr.Error()
@@ -584,7 +513,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			_ = h.store.RecordLog(context.Background(), &channel.RequestLog{
 				Model:            effectiveModel,
 				ChannelName:      "全渠道失败",
-				StatusCode:       http.StatusBadGateway,
+				StatusCode:       responseStatus,
 				LatencyMs:        totalLatency,
 				TtftMs:           totalLatency,
 				PromptTokens:     initialPromptTokens,
@@ -602,7 +531,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			})
 		}
 		if proto == protocolAnthropic {
-			c.JSON(http.StatusBadGateway, gin.H{
+			c.JSON(responseStatus, gin.H{
 				"type": "error",
 				"error": gin.H{
 					"type":    "api_error",
@@ -611,7 +540,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			})
 			return
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": "all configured channels failed", "failure_class": channel.FailureLabel(channel.FailureFromError(routeErr))})
+		c.JSON(responseStatus, gin.H{"error": "all configured channels failed", "failure_class": channel.FailureLabel(failureInfo)})
 		return
 	}
 
@@ -863,6 +792,16 @@ func (h *Handler) gatewayModels(c *gin.Context) {
 	if c.Query("raw") == "true" || c.Query("raw") == "1" {
 		seen := make(map[string]struct{})
 		data := make([]model, 0)
+		hasEnabled := false
+		for _, ch := range channels {
+			if ch.Enabled {
+				hasEnabled = true
+				break
+			}
+		}
+		if hasEnabled {
+			data = append(data, model{ID: autoModelName, Object: "model", OwnedBy: "heigate"})
+		}
 		for _, ch := range channels {
 			if !ch.Enabled {
 				continue
@@ -913,6 +852,9 @@ func (h *Handler) gatewayModels(c *gin.Context) {
 	}
 
 	data := make([]model, 0, len(grouped))
+	if len(grouped) > 0 {
+		data = append(data, model{ID: autoModelName, Object: "model", Created: time.Now().Unix(), OwnedBy: "heigate"})
+	}
 	seenCanonical := make(map[string]struct{})
 	nowUnix := time.Now().Unix()
 

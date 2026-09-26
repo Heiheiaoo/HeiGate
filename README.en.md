@@ -17,7 +17,7 @@
 
 ## What it does
 
-If you juggle several AI API endpoints — official keys, a relay, a local Ollama — HeiGate puts them behind one local address. Your coding tools point at `http://127.0.0.1:8080` and it handles the rest:
+If you juggle several AI API endpoints — official keys, a relay, a local Ollama — HeiGate puts them behind one local address. Your coding tools point at the desktop default `http://127.0.0.1:18080` and it handles the rest:
 
 - **Multi-channel routing** — pick a channel by latency, a quality score, or round robin
 - **Automatic failover** — when a channel errors, rate-limits, or times out, the request moves to the next one; repeated failures trip a circuit breaker with a cooldown
@@ -26,13 +26,16 @@ If you juggle several AI API endpoints — official keys, a relay, a local Ollam
 - **Usage tracking** — every request records its channel, model, tokens, time to first token, and failover chain locally, with daily/model/channel rollups
 - **Client integration** — point the Claude desktop app or Codex at HeiGate with one click
 
-Everything lives in a SQLite file under `~/Library/Application Support/HeiGate`. Nothing is uploaded. The gateway listens on loopback only.
+Everything lives in a local SQLite file (macOS: `~/Library/Application Support/HeiGate`; Windows: `%APPDATA%\HeiGate`). Nothing is uploaded. The gateway listens on loopback only.
 
 ## Install
 
-Download the `.dmg` from [Releases](https://github.com/Heiheiaoo/heigate/releases) and drag it to Applications. Builds target Apple silicon (arm64).
+Download the matching build from [Releases](https://github.com/Heiheiaoo/heigate/releases):
 
-The bundle is not signed or notarised, so macOS will block the first launch: go to System Settings → Privacy & Security and choose "Open Anyway". Verify your download first:
+- Apple silicon Mac (arm64): download the `.dmg` and drag it to Applications
+- Windows 10/11 (x64): use `Setup.exe`, or download the portable `.zip`
+
+The builds are currently unsigned. On macOS, use System Settings → Privacy & Security → Open Anyway. Windows SmartScreen may require More info → Run anyway. Verify your download first:
 
 ```bash
 shasum -a 256 -c checksums.txt
@@ -47,28 +50,35 @@ The gateway key shown in the UI authenticates clients. It is stored at `~/Librar
 **Claude Code**
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:18080"
 export ANTHROPIC_AUTH_TOKEN="<gateway key from the UI>"
 ```
 
 **OpenAI-compatible clients** (Cursor, VS Code extensions, and so on)
 
-- Base URL: `http://127.0.0.1:8080/v1`
+- Base URL: `http://127.0.0.1:18080/v1`
 - API key: `<gateway key from the UI>`
 
 The gateway exposes `POST /v1/messages`, `POST /v1/chat/completions`, `POST /v1/responses`, and `GET /v1/models`.
 
 ## Build from source
 
-You need Go 1.27+, Node 22+, and pnpm 9+. Building the `.app` also requires the Xcode Command Line Tools.
+You need Go 1.27+, Node 22+, and pnpm 9+.
 
 ```bash
-make app     # build dist/HeiGate.app
+make app-macos-arm64  # macOS; also requires Xcode Command Line Tools
 open dist/HeiGate.app
 
 make run     # run from source with data in ./desktop-data
 make test    # backend and frontend tests
 make help    # list every target
+```
+
+On Windows 10/11, install the .NET 8 SDK; packaging the installer also requires NSIS:
+
+```powershell
+make windows          # build dist/windows-x64
+make package-windows  # create the portable zip and Setup.exe
 ```
 
 For development it is easier to run the two halves separately:
@@ -85,8 +95,8 @@ You normally don't need any. When you do, use environment variables:
 | Variable | Default | Notes |
 |---|---|---|
 | `HEIGATE_HOST` | `127.0.0.1` | Listen address. **Setting a non-loopback address disables the local-only protections and is not recommended** |
-| `HEIGATE_PORT` | `8080` | Listen port |
-| `DATA_DIR` | `~/Library/Application Support/HeiGate` | Where the database and gateway key are stored |
+| `HEIGATE_PORT` | `8080` from source; desktop prefers `18080` | Listen port |
+| `DATA_DIR` | Platform application data directory | Where the database and gateway key are stored |
 
 ## Security design
 

@@ -56,8 +56,8 @@
 打 tag 推上去即可：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-`.github/workflows/release.yml` 会在 macOS runner 上构建 `.app`、打包 `.dmg` 和 `.zip`、生成 checksums 并创建 Release。记得同步更新根目录的 `VERSION` 文件。
+`.github/workflows/release.yml` 会并行构建 macOS arm64 的 `.dmg` / `.zip` 和 Windows x64 的 `Setup.exe` / 便携 `.zip`，最后统一生成 checksums 并创建 Release。记得同步更新根目录的 `VERSION` 文件。

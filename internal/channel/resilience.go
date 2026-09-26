@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"errors"
 	"net"
 	"strings"
@@ -42,6 +43,9 @@ func FailureFromError(err error) FailureInfo {
 	if errors.As(err, &provider) {
 		return provider.FailureInfo()
 	}
+	if errors.Is(err, context.Canceled) {
+		return FailureInfo{Class: FailureClient}
+	}
 	if errors.Is(err, net.ErrClosed) {
 		return FailureInfo{Class: FailureNetwork}
 	}
@@ -52,7 +56,7 @@ func FailureCooldown(info FailureInfo, failures int) time.Duration {
 	if failures < 1 {
 		failures = 1
 	}
-	if info.RetryAfter > 0 {
+	if info.Class != FailureRateLimit && info.RetryAfter > 0 {
 		if info.RetryAfter > time.Hour {
 			return time.Hour
 		}
@@ -64,7 +68,9 @@ func FailureCooldown(info FailureInfo, failures int) time.Duration {
 	case FailureModel:
 		return 2 * time.Minute
 	case FailureRateLimit:
-		return 30 * time.Second
+		// Rate limiting is reported to the caller and failover logic, but this
+		// gateway does not impose a local cooldown.
+		return 0
 	case FailureProvider, FailureNetwork:
 		cooldown := 15 * time.Second
 		for step := 1; step < failures && cooldown < 5*time.Minute; step++ {
@@ -80,12 +86,12 @@ func FailureCooldown(info FailureInfo, failures int) time.Duration {
 }
 
 // FailureIsRetryable reports whether resending the same request could
-// plausibly succeed. A deterministic client-side rejection (bad request, bad
-// key, unknown model) fails identically on a second identical request, so
-// retrying only burns upstream quota and adds latency.
+// plausibly succeed immediately. Deterministic client-side rejections and
+// active rate limits should not be resent before the caller's cooldown or
+// failover logic gets a chance to run.
 func FailureIsRetryable(info FailureInfo) bool {
 	switch info.Class {
-	case FailureAuth, FailureModel, FailureClient:
+	case FailureAuth, FailureModel, FailureRateLimit, FailureClient:
 		return false
 	}
 	return true

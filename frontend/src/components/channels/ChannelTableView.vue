@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import type { Channel } from './types'
-import { probeModeLabel, probeModeTooltip, isPeriodicProbe } from './types'
 
 defineProps<{
   channels: Channel[]
@@ -49,9 +48,10 @@ function injectionClass(state?: string): string {
 
 function injectionLabel(state?: string): string {
   switch (state) {
-    case 'clean': return '无注入'
-    case 'suspected': return '疑似注入'
-    case 'detected': return '发现注入'
+    case 'clean': return '输入正常'
+    case 'suspected': return '输入偏高'
+    case 'detected': return '输入显著偏高'
+    case 'error': return '检测异常'
     default: return '未检测'
   }
 }
@@ -64,10 +64,9 @@ function injectionLabel(state?: string): string {
         <tr>
           <th style="min-width: 160px;">渠道名称</th>
           <th style="min-width: 150px;">支持模型</th>
-          <th style="width: 110px;">探活模式</th>
           <th style="width: 95px;">首字 TTFT</th>
           <th style="width: 110px;">健康状态</th>
-          <th style="width: 90px;">防注入</th>
+          <th style="width: 110px;">输入检测</th>
           <th style="width: 110px; text-align: right;">操作</th>
         </tr>
       </thead>
@@ -100,21 +99,6 @@ function injectionLabel(state?: string): string {
                 +{{ c.modelNames.length - 1 }}
               </span>
             </div>
-          </td>
-
-          <!-- 3. Probe Mode -->
-          <td>
-            <button
-              class="m26-probe-mode-tag"
-              :class="{ periodic: isPeriodicProbe(c) }"
-              :title="probeModeTooltip(c)"
-              @click.stop="emit('edit', c)"
-            >
-              <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0">
-                <path d="M2.5 4h11M2.5 8h7M2.5 12h5" stroke-linecap="round" />
-              </svg>
-              <span>{{ probeModeLabel(c) }}</span>
-            </button>
           </td>
 
           <!-- 5. Latency / TTFT -->

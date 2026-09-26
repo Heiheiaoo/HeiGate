@@ -161,6 +161,22 @@ func TestGatewayModelsReturnsEnabledUniqueModels(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Contains(t, recorder.Body.String(), `"gpt-test"`)
 	require.Contains(t, recorder.Body.String(), `"claude-test"`)
+	require.Contains(t, recorder.Body.String(), `"Auto"`)
+}
+
+func TestBestAutoModelPrefersHealthyFastModel(t *testing.T) {
+	primaryLatency, extraTTFT := 9000, 800
+	ch := &channel.Channel{
+		PrimaryModel:  "slow-primary",
+		ExtraModels:   []string{"fast-extra", "unknown"},
+		LastStatus:    probe.StatusDegraded,
+		LastLatencyMs: &primaryLatency,
+		ModelHealth: []channel.ModelHealth{
+			{Model: "fast-extra", Status: probe.StatusOperational, TTFTMs: &extraTTFT},
+			{Model: "unknown", Status: "unknown"},
+		},
+	}
+	require.Equal(t, "fast-extra", bestAutoModel(ch))
 }
 
 func TestStreamTokenTrackerOpenAIUsage(t *testing.T) {

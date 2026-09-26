@@ -28,6 +28,8 @@ jobs:
       - run: go test -race -count=1 ./...
       - name: Cross-compile the macOS gateway binary
         run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/heigate
+      - name: Cross-compile the Windows gateway binary
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/heigate
 
   frontend:
     name: UI typecheck, lint and test
@@ -54,7 +56,7 @@ jobs:
         working-directory: frontend
 
   app:
-    name: Build the macOS app bundle
+    name: Build macOS arm64 app
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -70,9 +72,38 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: make app
+      - run: make app-macos-arm64
       - name: Check the bundle layout
         run: |
           test -x dist/HeiGate.app/Contents/MacOS/HeiGate
           test -x dist/HeiGate.app/Contents/MacOS/heigate-gateway
           test -f dist/HeiGate.app/Contents/Info.plist
+
+  windows-app:
+    name: Build Windows x64 app
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build Windows desktop app
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -Version ((Get-Content VERSION -Raw).Trim())
+      - name: Check the app layout
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/windows-x64/HeiGate.exe)) { throw 'HeiGate.exe is missing' }
+          if (-not (Test-Path dist/windows-x64/heigate-gateway.exe)) { throw 'heigate-gateway.exe is missing' }

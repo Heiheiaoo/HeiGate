@@ -5,6 +5,9 @@
 !/internal/web/dist/.keep
 /desktop/macos/HeiGate
 /desktop/macos/*.app
+/desktop/windows/AppIcon.ico
+/desktop/windows/bin/
+/desktop/windows/obj/
 *.dmg
 *.zip
 

@@ -338,40 +338,11 @@ func TestProbeMethodsShareOneChannelInFlightSlot(t *testing.T) {
 	<-started
 
 	results, err := runner.ProbeModelNow(context.Background(), ch.ID, "extra")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrProbeBusy)
 	require.Empty(t, results)
 
 	close(release)
 	require.NoError(t, <-done)
-}
-
-// Adaptive backoff stretches the interval of a stable channel, is capped, and
-// never shortens a user-configured long interval.
-func TestAdaptiveProbeInterval(t *testing.T) {
-	base := 5 * time.Minute
-
-	require.Equal(t, base, AdaptiveProbeInterval(base, 0), "a fresh channel probes at its configured cadence")
-	require.Equal(t, base, AdaptiveProbeInterval(base, 4), "escalation starts after 5 clean probes")
-	require.Equal(t, 450*time.Second, AdaptiveProbeInterval(base, 5))
-	require.Equal(t, 600*time.Second, AdaptiveProbeInterval(base, 10))
-	require.Equal(t, 1200*time.Second, AdaptiveProbeInterval(base, 20))
-	require.Equal(t, 1200*time.Second, AdaptiveProbeInterval(base, 500), "streak keeps growing, interval does not")
-
-	// Manual-only channels have no cadence to stretch.
-	require.Equal(t, time.Duration(0), AdaptiveProbeInterval(0, 100))
-
-	// The common configuration: a channel probing every 30 minutes still gets
-	// a useful backoff, up to the cap.
-	require.Equal(t, 45*time.Minute, AdaptiveProbeInterval(30*time.Minute, 5))
-	require.Equal(t, time.Hour, AdaptiveProbeInterval(30*time.Minute, 10))
-	require.Equal(t, probeBackoffCap, AdaptiveProbeInterval(30*time.Minute, 100))
-
-	// Escalation is capped rather than multiplied indefinitely, and a channel
-	// the user already set slower than the cap keeps its own cadence.
-	require.Equal(t, 20*time.Minute, AdaptiveProbeInterval(5*time.Minute, 100))
-	require.Equal(t, 40*time.Minute, AdaptiveProbeInterval(10*time.Minute, 100))
-	require.Equal(t, probeBackoffCap, AdaptiveProbeInterval(45*time.Minute, 100))
-	require.Equal(t, 3*time.Hour, AdaptiveProbeInterval(3*time.Hour, 100))
 }
 
 // Only a fully failed probe clears the streak. A degraded channel is still
@@ -470,12 +441,9 @@ func TestProbeStreakResetsOnFailure(t *testing.T) {
 	if loaded.ProbeStreak != 0 {
 		t.Fatalf("failing probe left streak at %d, want 0", loaded.ProbeStreak)
 	}
-	if loaded.EffectiveIntervalSeconds != 300 {
-		t.Fatalf("effective interval = %d, want the configured 300 after a failure", loaded.EffectiveIntervalSeconds)
-	}
 }
 
-// A clean probe run raises the streak and therefore the effective interval.
+// A clean probe run still records successful health samples.
 func TestProbeStreakRisesAndStretchesInterval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
@@ -511,9 +479,6 @@ func TestProbeStreakRisesAndStretchesInterval(t *testing.T) {
 	}
 	if loaded.ProbeStreak != 5 {
 		t.Fatalf("streak = %d, want 5", loaded.ProbeStreak)
-	}
-	if loaded.EffectiveIntervalSeconds != 450 {
-		t.Fatalf("effective interval = %d, want 450 (1.5x) once the channel proved stable", loaded.EffectiveIntervalSeconds)
 	}
 }
 

@@ -62,6 +62,66 @@ func TestChannelStoreCRUD(t *testing.T) {
 	}
 }
 
+func TestChannelModelHealthPersistsAndLoads(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:desktop_model_health_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := &Channel{Name: "models", Provider: probe.ProviderOpenAI, Endpoint: "https://example.com", APIKey: "k", PrimaryModel: "primary", Enabled: true}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+	latency, ttft := 1200, 900
+	checked := time.Now().UTC()
+	if err := store.SetModelHealth(context.Background(), ch.ID, ModelHealth{Model: "extra", Status: probe.StatusDegraded, LatencyMs: &latency, TTFTMs: &ttft, Error: "slow", CheckedAt: &checked}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.ModelHealth) != 1 || loaded.ModelHealth[0].Model != "extra" || loaded.ModelHealth[0].Status != probe.StatusDegraded || *loaded.ModelHealth[0].TTFTMs != ttft {
+		t.Fatalf("unexpected persisted model health: %#v", loaded.ModelHealth)
+	}
+}
+
+func TestChannelModelHealthPrunesRemovedModels(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:desktop_model_health_prune_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := &Channel{Name: "models", Provider: probe.ProviderOpenAI, Endpoint: "https://example.com", APIKey: "k", PrimaryModel: "primary", ExtraModels: []string{"extra", "keep"}, Enabled: true}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range []string{"extra", "keep"} {
+		if err := store.SetModelHealth(context.Background(), ch.ID, ModelHealth{Model: model, Status: probe.StatusOperational}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ch.ExtraModels = []string{"keep"}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.ModelHealth) != 1 || loaded.ModelHealth[0].Model != "keep" {
+		t.Fatalf("stale model health was not pruned: %#v", loaded.ModelHealth)
+	}
+}
+
 func TestChannelStoreLogs(t *testing.T) {
 	db, err := sql.Open("sqlite", "file:desktop_channel_logs_test?mode=memory&cache=shared")
 	if err != nil {

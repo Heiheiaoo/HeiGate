@@ -27,14 +27,14 @@ type Channel struct {
 	PrimaryModel       string     `json:"primary_model"`
 	ExtraModels        []string   `json:"extra_models"`
 	Enabled            bool       `json:"enabled"`
-	IntervalSeconds    int        `json:"interval_seconds"`
+	IntervalSeconds    int        `json:"-"` // legacy database column; automatic probes are disabled
 	LastStatus         string     `json:"last_status"`
 	LastLatencyMs      *int       `json:"last_latency_ms"`
 	LastTTFTMs         *int       `json:"last_ttft_ms"`
 	LastPingLatencyMs  *int       `json:"last_ping_latency_ms"`
 	LastError          string     `json:"last_error"`
 	LastCheckedAt      *time.Time `json:"last_checked_at"`
-	ProbeStreak        int        `json:"probe_streak"`
+	ProbeStreak        int        `json:"-"` // legacy database column
 	FailureCount       int        `json:"failure_count"`
 	CircuitState       string     `json:"circuit_state"`
 	CooldownUntil      *time.Time `json:"cooldown_until"`
@@ -48,7 +48,17 @@ type Channel struct {
 	// EffectiveIntervalSeconds is derived, not stored: it is the interval the
 	// scheduler will actually use after adaptive backoff, so the UI can show
 	// the real cadence instead of the configured one.
-	EffectiveIntervalSeconds int `json:"effective_interval_seconds"`
+	EffectiveIntervalSeconds int           `json:"-"` // legacy derived field
+	ModelHealth              []ModelHealth `json:"model_health,omitempty"`
+}
+
+type ModelHealth struct {
+	Model     string     `json:"model"`
+	Status    string     `json:"status"`
+	LatencyMs *int       `json:"latency_ms,omitempty"`
+	TTFTMs    *int       `json:"ttft_ms,omitempty"`
+	Error     string     `json:"error,omitempty"`
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
 }
 
 // LogEvent represents a real-time event for desktop request logs.
@@ -126,6 +136,17 @@ CREATE TABLE IF NOT EXISTS desktop_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS desktop_model_health (
+  channel_id INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  latency_ms INTEGER,
+  ttft_ms INTEGER,
+  error TEXT NOT NULL DEFAULT '',
+  checked_at TEXT,
+  PRIMARY KEY (channel_id, model),
+  FOREIGN KEY (channel_id) REFERENCES desktop_channels(id) ON DELETE CASCADE
 );
 `
 
@@ -210,7 +231,47 @@ SET status_code = 200,
 WHERE status_code = 502
   AND completion_tokens > 0
   AND error_message LIKE '%context canceled%'`)
+	if err := s.pruneAllModelHealth(ctx); err != nil {
+		return fmt.Errorf("prune stale model health: %w", err)
+	}
 
+	return nil
+}
+
+func (s *Store) pruneAllModelHealth(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, primary_model, extra_models_json FROM desktop_channels`)
+	if err != nil {
+		return err
+	}
+	type channelModels struct {
+		id      int64
+		primary string
+		extra   string
+	}
+	var channels []channelModels
+	for rows.Next() {
+		var item channelModels
+		if err := rows.Scan(&item.id, &item.primary, &item.extra); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		channels = append(channels, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range channels {
+		var extra []string
+		if err := json.Unmarshal([]byte(item.extra), &extra); err != nil {
+			return err
+		}
+		if err := s.PruneModelHealth(ctx, item.id, append([]string{item.primary}, extra...)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -246,6 +307,14 @@ FROM desktop_channels ORDER BY id ASC`)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate desktop channels: %w", err)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, channel := range channels {
+		if err := s.loadModelHealth(ctx, channel); err != nil {
+			return nil, err
+		}
+	}
 	return channels, nil
 }
 
@@ -265,7 +334,42 @@ FROM desktop_channels WHERE id = ?`, id)
 		}
 		return nil, err
 	}
+	if err := s.loadModelHealth(ctx, channel); err != nil {
+		return nil, err
+	}
 	return channel, nil
+}
+
+func (s *Store) loadModelHealth(ctx context.Context, ch *Channel) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT model, status, latency_ms, ttft_ms, error, checked_at FROM desktop_model_health WHERE channel_id = ? ORDER BY model`, ch.ID)
+	if err != nil {
+		return fmt.Errorf("list model health: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var h ModelHealth
+		var latency, ttft sql.NullInt64
+		var checked sql.NullString
+		if err := rows.Scan(&h.Model, &h.Status, &latency, &ttft, &h.Error, &checked); err != nil {
+			return err
+		}
+		if latency.Valid {
+			v := int(latency.Int64)
+			h.LatencyMs = &v
+		}
+		if ttft.Valid {
+			v := int(ttft.Int64)
+			h.TTFTMs = &v
+		}
+		h.CheckedAt = parseTime(checked)
+		ch.ModelHealth = append(ch.ModelHealth, h)
+	}
+	return rows.Err()
+}
+
+func (s *Store) SetModelHealth(ctx context.Context, channelID int64, health ModelHealth) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO desktop_model_health(channel_id, model, status, latency_ms, ttft_ms, error, checked_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(channel_id, model) DO UPDATE SET status=excluded.status, latency_ms=excluded.latency_ms, ttft_ms=excluded.ttft_ms, error=excluded.error, checked_at=excluded.checked_at`, channelID, health.Model, health.Status, nullableInt(health.LatencyMs), nullableInt(health.TTFTMs), health.Error, nullableTime(health.CheckedAt))
+	return err
 }
 
 func (s *Store) Save(ctx context.Context, channel *Channel) error {
@@ -315,6 +419,9 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
 		}
 		channel.ID, err = result.LastInsertId()
 		channel.EffectiveIntervalSeconds = effectiveIntervalSeconds(channel)
+		if err == nil {
+			err = s.PruneModelHealth(ctx, channel.ID, append([]string{channel.PrimaryModel}, channel.ExtraModels...))
+		}
 		return err
 	}
 	channel.EffectiveIntervalSeconds = effectiveIntervalSeconds(channel)
@@ -328,7 +435,40 @@ func (s *Store) Save(ctx context.Context, channel *Channel) error {
  WHERE id=?`, args...); err != nil {
 		return fmt.Errorf("update desktop channel: %w", err)
 	}
-	return nil
+	return s.PruneModelHealth(ctx, channel.ID, append([]string{channel.PrimaryModel}, channel.ExtraModels...))
+}
+
+// PruneModelHealth removes snapshots for models no longer configured on the
+// channel, preventing deleted models from reappearing as stale health rows.
+func (s *Store) PruneModelHealth(ctx context.Context, channelID int64, models []string) error {
+	if channelID <= 0 {
+		return nil
+	}
+	kept := make([]string, 0, len(models))
+	seen := make(map[string]struct{})
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		if _, exists := seen[model]; exists {
+			continue
+		}
+		seen[model] = struct{}{}
+		kept = append(kept, model)
+	}
+	if len(kept) == 0 {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM desktop_model_health WHERE channel_id = ?`, channelID)
+		return err
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(kept)), ",")
+	args := make([]any, 0, len(kept)+1)
+	args = append(args, channelID)
+	for _, model := range kept {
+		args = append(args, model)
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM desktop_model_health WHERE channel_id = ? AND model NOT IN (`+placeholders+`)`, args...)
+	return err
 }
 
 // copyRuntimeState copies the runtime health fields from src to dst. It is the
@@ -350,10 +490,7 @@ func copyRuntimeState(dst, src *Channel) {
 // this channel, after adaptive backoff. Derived on read so the UI can show the
 // real interval rather than the configured one.
 func effectiveIntervalSeconds(ch *Channel) int {
-	if ch.IntervalSeconds <= 0 {
-		return 0
-	}
-	return int(AdaptiveProbeInterval(time.Duration(ch.IntervalSeconds)*time.Second, ch.ProbeStreak).Seconds())
+	return 0
 }
 
 // CopyConfigState copies the user-editable configuration fields from src to

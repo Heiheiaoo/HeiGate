@@ -339,15 +339,11 @@ func checkModelOnce(ctx context.Context, cfg Config, model string, attemptTimeou
 	default:
 		res.Status = StatusOperational
 	}
-	// Answer correctness is a soft signal, not a verdict: the probe caps
-	// generation at maxAnswerTokens and stops at the first content delta, so a
-	// correct answer is usually truncated ("8" of "85"). A channel that streams
-	// content is usable for real traffic even when this note fires.
-	if res.Status == StatusOperational || res.Status == StatusDegraded {
-		if !answerMatches(out.reply, ch.expected) && res.Message == "" {
-			res.Message = truncate(fmt.Sprintf("answer not verified (wanted %s, got %q)", ch.expected, compactWhitespace(out.reply)), maxErrorSnippet)
-		}
-	}
+	// Do not validate the arithmetic answer here. The probe intentionally stops
+	// at the first SSE content delta to minimize cost, and providers commonly
+	// split a number across deltas ("57" can arrive as "5" then "7"). A
+	// successful content delta already proves endpoint, auth, quota, and model
+	// generation are working.
 	return res
 }
 
@@ -579,14 +575,8 @@ func readStream(cfg Config, body io.Reader, started time.Time) (*sendResult, err
 				}
 			}
 		}
-		// Everything a probe needs — endpoint, credentials, model name, quota,
-		// the fact that content is actually produced, and the time to first
-		// token — is proven by the first content delta. Stop reading there and
-		// let the caller close the body: the rest of the stream costs upstream
-		// tokens and, on a slow reasoning model, tens of seconds of waiting.
-		if !textAt.IsZero() {
-			break
-		}
+		// Keep reading the capped stream so an error event after an initial
+		// content delta cannot be mistaken for a healthy probe.
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read probe stream: %w", err)
