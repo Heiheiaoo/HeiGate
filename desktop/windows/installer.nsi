@@ -31,10 +31,11 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !define MUI_ABORTWARNING
 !define MUI_ICON "AppIcon.ico"
 !define MUI_UNICON "AppIcon.ico"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\HeiGate.exe"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_FINISHPAGE_RUN "$INSTDIR\HeiGate.exe"
+!insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
 
