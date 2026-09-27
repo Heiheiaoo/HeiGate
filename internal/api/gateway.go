@@ -303,7 +303,8 @@ func readInitialStreamPrefix(body io.Reader) ([]byte, error) {
 		n, err := body.Read(buf)
 		if n > 0 {
 			prefix = append(prefix, buf[:n]...)
-			if bytes.Contains(prefix, []byte("\n\n")) || bytes.Contains(prefix, []byte("\r\n\r\n")) {
+			if (bytes.Contains(prefix, []byte("\n\n")) || bytes.Contains(prefix, []byte("\r\n\r\n"))) &&
+				(upstreamStreamErrorExists(prefix) || upstreamStreamHasOutput(prefix)) {
 				return prefix, nil
 			}
 		}
@@ -315,6 +316,11 @@ func readInitialStreamPrefix(body io.Reader) ([]byte, error) {
 		}
 	}
 	return prefix, nil
+}
+
+func upstreamStreamErrorExists(prefix []byte) bool {
+	_, _, ok := upstreamStreamError(prefix)
+	return ok
 }
 
 func upstreamStreamError(prefix []byte) (string, int, bool) {
@@ -332,6 +338,37 @@ func upstreamStreamError(prefix []byte) (string, int, bool) {
 		}
 	}
 	return "", 0, false
+}
+
+func upstreamStreamHasOutput(prefix []byte) bool {
+	for _, line := range strings.Split(string(prefix), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var event map[string]any
+		if json.Unmarshal([]byte(payload), &event) != nil {
+			continue
+		}
+		typ, _ := event["type"].(string)
+		switch typ {
+		case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta",
+			"response.function_call_arguments.delta", "response.audio.delta", "content_block_delta":
+			return true
+		}
+		if choices, ok := event["choices"].([]any); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]any); ok {
+				if delta, ok := choice["delta"].(map[string]any); ok && len(delta) > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func supportedReasoningEfforts(message string) []string {
