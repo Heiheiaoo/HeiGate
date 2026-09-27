@@ -185,6 +185,25 @@ internal sealed class MainWindow : Form
     private bool _started;
     private bool _shuttingDown;
 
+    // Automatic recovery is bounded: a gateway that dies on every start (a
+    // corrupt database, a missing binary) must not loop forever or stack up
+    // error dialogs. A run that stayed healthy this long counts as a fresh
+    // incident rather than part of a crash loop.
+    private const int MaxAutoRestartAttempts = 3;
+    private static readonly TimeSpan StableRunTime = TimeSpan.FromSeconds(60);
+    private int _autoRestartAttempts;
+    private DateTimeOffset? _healthySince;
+    private bool _recovering;
+    private string _lastStartError = string.Empty;
+
+    private enum StartOutcome
+    {
+        Started,
+        Failed,
+        // A failure retrying cannot fix; the user has already been told.
+        Fatal,
+    }
+
     public MainWindow()
     {
         Text = "HeiGate";
@@ -218,7 +237,10 @@ internal sealed class MainWindow : Form
                 return;
             }
             _started = true;
-            await StartGatewayAndOpenAsync();
+            if (await StartGatewayAndOpenAsync() == StartOutcome.Failed)
+            {
+                await RecoverGatewayAsync();
+            }
         };
 
         _gateway.UnexpectedExit += (_, _) =>
@@ -229,11 +251,7 @@ internal sealed class MainWindow : Form
             }
             try
             {
-                BeginInvoke(new Action(async () =>
-                {
-                    await Task.Delay(750);
-                    await StartGatewayAndOpenAsync();
-                }));
+                BeginInvoke(new Action(async () => await RecoverGatewayAsync()));
             }
             catch (InvalidOperationException)
             {
@@ -248,8 +266,14 @@ internal sealed class MainWindow : Form
         {
             return;
         }
+        // An explicit restart is the user asking to try again, so it gets a
+        // fresh recovery budget and reports its own failure directly.
+        _autoRestartAttempts = 0;
         _gateway.Stop();
-        await StartGatewayAndOpenAsync();
+        if (await StartGatewayAndOpenAsync() == StartOutcome.Failed)
+        {
+            ShowStartupError(_lastStartError);
+        }
     }
 
     public void Shutdown()
@@ -259,14 +283,67 @@ internal sealed class MainWindow : Form
         _webView.Dispose();
     }
 
-    private async Task StartGatewayAndOpenAsync()
+    private async Task RecoverGatewayAsync()
+    {
+        // The exit event and a failed start can both ask for recovery for the
+        // same incident; only one recovery loop may run.
+        if (_shuttingDown || _recovering)
+        {
+            return;
+        }
+        _recovering = true;
+        try
+        {
+            if (_healthySince is { } since && DateTimeOffset.Now - since >= StableRunTime)
+            {
+                _autoRestartAttempts = 0;
+            }
+            _healthySince = null;
+
+            while (!_shuttingDown)
+            {
+                if (_autoRestartAttempts >= MaxAutoRestartAttempts)
+                {
+                    _statusLabel.Text = "本地网关启动失败，可从托盘菜单「重启本地网关」重试";
+                    _statusLabel.Visible = true;
+                    _webView.Visible = false;
+                    ShowStartupError($"本地网关连续 {MaxAutoRestartAttempts} 次启动失败。{_lastStartError}");
+                    return;
+                }
+                _autoRestartAttempts++;
+                _statusLabel.Text = $"本地网关意外退出，正在重启（第 {_autoRestartAttempts} 次）…";
+                _statusLabel.Visible = true;
+                _webView.Visible = false;
+                await Task.Delay(TimeSpan.FromSeconds(1 << (_autoRestartAttempts - 1)));
+                if (await StartGatewayAndOpenAsync() != StartOutcome.Failed)
+                {
+                    return;
+                }
+            }
+        }
+        finally
+        {
+            _recovering = false;
+        }
+    }
+
+    private static void ShowStartupError(string message)
+    {
+        MessageBox.Show(
+            string.IsNullOrWhiteSpace(message) ? "本地网关启动失败。" : message,
+            "HeiGate",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
+    }
+
+    private async Task<StartOutcome> StartGatewayAndOpenAsync()
     {
         await _restartLock.WaitAsync();
         try
         {
             if (_shuttingDown)
             {
-                return;
+                return StartOutcome.Fatal;
             }
 
             _statusLabel.Text = "正在启动本地网关…";
@@ -297,6 +374,8 @@ internal sealed class MainWindow : Form
             _webView.Source = new Uri(baseUrl);
             _webView.Visible = true;
             _statusLabel.Visible = false;
+            _healthySince = DateTimeOffset.Now;
+            return StartOutcome.Started;
         }
         catch (WebView2RuntimeNotFoundException)
         {
@@ -310,15 +389,15 @@ internal sealed class MainWindow : Form
             {
                 OpenExternal(WebViewRuntimeUrl);
             }
+            return StartOutcome.Fatal;
         }
         catch (Exception exception)
         {
+            // No dialog here: the caller decides whether to retry quietly or
+            // report, so a crash loop produces one message instead of many.
             _statusLabel.Text = "本地网关启动失败";
-            MessageBox.Show(
-                exception.Message,
-                "HeiGate",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+            _lastStartError = exception.Message;
+            return StartOutcome.Failed;
         }
         finally
         {

@@ -481,16 +481,20 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				return streamErr
 			}
 			winningTtft = int(time.Since(startOverall) / time.Millisecond)
-			// RouteCandidates persists the channel runtime state after this
-			// callback returns. Carry the measured first-byte time through the
-			// channel object so an old TTFT cannot survive a new request.
-			winningTtftCopy := winningTtft
-			ch.LastTTFTMs = &winningTtftCopy
+			// The request log keeps the client-perceived wait (including any
+			// failed candidates), but the channel metric must describe only this
+			// channel: measure from this attempt. A non-streaming response has
+			// no early first byte — headers arrive after the whole generation —
+			// so it leaves the channel's last real TTFT untouched.
+			attemptTtft := int(time.Since(attemptStart) / time.Millisecond)
+			if isStreamRequest {
+				ch.LastTTFTMs = &attemptTtft
+			}
 			response.body = &prefixedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix[:n]), response.body), closer: response.body}
 			upstream = *response
 			winningChannel = ch
 			step.StatusCode = response.status
-			step.TtftMs = winningTtft
+			step.TtftMs = attemptTtft
 			step.Succeeded = true
 			traceSteps = append(traceSteps, step)
 

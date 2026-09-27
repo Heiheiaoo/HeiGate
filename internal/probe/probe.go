@@ -55,10 +55,10 @@ const (
 	// ScheduleBuffer is extra slack added to the per-run deadline by schedulers.
 	ScheduleBuffer = 10 * time.Second
 
-	// maxAnswerTokens is deliberately tiny: the probe aborts the stream at the
-	// first content delta anyway, so the cap only bounds what a provider may
-	// generate before that. It is not 1 because some upstreams reject that
-	// outright (B.AI: "max_tokens must be greater than 2"); 16 clears every
+	// maxAnswerTokens is deliberately tiny: the probe reads the whole stream so
+	// a later in-stream error is not mistaken for health, and this cap keeps
+	// that stream short and cheap. It is not 1 because some upstreams reject
+	// that outright (B.AI: "max_tokens must be greater than 2"); 16 clears every
 	// lower bound seen in the wild while keeping generation negligible.
 	maxAnswerTokens  = 16
 	maxErrorSnippet  = 300
@@ -339,11 +339,10 @@ func checkModelOnce(ctx context.Context, cfg Config, model string, attemptTimeou
 	default:
 		res.Status = StatusOperational
 	}
-	// Do not validate the arithmetic answer here. The probe intentionally stops
-	// at the first SSE content delta to minimize cost, and providers commonly
-	// split a number across deltas ("57" can arrive as "5" then "7"). A
-	// successful content delta already proves endpoint, auth, quota, and model
-	// generation are working.
+	// Do not validate the arithmetic answer here. Generation is capped at
+	// maxAnswerTokens and providers commonly split a number across deltas ("57"
+	// can arrive as "5" then "7"), so a truncated answer is normal. Streamed
+	// content already proves endpoint, auth, quota, and model generation work.
 	return res
 }
 

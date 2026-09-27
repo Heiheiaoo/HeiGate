@@ -17,9 +17,10 @@ var (
 	ErrChannelDisabled = errors.New("channel is disabled")
 )
 
-// ProbeRunner schedules health probes for local channels. Each channel owns
-// one timer and one in-flight slot, so a slow upstream can never pile up
-// overlapping probes for the same channel.
+// ProbeRunner runs on-demand health probes for local channels. Nothing is
+// scheduled in the background; each channel owns one in-flight slot (shared
+// with injection checks) so explicit diagnostics can never overlap and trip
+// provider-side burst limits.
 type ProbeRunner struct {
 	store *Store
 

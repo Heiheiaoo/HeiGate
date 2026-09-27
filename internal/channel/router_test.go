@@ -149,8 +149,15 @@ func TestFailureClassification(t *testing.T) {
 	if info.Class != FailureRateLimit {
 		t.Fatalf("expected rate limit classification, got %#v", info)
 	}
-	if FailureCooldown(info, 1) != 0 {
-		t.Fatalf("rate limit should not impose a local cooldown")
+	if FailureCooldown(info, 1) != 15*time.Second {
+		t.Fatalf("rate limit without Retry-After should cool down for 15s, got %s", FailureCooldown(info, 1))
+	}
+	if FailureCooldown(info, 3) != time.Minute {
+		t.Fatalf("repeated rate limits should back off, got %s", FailureCooldown(info, 3))
+	}
+	info.RetryAfter = 42 * time.Second
+	if FailureCooldown(info, 1) != 42*time.Second {
+		t.Fatalf("rate limit should honour Retry-After, got %s", FailureCooldown(info, 1))
 	}
 	if FailureIsRetryable(info) {
 		t.Fatal("rate limits must not be retried immediately on the same channel")
@@ -334,3 +341,42 @@ type upstreamStatusStub struct{ status int }
 func (e *upstreamStatusStub) Error() string { return "stub upstream error" }
 
 func (e *upstreamStatusStub) FailureInfo() FailureInfo { return ClassifyStatus(e.status) }
+
+// A 429 must bench the channel for a while. Without a cooldown the router
+// promotes it to a half-open probe at the front of the queue, so every request
+// would hit the rate-limited upstream first before failing over.
+func TestRateLimitedChannelIsNotTriedFirstOnEveryRequest(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:desktop_router_rate_limit?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited := &Channel{Name: "limited", Provider: probe.ProviderOpenAI, Endpoint: "https://limited.example", APIKey: "k", PrimaryModel: "m", Enabled: true, LastStatus: probe.StatusOperational}
+	healthy := &Channel{Name: "healthy", Provider: probe.ProviderOpenAI, Endpoint: "https://healthy.example", APIKey: "k", PrimaryModel: "m", Enabled: true, LastStatus: probe.StatusOperational}
+	for _, ch := range []*Channel{limited, healthy} {
+		if err := store.Save(context.Background(), ch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	router := NewRouter(store)
+	limitedHits := 0
+	for i := 0; i < 10; i++ {
+		_, err := router.Route(context.Background(), "m", RouteSmartQuality, func(_ context.Context, ch *Channel) error {
+			if ch.Name == "limited" {
+				limitedHits++
+				return &upstreamStatusStub{status: 429}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if limitedHits != 1 {
+		t.Fatalf("rate-limited channel was tried %d times across 10 requests, want 1", limitedHits)
+	}
+}

@@ -26,7 +26,7 @@ pnpm --dir frontend run lint
 pnpm --dir frontend run test:run
 ```
 
-CI 会跑同样的检查，外加 `go test -race` 和 macOS 上的 `.app` 构建。
+CI 会跑同样的检查，外加 `go test -race`、macOS 上的 `.app` 构建和 Windows 上的桌面应用构建。
 
 ## 一些约定
 

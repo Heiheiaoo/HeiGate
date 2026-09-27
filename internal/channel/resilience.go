@@ -56,7 +56,7 @@ func FailureCooldown(info FailureInfo, failures int) time.Duration {
 	if failures < 1 {
 		failures = 1
 	}
-	if info.Class != FailureRateLimit && info.RetryAfter > 0 {
+	if info.RetryAfter > 0 {
 		if info.RetryAfter > time.Hour {
 			return time.Hour
 		}
@@ -67,11 +67,12 @@ func FailureCooldown(info FailureInfo, failures int) time.Duration {
 		return 10 * time.Minute
 	case FailureModel:
 		return 2 * time.Minute
-	case FailureRateLimit:
-		// Rate limiting is reported to the caller and failover logic, but this
-		// gateway does not impose a local cooldown.
-		return 0
-	case FailureProvider, FailureNetwork:
+	case FailureRateLimit, FailureProvider, FailureNetwork:
+		// A rate-limited channel needs a cooldown too: the router promotes any
+		// failed channel whose cooldown has expired to a half-open probe at the
+		// front of the queue, so a zero cooldown would send every request to the
+		// limited upstream first. A cooling channel is still used as a last
+		// resort when nothing else can serve the model.
 		cooldown := 15 * time.Second
 		for step := 1; step < failures && cooldown < 5*time.Minute; step++ {
 			cooldown *= 2
