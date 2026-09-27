@@ -257,6 +257,101 @@ func parseUpstreamErrorMessage(raw string) string {
 	return raw
 }
 
+// adaptUnsupportedReasoningEffort adjusts only an explicit provider
+// compatibility error. Different OpenAI-compatible upstreams use different
+// reasoning effort vocabularies, so a gateway request cannot safely rewrite
+// high before it knows what the selected provider accepts.
+func adaptUnsupportedReasoningEffort(body []byte, message string) ([]byte, bool) {
+	supported := supportedReasoningEfforts(message)
+	if len(supported) == 0 {
+		return nil, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return nil, false
+	}
+	changed := false
+	if effort, ok := payload["reasoning_effort"].(string); ok {
+		if replacement := compatibleReasoningEffort(effort, supported); replacement != "" && replacement != effort {
+			payload["reasoning_effort"] = replacement
+			changed = true
+		}
+	}
+	if reasoning, ok := payload["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok {
+			if replacement := compatibleReasoningEffort(effort, supported); replacement != "" && replacement != effort {
+				reasoning["effort"] = replacement
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	adapted, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	return adapted, true
+}
+
+func supportedReasoningEfforts(message string) []string {
+	lower := strings.ToLower(message)
+	marker := strings.Index(lower, "supported types")
+	if marker < 0 {
+		marker = strings.Index(lower, "supported values")
+	}
+	if marker < 0 {
+		return nil
+	}
+	text := lower[marker:]
+	known := []string{"xhigh", "high", "medium", "low", "minimal"}
+	seen := make(map[string]struct{}, len(known))
+	for _, field := range strings.Fields(text) {
+		field = strings.Trim(field, ".,;:()[]{}\"'")
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		for _, candidate := range known {
+			if field == candidate {
+				seen[field] = struct{}{}
+				break
+			}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for _, candidate := range known {
+		if _, ok := seen[candidate]; ok {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
+func compatibleReasoningEffort(requested string, supported []string) string {
+	requested = strings.ToLower(strings.TrimSpace(requested))
+	for _, effort := range supported {
+		if effort == requested {
+			return requested
+		}
+	}
+	preferences := map[string][]string{
+		"high":    {"xhigh", "medium", "low"},
+		"xhigh":   {"medium", "high", "low"},
+		"medium":  {"high", "xhigh", "low"},
+		"low":     {"medium", "high", "xhigh"},
+		"minimal": {"low", "medium", "high", "xhigh"},
+	}
+	for _, candidate := range preferences[requested] {
+		for _, effort := range supported {
+			if effort == candidate {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
 func upstreamErrorPayload(raw []byte) (string, int, bool) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &envelope); err != nil {
@@ -406,6 +501,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			return fmt.Errorf("channel %q has no usable model", ch.Name)
 		}
 		var lastCandidateErr error
+		retryBody := body
 		for attempt := 0; attempt <= 1; attempt++ {
 			if attempt > 0 {
 				if ctx.Err() != nil {
@@ -414,7 +510,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				time.Sleep(100 * time.Millisecond)
 			}
 			attemptStart := time.Now()
-			response, requestErr := forwardUpstream(ctx, c.Request, body, ch, proto, effectiveModel, upstreamModel)
+			response, requestErr := forwardUpstream(ctx, c.Request, retryBody, ch, proto, effectiveModel, upstreamModel)
 			attemptLatency := int(time.Since(attemptStart) / time.Millisecond)
 			step := TraceStep{
 				Index:       len(traceSteps) + 1,
@@ -455,6 +551,9 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				// Only resend when the outcome could differ. A deterministic 4xx
 				// (bad request, bad key, unknown model) would fail identically.
 				if attempt == 0 && channel.FailureIsRetryable(upErr.FailureInfo()) {
+					if adapted, ok := adaptUnsupportedReasoningEffort(body, parsedErr); ok {
+						retryBody = adapted
+					}
 					continue
 				}
 				failedAttempts = append(failedAttempts, fmt.Sprintf("%s (%d: %s)", ch.Name, response.status, parsedErr))

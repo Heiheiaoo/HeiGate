@@ -525,7 +525,7 @@ func (h *Handler) writeCodexConfig(baseURL string, models []string, defaultModel
 			"description":             fmt.Sprintf("HeiGate 调度: %s", m),
 			"context_window":          1000000,
 			"max_context_window":      1000000,
-			"default_reasoning_level": "high",
+			"default_reasoning_level": "medium",
 			"input_modalities":        []string{"text", "image"},
 			"service_tiers":           []string{"priority"},
 		})
