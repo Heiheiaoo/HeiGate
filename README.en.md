@@ -4,9 +4,9 @@
 
 # HeiGate
 
-**An AI API gateway that runs on your own Mac. Multi-channel routing, automatic failover, usage tracking — your data never leaves the machine.**
+**An AI API gateway that runs on your own computer (macOS or Windows). Multi-channel routing, automatic failover, usage tracking — your data never leaves the machine.**
 
-[![CI](https://github.com/Heiheiaoo/heigate/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/heigate/actions/workflows/ci.yml)
+[![CI](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8.svg)](https://go.dev/)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)](https://vuejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -22,7 +22,7 @@ If you juggle several AI API endpoints — official keys, a relay, a local Ollam
 - **Multi-channel routing** — pick a channel by latency, a quality score, or round robin
 - **Automatic failover** — when a channel errors, rate-limits, or times out, the request moves to the next one; repeated failures trip a circuit breaker with a cooldown
 - **Protocol translation** — talk to an OpenAI-compatible upstream with an Anthropic client; requests and responses (including streaming) are converted on the fly
-- **Health probes** — periodically exercise the primary model with a tiny arithmetic question, with on-demand queued checks for every configured model
+- **Health probes** — on demand, exercise the primary model with a tiny arithmetic question, with queued checks for every configured model when you ask for them; nothing spends quota in the background
 - **Usage tracking** — every request records its channel, model, tokens, time to first token, and failover chain locally, with daily/model/channel rollups
 - **Client integration** — point the Claude desktop app or Codex at HeiGate with one click
 
@@ -30,24 +30,34 @@ Everything lives in a local SQLite file (macOS: `~/Library/Application Support/H
 
 ## Install
 
-Download the matching build from [Releases](https://github.com/Heiheiaoo/heigate/releases):
+Download the matching build from [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases):
 
 - Apple silicon Mac (arm64): download the `.dmg` and drag it to Applications
 - Windows 10/11 (x64): use `Setup.exe`, or download the portable `.zip`
 
-The builds do not use an Apple Developer ID or Windows code-signing certificate yet. On macOS, use System Settings → Privacy & Security → Open Anyway if macOS cannot verify the developer. If macOS reports that the app is damaged, quit the disk image and remove the download quarantine after moving the app to Applications. Windows SmartScreen may require More info → Run anyway. Verify your download first:
+Before installing, verify your download against `checksums.txt`. Put it in the same folder as the download and run this there (`--ignore-missing` skips the builds for other platforms you did not download):
 
 ```bash
-# Run after moving HeiGate.app to Applications
+shasum -a 256 --ignore-missing -c checksums.txt
+```
+
+On Windows, run this in PowerShell and compare the hash with the matching line in `checksums.txt`:
+
+```powershell
+Get-FileHash .\HeiGate-Windows-x64-*-Setup.exe -Algorithm SHA256
+```
+
+The builds do not use an Apple Developer ID or Windows code-signing certificate yet. On macOS, use System Settings → Privacy & Security → Open Anyway if macOS cannot verify the developer. If macOS reports that the app is damaged, move HeiGate.app to Applications first, then remove the download quarantine. Windows SmartScreen may require More info → Run anyway.
+
+```bash
 xattr -dr com.apple.quarantine /Applications/HeiGate.app
-shasum -a 256 -c checksums.txt
 ```
 
 ## Connect your tools
 
 Start HeiGate, add a channel in the UI, then use the client integration page to configure the Claude desktop app or Codex automatically. Manual setup works with any tool.
 
-The gateway key shown in the UI authenticates clients. It is stored at `~/Library/Application Support/HeiGate/gateway.key` with `0600` permissions.
+The gateway key shown in the UI authenticates clients. It is stored as `gateway.key` in the data directory (macOS: `~/Library/Application Support/HeiGate/gateway.key` with `0600` permissions; Windows: `%APPDATA%\HeiGate\gateway.key`).
 
 **Claude Code**
 
@@ -118,13 +128,14 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 ```
 cmd/heigate         entry point: wires routes and starts the HTTP server
 internal/api        local management API and gateway endpoints
-internal/channel    channel storage (SQLite), routing and failover, probe scheduling, model-name normalisation
+internal/channel    channel storage (SQLite), routing and failover, on-demand probes, model-name normalisation
 internal/probe      upstream health checks
 internal/protocol   Anthropic ↔ OpenAI translation, including streaming
 internal/middleware local-only guards, CSP, authentication
 internal/web        embeds the compiled UI
 frontend            Vue 3 interface
 desktop/macos       native Cocoa + WebKit shell
+desktop/windows     WinForms + WebView2 shell and the NSIS installer script
 ```
 
 ## Notes

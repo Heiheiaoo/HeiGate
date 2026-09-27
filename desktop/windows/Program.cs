@@ -66,7 +66,11 @@ internal sealed class HeiGateApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出 HeiGate", null, (_, _) => ExitApplication());
 
-        var icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
+        // ExtractAssociatedIcon only yields the 32px image, which the tray then
+        // shrinks; ask for the small size so the hand-drawn 16px image is used.
+        var icon = Icon.ExtractIcon(Application.ExecutablePath, 0, SystemInformation.SmallIconSize.Width)
+            ?? Icon.ExtractAssociatedIcon(Application.ExecutablePath)
+            ?? SystemIcons.Application;
         _trayIcon = new NotifyIcon
         {
             Icon = icon,

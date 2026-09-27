@@ -39,8 +39,19 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
 
+; Closing the window only hides HeiGate to the tray, so an upgrade usually finds
+; it running. Overwriting a running exe fails with "Error opening file for
+; writing", so stop the shell and its gateway child before touching files.
+!macro StopHeiGate
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /T /IM HeiGate.exe'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM heigate-gateway.exe'
+  ; Give Windows a moment to release the image file handles.
+  Sleep 1000
+!macroend
+
 Section "HeiGate" SEC_MAIN
   SetShellVarContext current
+  !insertmacro StopHeiGate
   SetOutPath "$INSTDIR"
   File /r "${SOURCE_DIR}\*"
 
@@ -63,8 +74,7 @@ SectionEnd
 Section "Uninstall"
   SetShellVarContext current
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "HeiGate"
-  nsExec::ExecToLog 'taskkill /IM HeiGate.exe /F'
-  nsExec::ExecToLog 'taskkill /IM heigate-gateway.exe /F'
+  !insertmacro StopHeiGate
   Delete "$SMPROGRAMS\HeiGate\HeiGate.lnk"
   Delete "$SMPROGRAMS\HeiGate\卸载 HeiGate.lnk"
   RMDir "$SMPROGRAMS\HeiGate"

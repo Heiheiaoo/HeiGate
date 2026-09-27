@@ -5388,7 +5388,6 @@ function handleContextMenu(event: MouseEvent) {
                     <path d="m7.2 9.7 1.8 1.8 3.8-4" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
                 </button>
-
               </div>
             </div>
           </div>

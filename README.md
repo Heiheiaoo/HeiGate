@@ -4,9 +4,9 @@
 
 # HeiGate
 
-**一个运行在你自己 Mac 上的 AI API 网关。多渠道路由、自动故障转移、用量统计，数据不出本机。**
+**一个运行在你自己电脑上（macOS / Windows）的 AI API 网关。多渠道路由、自动故障转移、用量统计，数据不出本机。**
 
-[![CI](https://github.com/Heiheiaoo/heigate/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/heigate/actions/workflows/ci.yml)
+[![CI](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8.svg)](https://go.dev/)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)](https://vuejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -22,7 +22,7 @@
 - **多渠道路由** — 按延迟、质量评分或轮询挑选渠道
 - **自动故障转移** — 某个渠道报错、限流或超时，请求自动切到下一个；连续失败会触发熔断和冷却
 - **协议互通** — 用 Anthropic 的客户端调 OpenAI 兼容的上游，请求和响应（含流式）实时转换
-- **健康探活** — 定时用主模型执行轻量算术题，需要时再队列检查全部模型，验证密钥、端点、模型名是否真的可用
+- **健康探活** — 手动触发，用主模型执行轻量算术题，需要时再队列检查全部模型，验证密钥、端点、模型名是否真的可用；不在后台定时消耗额度
 - **用量统计** — 每次请求的渠道、模型、token、首字延迟、失败链路都记在本地，可按天/模型/渠道汇总
 - **客户端集成** — 一键把 Claude 桌面端和 Codex 的配置指向 HeiGate
 
@@ -30,24 +30,34 @@
 
 ## 安装
 
-从 [Releases](https://github.com/Heiheiaoo/heigate/releases) 下载对应版本：
+从 [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases) 下载对应版本：
 
 - Apple 芯片 Mac（arm64）：下载 `.dmg`，拖进「应用程序」
 - Windows 10/11（x64）：下载 `Setup.exe` 安装；也可以下载便携版 `.zip`
 
-安装包暂未使用 Apple Developer ID / Windows 代码签名。macOS 首次打开时如果提示无法验证开发者，请在「系统设置 → 隐私与安全性」点「仍要打开」；如果系统显示“已损坏”，可先退出磁盘映像，再执行下面的命令移除下载隔离属性。Windows SmartScreen 可能需要点「更多信息 → 仍要运行」。下载后建议用 `checksums.txt` 校验：
+安装前建议先用 `checksums.txt` 校验下载的文件。把它和安装包放在同一目录，然后在该目录执行（`--ignore-missing` 会跳过你没有下载的其他平台文件）：
 
 ```bash
-# 将 HeiGate.app 拖到“应用程序”后执行
+shasum -a 256 --ignore-missing -c checksums.txt
+```
+
+Windows 上在 PowerShell 里执行下面的命令，把输出的哈希与 `checksums.txt` 里对应的一行比对：
+
+```powershell
+Get-FileHash .\HeiGate-Windows-x64-*-Setup.exe -Algorithm SHA256
+```
+
+安装包暂未使用 Apple Developer ID / Windows 代码签名。macOS 首次打开时如果提示无法验证开发者，请在「系统设置 → 隐私与安全性」点「仍要打开」；如果系统显示“已损坏”，先把 HeiGate.app 拖进「应用程序」，再执行下面的命令移除下载隔离属性。Windows SmartScreen 可能需要点「更多信息 → 仍要运行」。
+
+```bash
 xattr -dr com.apple.quarantine /Applications/HeiGate.app
-shasum -a 256 -c checksums.txt
 ```
 
 ## 连接你的工具
 
 启动 HeiGate 后，在界面里添加渠道，然后在「客户端集成」页面一键配置 Claude 桌面端或 Codex。也可以手动配置任何工具。
 
-界面上的「网关密钥」用于客户端认证，它保存在 `~/Library/Application Support/HeiGate/gateway.key`，权限 `0600`。
+界面上的「网关密钥」用于客户端认证，它保存在数据目录下的 `gateway.key`（macOS：`~/Library/Application Support/HeiGate/gateway.key`，权限 `0600`；Windows：`%APPDATA%\HeiGate\gateway.key`）。
 
 **Claude Code**
 
@@ -118,13 +128,14 @@ HeiGate 在你的机器上开了一个 HTTP 端口，所以做了这些约束：
 ```
 cmd/heigate         程序入口：装配路由、启动 HTTP 服务
 internal/api        本地管理接口 + 网关端点
-internal/channel    渠道存储（SQLite）、路由与故障转移、探活调度、模型名归一化
+internal/channel    渠道存储（SQLite）、路由与故障转移、手动探活、模型名归一化
 internal/probe      上游健康检查
 internal/protocol   Anthropic ↔ OpenAI 协议转换（含流式）
 internal/middleware 本地访问防护、CSP、认证
 internal/web        嵌入编译好的界面
 frontend            Vue 3 界面
 desktop/macos       Cocoa + WebKit 原生外壳
+desktop/windows     WinForms + WebView2 外壳与 NSIS 安装脚本
 ```
 
 ## 说明

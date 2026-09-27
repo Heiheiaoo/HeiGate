@@ -42,7 +42,9 @@ $makeNsisPath = if ($makeNsis -is [System.IO.FileInfo]) { $makeNsis.FullName } e
 
 Push-Location (Join-Path $repoRoot 'desktop\windows')
 try {
-    & $makeNsisPath "/DVERSION=$Version" "/DSOURCE_DIR=$OutputDir" "/DOUTPUT_FILE=$installerPath" installer.nsi
+    # installer.nsi is UTF-8 without a BOM; on Windows makensis would otherwise
+    # read it with the ANSI code page and mangle the Chinese shortcut names.
+    & $makeNsisPath /INPUTCHARSET UTF8 "/DVERSION=$Version" "/DSOURCE_DIR=$OutputDir" "/DOUTPUT_FILE=$installerPath" installer.nsi
     if ($LASTEXITCODE -ne 0) { throw 'NSIS installer build failed' }
 } finally {
     Pop-Location
