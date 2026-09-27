@@ -257,6 +257,40 @@ func parseUpstreamErrorMessage(raw string) string {
 	return raw
 }
 
+func upstreamErrorPayload(raw []byte) (string, int, bool) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return "", 0, false
+	}
+	errorValue, exists := envelope["error"]
+	if !exists || len(bytes.TrimSpace(errorValue)) == 0 || bytes.Equal(bytes.TrimSpace(errorValue), []byte("null")) {
+		return "", 0, false
+	}
+	message := parseUpstreamErrorMessage(string(raw))
+	if message == "" {
+		message = string(errorValue)
+	}
+	status := http.StatusBadGateway
+	var detail struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(errorValue, &detail)
+	classification := strings.ToLower(detail.Type + " " + detail.Code + " " + message)
+	switch {
+	case strings.Contains(classification, "rate_limit"), strings.Contains(classification, "rate limit"), strings.Contains(classification, "too_many_requests"), strings.Contains(classification, "too many requests"):
+		status = http.StatusTooManyRequests
+	case strings.Contains(classification, "authentication"), strings.Contains(classification, "unauthorized"), strings.Contains(classification, "invalid_api_key"):
+		status = http.StatusUnauthorized
+	case strings.Contains(classification, "permission"), strings.Contains(classification, "forbidden"):
+		status = http.StatusForbidden
+	case strings.Contains(classification, "model_not_found"), strings.Contains(classification, "unknown model"):
+		status = http.StatusNotFound
+	}
+	return message, status, true
+}
+
 func isClientClosedConn(err error) bool {
 	if err == nil {
 		return false
@@ -431,8 +465,8 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			// point is still safe to fail over; after bytes are committed, replaying
 			// would duplicate assistant output.
 			prefix := make([]byte, 4096)
-			n, readErr := response.body.Read(prefix)
-			if n == 0 && readErr != nil && readErr != io.EOF {
+			n, readErr := io.ReadAtLeast(response.body, prefix, 1)
+			if n == 0 {
 				_ = response.body.Close()
 				streamErr := &streamStartError{err: readErr}
 				lastCandidateErr = streamErr
@@ -440,7 +474,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				step.Error = fmt.Sprintf("传输首字节中断: %v", readErr)
 				step.RawError = readErr.Error()
 				traceSteps = append(traceSteps, step)
-				if attempt == 0 {
+				if attempt == 0 && channel.FailureIsRetryable(channel.FailureFromError(streamErr)) {
 					continue
 				}
 				failedAttempts = append(failedAttempts, fmt.Sprintf("%s (传输中断)", ch.Name))
@@ -643,12 +677,46 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 	if isStream && len(tracker.leftover) > 0 {
 		tracker.Feed([]byte("\n"))
 	}
+	if isStream && streamErr == nil && tracker.streamError != "" {
+		streamErr = &upstreamStatusError{status: tracker.streamErrorStatus, message: tracker.streamError}
+	}
+	// A stream that reaches EOF without an upstream completion marker is a
+	// truncated response. Do not record it as a successful stop: clients may
+	// otherwise accept partial output as a complete answer.
+	if isStream && streamErr == nil && !tracker.sawDone && tracker.finishReason == "" {
+		streamErr = io.ErrUnexpectedEOF
+	}
 
 	isClientAbort := false
 	if streamErr != nil {
 		if c.Request.Context().Err() != nil || isClientClosedConn(streamErr) {
 			isClientAbort = true
 		}
+	}
+
+	if isStream && streamErr != nil && !isClientAbort && winningChannel != nil && h.store != nil {
+		streamError := streamErr.Error()
+		_ = h.store.UpdateRuntime(context.Background(), winningChannel.ID, func(fresh *channel.Channel) {
+			fresh.FailureCount++
+			fresh.LastStatus = probe.StatusError
+			fresh.LastError = "流式传输中断: " + streamError
+			fresh.LastLatencyMs = nil
+			fresh.LastTTFTMs = winningChannel.LastTTFTMs
+			now := time.Now().UTC()
+			fresh.LastCheckedAt = &now
+			failureInfo := channel.FailureFromError(streamErr)
+			if failureInfo.Class == "" {
+				failureInfo = channel.FailureInfo{Class: channel.FailureNetwork}
+			}
+			cooldown := channel.FailureCooldown(failureInfo, fresh.FailureCount)
+			until := time.Now().UTC().Add(cooldown)
+			fresh.CooldownUntil = &until
+			if channel.FailureIsCircuitEligible(failureInfo) && fresh.FailureCount >= 3 {
+				fresh.CircuitState = channel.CircuitOpen
+			} else if fresh.CircuitState == "" {
+				fresh.CircuitState = channel.CircuitClosed
+			}
+		})
 	}
 
 	if requestLog != nil {
@@ -664,7 +732,11 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				requestLog.TotalTokens = requestLog.PromptTokens + requestLog.CompletionTokens
 			}
 
-			if tracker.sawDone || tracker.finishReason != "" {
+			if streamErr != nil && !isClientAbort {
+				requestLog.StatusCode = http.StatusBadGateway
+				requestLog.FinishReason = "error"
+				requestLog.ErrorMessage = "流式传输中断: " + streamErr.Error()
+			} else if tracker.sawDone || tracker.finishReason != "" {
 				requestLog.StatusCode = upstream.status
 				requestLog.ErrorMessage = ""
 				if tracker.finishReason != "" {
@@ -742,6 +814,9 @@ type transportError struct{ err error }
 func (e *transportError) Error() string { return "upstream request failed" }
 func (e *transportError) Unwrap() error { return e.err }
 func (e *transportError) FailureInfo() channel.FailureInfo {
+	if info := channel.FailureFromError(e.err); info.Class != "" || info.StatusCode != 0 {
+		return info
+	}
 	return channel.FailureInfo{Class: channel.FailureNetwork}
 }
 
@@ -750,7 +825,7 @@ type streamStartError struct{ err error }
 func (e *streamStartError) Error() string { return "upstream stream failed before first byte" }
 func (e *streamStartError) Unwrap() error { return e.err }
 func (e *streamStartError) FailureInfo() channel.FailureInfo {
-	return channel.FailureInfo{Class: channel.FailureNetwork}
+	return channel.FailureFromError(e.err)
 }
 
 type prefixedReadCloser struct {
@@ -1004,14 +1079,16 @@ func forwardUpstream(ctx context.Context, inbound *http.Request, body []byte, ch
 }
 
 type streamTokenTracker struct {
-	promptTokens     int
-	completionTokens int
-	totalTokens      int
-	hasExactTokens   bool
-	estimatedChars   int
-	leftover         string
-	sawDone          bool
-	finishReason     string
+	promptTokens      int
+	completionTokens  int
+	totalTokens       int
+	hasExactTokens    bool
+	estimatedChars    int
+	leftover          string
+	sawDone           bool
+	finishReason      string
+	streamError       string
+	streamErrorStatus int
 }
 
 func (t *streamTokenTracker) Feed(chunk []byte) {
@@ -1038,6 +1115,11 @@ func (t *streamTokenTracker) Feed(chunk []byte) {
 
 		var generic map[string]any
 		if err := json.Unmarshal([]byte(payload), &generic); err != nil {
+			continue
+		}
+		if message, status, isError := upstreamErrorPayload([]byte(payload)); isError {
+			t.streamError = message
+			t.streamErrorStatus = status
 			continue
 		}
 
@@ -1316,6 +1398,9 @@ func forwardTranslated(ctx context.Context, inbound *http.Request, body []byte, 
 		if err != nil {
 			return nil, fmt.Errorf("read chat completions response: %w", err)
 		}
+		if message, status, isError := upstreamErrorPayload(respBytes); isError {
+			return nil, &upstreamStatusError{status: status, message: message}
+		}
 		var chatResp protocol.ChatResponse
 		if err := json.Unmarshal(respBytes, &chatResp); err != nil {
 			return nil, fmt.Errorf("decode chat completions response: %w", err)
@@ -1348,28 +1433,42 @@ func forwardTranslated(ctx context.Context, inbound *http.Request, body []byte, 
 		}
 		scanner := bufio.NewScanner(response.Body)
 		scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)
+		sawDone := false
+		sawFinish := false
 		for scanner.Scan() {
 			payload, done, ok := protocol.ParseSSELine(scanner.Text())
 			if !ok {
 				continue
 			}
 			if done {
+				sawDone = true
 				break
+			}
+			if message, status, isError := upstreamErrorPayload([]byte(payload)); isError {
+				_ = pw.CloseWithError(&upstreamStatusError{status: status, message: message})
+				return
 			}
 			var chunk protocol.ChatChunk
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 				continue
+			}
+			for _, choice := range chunk.Choices {
+				if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+					sawFinish = true
+					break
+				}
 			}
 			if !write(state.Feed(&chunk)) {
 				_ = pw.CloseWithError(io.ErrClosedPipe)
 				return
 			}
 		}
-		if err := scanner.Err(); err != nil && !isClientClosedConn(err) {
-			// The upstream stream broke: still finish the Anthropic message so
-			// the client gets a well-formed end, then surface the error.
-			write(state.Finish())
+		if err := scanner.Err(); err != nil {
 			_ = pw.CloseWithError(err)
+			return
+		}
+		if !sawDone && !sawFinish {
+			_ = pw.CloseWithError(io.ErrUnexpectedEOF)
 			return
 		}
 		write(state.Finish())
@@ -1402,12 +1501,15 @@ func anthropicErrorType(status int) string {
 	return "api_error"
 }
 
-// copyClientHeaders forwards the client's headers to the upstream except the
-// ones that carry credentials or are connection specific.
+// copyClientHeaders forwards only protocol headers that are meaningful to an
+// upstream provider. Browser/session headers (cookies, origin, referrer and
+// extension-specific metadata) must never leak to a configured supplier.
 func copyClientHeaders(dst, src http.Header) {
 	for key, values := range src {
 		switch strings.ToLower(key) {
-		case "authorization", "x-api-key", "host", "content-length", "connection", "accept-encoding", "x-heigate-request":
+		case "accept", "user-agent", "anthropic-version", "anthropic-beta", "openai-organization", "openai-project", "openai-beta":
+			// allowed protocol metadata
+		default:
 			continue
 		}
 		for _, value := range values {

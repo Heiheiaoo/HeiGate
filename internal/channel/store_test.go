@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,6 +60,44 @@ func TestChannelStoreCRUD(t *testing.T) {
 	}
 	if _, err := store.Get(context.Background(), channel.ID); err == nil {
 		t.Fatal("expected deleted channel lookup to fail")
+	}
+}
+
+func TestUpdateRuntimeSerializesReadModifyWrite(t *testing.T) {
+	store, err := OpenStore("file:desktop_runtime_update_race?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ch := &Channel{Name: "runtime", Provider: probe.ProviderOpenAI, Endpoint: "https://example.com", APIKey: "k", PrimaryModel: "m", Enabled: true}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+	const updates = 20
+	var wg sync.WaitGroup
+	errCh := make(chan error, updates)
+	for range updates {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- store.UpdateRuntime(context.Background(), ch.ID, func(fresh *Channel) {
+				fresh.FailureCount++
+			})
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, err := store.Get(context.Background(), ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.FailureCount != updates {
+		t.Fatalf("lost concurrent runtime updates: got %d, want %d", loaded.FailureCount, updates)
 	}
 }
 

@@ -21,13 +21,14 @@ const (
 // a retry loop for protocol adapters. It owns no HTTP protocol code; callers
 // supply the actual forward function for Anthropic/OpenAI/Responses.
 type Router struct {
-	store *Store
-	mu    sync.Mutex
-	turn  map[string]int
+	store    *Store
+	mu       sync.Mutex
+	turn     map[string]int
+	halfOpen map[int64]struct{}
 }
 
 func NewRouter(store *Store) *Router {
-	return &Router{store: store, turn: make(map[string]int)}
+	return &Router{store: store, turn: make(map[string]int), halfOpen: make(map[int64]struct{})}
 }
 
 // Candidates returns enabled channels that advertise the requested model.
@@ -133,6 +134,16 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 	}
 	var lastErr error
 	for _, channel := range candidates {
+		// A half-open circuit is a single recovery probe, not a concurrency
+		// bucket. Candidates can be built by several requests at once, so claim
+		// the persisted half-open channel immediately before forwarding it.
+		halfOpenClaimed := channel.CircuitState == CircuitHalfOpen && r.claimHalfOpen(channel.ID)
+		if channel.CircuitState == CircuitHalfOpen && !halfOpenClaimed {
+			continue
+		}
+		if halfOpenClaimed {
+			defer r.releaseHalfOpen(channel.ID)
+		}
 		started := time.Now()
 		err := forward(ctx, channel)
 		latency := int(time.Since(started) / time.Millisecond)
@@ -149,7 +160,14 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 			channel.LastTTFTMs = &latency
 			channel.LastCheckedAt = timePtr(time.Now().UTC())
 			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
-				copyRuntimeState(fresh, channel)
+				fresh.LastStatus = probe.StatusOperational
+				fresh.LastError = ""
+				fresh.FailureCount = 0
+				fresh.CircuitState = CircuitClosed
+				fresh.CooldownUntil = nil
+				fresh.LastLatencyMs = &latency
+				fresh.LastTTFTMs = &latency
+				fresh.LastCheckedAt = timePtr(time.Now().UTC())
 			})
 			return channel, nil
 		}
@@ -175,11 +193,43 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 			channel.LastTTFTMs = nil
 			channel.LastCheckedAt = timePtr(time.Now().UTC())
 			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
-				copyRuntimeState(fresh, channel)
+				fresh.FailureCount++
+				fresh.LastStatus = probe.StatusError
+				fresh.LastError = FailureLabel(failureInfo) + ": " + err.Error()
+				cooldown := FailureCooldown(failureInfo, fresh.FailureCount)
+				until := time.Now().UTC().Add(cooldown)
+				fresh.CooldownUntil = &until
+				if FailureIsCircuitEligible(failureInfo) && fresh.FailureCount >= 3 {
+					fresh.CircuitState = CircuitOpen
+				} else if fresh.CircuitState == "" {
+					fresh.CircuitState = CircuitClosed
+				}
+				fresh.LastLatencyMs = &latency
+				fresh.LastTTFTMs = nil
+				fresh.LastCheckedAt = timePtr(time.Now().UTC())
 			})
 		}
 	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all candidate channels are currently recovering")
+	}
 	return nil, fmt.Errorf("all desktop channels failed for model %q: %w", model, lastErr)
+}
+
+func (r *Router) claimHalfOpen(id int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.halfOpen[id]; exists {
+		return false
+	}
+	r.halfOpen[id] = struct{}{}
+	return true
+}
+
+func (r *Router) releaseHalfOpen(id int64) {
+	r.mu.Lock()
+	delete(r.halfOpen, id)
+	r.mu.Unlock()
 }
 
 func (r *Router) sortCandidates(channels []*Channel, model, strategy string) {

@@ -143,6 +143,62 @@ func TestForwardDesktopRequestTranslatesAnthropicStreamingToOpenAISSE(t *testing
 	require.Contains(t, sseText, "event: message_stop")
 }
 
+func TestForwardTranslatedStreamingErrorPayloadIsNotSuccessful(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"error\":{\"message\":\"rate limit\"}}\n\n")
+	}))
+	defer server.Close()
+
+	payload := `{"model":"claude-test","stream":true,"messages":[{"role":"user","content":"hello"}]}`
+	response, err := forwardUpstream(context.Background(), httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload)), []byte(payload), &channel.Channel{
+		Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions, Endpoint: server.URL, APIKey: "key", PrimaryModel: "m",
+	}, protocolAnthropic, "m")
+	require.NoError(t, err)
+	_, readErr := io.ReadAll(response.body)
+	require.Error(t, readErr)
+	require.Contains(t, readErr.Error(), "rate limit")
+}
+
+func TestForwardTranslatedStreamingWithoutCompletionMarkerFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+	}))
+	defer server.Close()
+
+	payload := `{"model":"claude-test","stream":true,"messages":[{"role":"user","content":"hello"}]}`
+	response, err := forwardUpstream(context.Background(), httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload)), []byte(payload), &channel.Channel{
+		Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions, Endpoint: server.URL, APIKey: "key", PrimaryModel: "m",
+	}, protocolAnthropic, "m")
+	require.NoError(t, err)
+	body, readErr := io.ReadAll(response.body)
+	require.Error(t, readErr)
+	require.Contains(t, string(body), "partial")
+	require.NotContains(t, string(body), "message_stop")
+}
+
+func TestForwardDesktopRequestRejectsEmptySuccessfulResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	store := newTestStoreForHandler(t)
+	ch := &channel.Channel{
+		Name: "empty", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions,
+		Endpoint: server.URL, APIKey: "key", PrimaryModel: "m", Enabled: true, LastStatus: probe.StatusOperational,
+	}
+	require.NoError(t, store.Save(context.Background(), ch))
+	h := NewHandler(store, channel.NewProbeRunner(store))
+	r := gin.New()
+	r.POST("/v1/chat/completions", h.forwardChatCompletions)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[]}`))
+	r.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
 func TestGatewayModelsReturnsEnabledUniqueModels(t *testing.T) {
 	store, err := channel.OpenStore(":memory:")
 	require.NoError(t, err)
@@ -238,6 +294,27 @@ func TestParseUpstreamErrorMessage(t *testing.T) {
 	// Plain text
 	err3 := parseUpstreamErrorMessage(`Service Unavailable`)
 	require.Equal(t, "Service Unavailable", err3)
+}
+
+func TestCopyClientHeadersOnlyForwardsProtocolMetadata(t *testing.T) {
+	src := http.Header{
+		"Accept":                {"text/event-stream"},
+		"Anthropic-Version":     {"2023-06-01"},
+		"Anthropic-Beta":        {"feature-x"},
+		"Authorization":         {"client-secret"},
+		"Cookie":                {"session=private"},
+		"Origin":                {"https://client.example"},
+		"Referer":               {"https://client.example/page"},
+		"X-Private-Client-Meta": {"private"},
+	}
+	dst := make(http.Header)
+	copyClientHeaders(dst, src)
+	require.Equal(t, "text/event-stream", dst.Get("Accept"))
+	require.Equal(t, "2023-06-01", dst.Get("Anthropic-Version"))
+	require.Equal(t, "feature-x", dst.Get("Anthropic-Beta"))
+	for _, key := range []string{"Authorization", "Cookie", "Origin", "Referer", "X-Private-Client-Meta"} {
+		require.Empty(t, dst.Get(key), "%s should not be forwarded", key)
+	}
 }
 
 func TestIsClientClosedConn(t *testing.T) {

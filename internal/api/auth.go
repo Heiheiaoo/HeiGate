@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -14,6 +15,15 @@ func LoadOrCreateGatewayKey(path string) (string, error) {
 	if data, err := os.ReadFile(path); err == nil {
 		key := strings.TrimSpace(string(data))
 		if key != "" {
+			if runtime.GOOS != "windows" {
+				if info, statErr := os.Stat(path); statErr != nil {
+					return "", fmt.Errorf("stat desktop gateway key: %w", statErr)
+				} else if info.Mode().Perm() != 0o600 {
+					if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
+						return "", fmt.Errorf("restrict desktop gateway key: %w", chmodErr)
+					}
+				}
+			}
 			return key, nil
 		}
 	} else if !os.IsNotExist(err) {

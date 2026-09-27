@@ -235,6 +235,11 @@ func (h *Handler) injectionCheck(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
+	if h.runner == nil || !h.runner.AcquireChannel(id) {
+		c.JSON(http.StatusConflict, gin.H{"code": "probe_busy", "error": channel.ErrProbeBusy.Error()})
+		return
+	}
+	defer h.runner.ReleaseChannel(id)
 
 	targetModel := strings.TrimSpace(c.Query("model"))
 	checkAll := c.Query("all") == "1" || c.Query("all") == "true"

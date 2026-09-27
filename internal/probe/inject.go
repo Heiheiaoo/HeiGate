@@ -31,7 +31,7 @@ const (
 	injectionExtractMaxTokns = 1500
 	// injectionConcurrency bounds how many models are checked at once. Free
 	// shared stations reject bursts with 429, so this stays low.
-	injectionConcurrency = 3
+	injectionConcurrency = 1
 )
 
 // InjectionReport is the outcome of checking one model for a server-side

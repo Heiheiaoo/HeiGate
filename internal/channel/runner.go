@@ -74,10 +74,10 @@ func (r *ProbeRunner) probeNow(ctx context.Context, id int64, targetModel string
 	if r == nil || r.store == nil {
 		return nil, context.Canceled
 	}
-	if !r.acquire(id) {
+	if !r.AcquireChannel(id) {
 		return nil, ErrProbeBusy
 	}
-	defer r.release(id)
+	defer r.ReleaseChannel(id)
 
 	channel, err := r.store.Get(ctx, id)
 	if err != nil {
@@ -274,7 +274,10 @@ func (r *ProbeRunner) persistProbeResults(id int64, expectedPrimary string, resu
 	}
 }
 
-func (r *ProbeRunner) acquire(id int64) bool {
+// AcquireChannel reserves the single upstream request slot for a channel.
+// Manual probes and injection checks use the same slot so explicit diagnostics
+// cannot overlap and trigger provider-side burst limits.
+func (r *ProbeRunner) AcquireChannel(id int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.inFlight[id]; exists {
@@ -284,7 +287,8 @@ func (r *ProbeRunner) acquire(id int64) bool {
 	return true
 }
 
-func (r *ProbeRunner) release(id int64) {
+// ReleaseChannel releases a channel's upstream request slot.
+func (r *ProbeRunner) ReleaseChannel(id int64) {
 	r.mu.Lock()
 	delete(r.inFlight, id)
 	r.mu.Unlock()

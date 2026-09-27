@@ -116,7 +116,9 @@ func ClassifyStatus(status int) FailureInfo {
 		info.Class = FailureAuth
 	case status == 404:
 		info.Class = FailureModel
-	case status == 408 || status == 429:
+	case status == 408:
+		info.Class = FailureNetwork
+	case status == 429:
 		info.Class = FailureRateLimit
 	case status >= 500:
 		info.Class = FailureProvider

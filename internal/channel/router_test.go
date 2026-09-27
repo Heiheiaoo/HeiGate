@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -94,6 +95,52 @@ func TestChannelRouterCooldownAndRecovery(t *testing.T) {
 	}
 }
 
+func TestChannelRouterAllowsOnlyOneHalfOpenRequest(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:desktop_router_half_open?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := &Channel{Name: "recovering", Provider: probe.ProviderOpenAI, Endpoint: "https://recovering.example", APIKey: "k", PrimaryModel: "gpt-test", Enabled: true, LastStatus: probe.StatusError, CircuitState: CircuitHalfOpen}
+	if err := store.Save(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(store)
+	candidates := []*Channel{ch}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	firstDone := make(chan error, 1)
+	go func() {
+		_, routeErr := router.RouteCandidates(context.Background(), "gpt-test", candidates, func(context.Context, *Channel) error {
+			calls.Add(1)
+			close(started)
+			<-release
+			return nil
+		})
+		firstDone <- routeErr
+	}()
+	<-started
+	_, secondErr := router.RouteCandidates(context.Background(), "gpt-test", candidates, func(context.Context, *Channel) error {
+		calls.Add(1)
+		return nil
+	})
+	if secondErr == nil {
+		t.Fatal("concurrent half-open request should be skipped")
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("half-open channel forwarded %d concurrent requests, want 1", got)
+	}
+}
+
 func TestFailureClassification(t *testing.T) {
 	if info := FailureFromError(context.Canceled); info.Class != FailureClient {
 		t.Fatalf("context cancellation must be client-owned, got %#v", info)
@@ -111,6 +158,10 @@ func TestFailureClassification(t *testing.T) {
 	serverInfo := ClassifyStatus(503)
 	if !FailureIsCircuitEligible(serverInfo) {
 		t.Fatal("expected 503 to be circuit eligible")
+	}
+	timeoutInfo := ClassifyStatus(408)
+	if timeoutInfo.Class != FailureNetwork {
+		t.Fatalf("expected 408 to be network failure, got %#v", timeoutInfo)
 	}
 }
 

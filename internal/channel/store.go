@@ -72,6 +72,7 @@ type LogEvent struct {
 // small and serialized writes make probe updates deterministic.
 type Store struct {
 	db             *sql.DB
+	runtimeMu      sync.Mutex
 	logMu          sync.RWMutex
 	logSubscribers map[chan LogEvent]struct{}
 }
@@ -471,21 +472,6 @@ func (s *Store) PruneModelHealth(ctx context.Context, channelID int64, models []
 	return err
 }
 
-// copyRuntimeState copies the runtime health fields from src to dst. It is the
-// only set of fields a probe or forward attempt may write back.
-func copyRuntimeState(dst, src *Channel) {
-	dst.LastStatus = src.LastStatus
-	dst.LastError = src.LastError
-	dst.LastLatencyMs = src.LastLatencyMs
-	dst.LastTTFTMs = src.LastTTFTMs
-	dst.LastPingLatencyMs = src.LastPingLatencyMs
-	dst.LastCheckedAt = src.LastCheckedAt
-	dst.ProbeStreak = src.ProbeStreak
-	dst.FailureCount = src.FailureCount
-	dst.CircuitState = src.CircuitState
-	dst.CooldownUntil = src.CooldownUntil
-}
-
 // effectiveIntervalSeconds is the cadence the scheduler will actually use for
 // this channel, after adaptive backoff. Derived on read so the UI can show the
 // real interval rather than the configured one.
@@ -514,8 +500,14 @@ func CopyConfigState(dst, src *Channel) {
 // user edit during that window changes configuration fields (models, endpoint)
 // in the database, and writing the stale snapshot back wholesale would
 // resurrect the old configuration. Callers therefore mutate only runtime
-// health fields via copyRuntimeState so configuration always stays fresh.
+// health fields so configuration always stays fresh. The mutex keeps concurrent
+// read-modify-write updates from discarding each other's counters.
 func (s *Store) UpdateRuntime(ctx context.Context, id int64, mutate func(*Channel)) error {
+	if mutate == nil {
+		return fmt.Errorf("runtime channel mutation is nil")
+	}
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
 	fresh, err := s.Get(ctx, id)
 	if err != nil {
 		return err
