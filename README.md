@@ -35,9 +35,11 @@
 - Apple 芯片 Mac（arm64）：下载 `.dmg`，拖进「应用程序」
 - Windows 10/11（x64）：下载 `Setup.exe` 安装；也可以下载便携版 `.zip`
 
-安装包暂未做代码签名。macOS 首次打开时需要到「系统设置 → 隐私与安全性」点「仍要打开」；Windows SmartScreen 可能需要点「更多信息 → 仍要运行」。下载后建议用 `checksums.txt` 校验：
+安装包暂未使用 Apple Developer ID / Windows 代码签名。macOS 首次打开时如果提示无法验证开发者，请在「系统设置 → 隐私与安全性」点「仍要打开」；如果系统显示“已损坏”，可先退出磁盘映像，再执行下面的命令移除下载隔离属性。Windows SmartScreen 可能需要点「更多信息 → 仍要运行」。下载后建议用 `checksums.txt` 校验：
 
 ```bash
+# 将 HeiGate.app 拖到“应用程序”后执行
+xattr -dr com.apple.quarantine /Applications/HeiGate.app
 shasum -a 256 -c checksums.txt
 ```
 

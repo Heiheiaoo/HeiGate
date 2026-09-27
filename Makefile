@@ -39,6 +39,8 @@ app-macos-arm64: frontend
 	@cp desktop/macos/AppIcon.icns $(APP_DIR)/Contents/Resources/AppIcon.icns
 	@swiftc -target arm64-apple-macos12.0 -O -framework Cocoa -framework WebKit desktop/macos/HeiGateApp.swift -o $(APP_DIR)/Contents/MacOS/HeiGate
 	@chmod +x $(APP_DIR)/Contents/MacOS/HeiGate $(APP_DIR)/Contents/MacOS/heigate-gateway
+	@codesign --force --deep --sign - $(APP_DIR)
+	@codesign --verify --deep --strict --verbose=2 $(APP_DIR)
 	@echo "Built $(APP_DIR)"
 
 windows:

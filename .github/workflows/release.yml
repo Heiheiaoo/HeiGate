@@ -40,6 +40,8 @@ jobs:
         run: |
           VERSION="${RELEASE_TAG#v}"
           make app-macos-arm64 VERSION="$VERSION"
+      - name: Verify macOS app signature
+        run: codesign --verify --deep --strict --verbose=2 dist/HeiGate.app
       - name: Create macOS archives
         run: |
           VERSION="${RELEASE_TAG#v}"

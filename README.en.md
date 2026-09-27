@@ -35,9 +35,11 @@ Download the matching build from [Releases](https://github.com/Heiheiaoo/heigate
 - Apple silicon Mac (arm64): download the `.dmg` and drag it to Applications
 - Windows 10/11 (x64): use `Setup.exe`, or download the portable `.zip`
 
-The builds are currently unsigned. On macOS, use System Settings → Privacy & Security → Open Anyway. Windows SmartScreen may require More info → Run anyway. Verify your download first:
+The builds do not use an Apple Developer ID or Windows code-signing certificate yet. On macOS, use System Settings → Privacy & Security → Open Anyway if macOS cannot verify the developer. If macOS reports that the app is damaged, quit the disk image and remove the download quarantine after moving the app to Applications. Windows SmartScreen may require More info → Run anyway. Verify your download first:
 
 ```bash
+# Run after moving HeiGate.app to Applications
+xattr -dr com.apple.quarantine /Applications/HeiGate.app
 shasum -a 256 -c checksums.txt
 ```
 
