@@ -32,7 +32,7 @@ Everything lives in a local SQLite file (macOS: `~/Library/Application Support/H
 
 Download the matching build from [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases):
 
-- Apple silicon Mac (arm64): download the `.dmg` and drag it to Applications
+- Apple silicon Mac (arm64): quit HeiGate, open the `.dmg`, and drag it onto the `Applications` icon; choose **Replace** if an older copy is installed
 - Windows 10/11 (x64): use `Setup.exe`, or download the portable `.zip`
 
 Before installing, verify your download against `checksums.txt`. Put it in the same folder as the download and run this there (`--ignore-missing` skips the builds for other platforms you did not download):

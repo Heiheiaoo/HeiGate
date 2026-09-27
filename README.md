@@ -32,7 +32,7 @@
 
 从 [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases) 下载对应版本：
 
-- Apple 芯片 Mac（arm64）：下载 `.dmg`，拖进「应用程序」
+- Apple 芯片 Mac（arm64）：先退出 HeiGate，打开 `.dmg`，把 HeiGate 拖到「Applications」图标；如果提示已有旧版本，选择「替换」
 - Windows 10/11（x64）：下载 `Setup.exe` 安装；也可以下载便携版 `.zip`
 
 安装前建议先用 `checksums.txt` 校验下载的文件。把它和安装包放在同一目录，然后在该目录执行（`--ignore-missing` 会跳过你没有下载的其他平台文件）：

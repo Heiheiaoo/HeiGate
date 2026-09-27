@@ -47,7 +47,10 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           cd dist
           ditto -c -k --keepParent HeiGate.app "HeiGate-macOS-arm64-${VERSION}.zip"
-          hdiutil create -volname HeiGate -srcfolder HeiGate.app -ov -format UDZO "HeiGate-macOS-arm64-${VERSION}.dmg"
+          mkdir dmg-stage
+          ditto HeiGate.app dmg-stage/HeiGate.app
+          ln -s /Applications dmg-stage/Applications
+          hdiutil create -volname HeiGate -srcfolder dmg-stage -ov -format UDZO "HeiGate-macOS-arm64-${VERSION}.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
@@ -113,7 +116,7 @@ jobs:
           generate_release_notes: true
           body: |
             Available builds:
-            - macOS 12+ on Apple silicon (arm64): `.dmg` or `.zip`
+            - macOS 12+ on Apple silicon (arm64): quit HeiGate, open the `.dmg`, drag `HeiGate.app` onto `Applications`, and choose **Replace** if an older copy exists; `.zip` is also available
             - Windows 10/11 x64: installer (`Setup.exe`) or portable `.zip`
 
             These builds are currently unsigned. macOS may require System
