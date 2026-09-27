@@ -32,8 +32,8 @@ func NewRouter(store *Store) *Router {
 }
 
 // Candidates returns enabled channels that advertise the requested model.
-// Recently failed channels remain visible only when no healthy candidate exists,
-// making recovery possible without a separate circuit-breaker table.
+// Failed channels re-enter the pool as single-request recovery probes after
+// their cooldown expires, so recovery does not depend on manual probing.
 func (r *Router) Candidates(ctx context.Context, model, strategy string) ([]*Channel, error) {
 	return r.CandidatesMatching(ctx, model, strategy, nil)
 }
@@ -55,6 +55,7 @@ func (r *Router) CandidatesMatching(ctx context.Context, model, strategy string,
 	degraded := make([]*Channel, 0)
 	failed := make([]*Channel, 0)
 	cooldown := make([]*Channel, 0)
+	now := time.Now()
 	for _, channel := range channels {
 		if !channel.Enabled {
 			continue
@@ -65,16 +66,18 @@ func (r *Router) CandidatesMatching(ctx context.Context, model, strategy string,
 		if matches != nil && !matches(channel) {
 			continue
 		}
-		if channel.CooldownUntil != nil && time.Now().Before(*channel.CooldownUntil) {
+		if channel.CooldownUntil != nil && now.Before(*channel.CooldownUntil) {
 			cooldown = append(cooldown, channel)
 			continue
 		}
-		if channel.CircuitState == CircuitOpen {
-			// Lazy half-open recovery: the first request after the cooldown is
-			// allowed through as a probe instead of requiring a timer goroutine.
+		if channel.CircuitState == CircuitOpen || (channel.FailureCount > 0 && channel.LastStatus == probe.StatusError) {
+			// Lazy half-open recovery: after the channel's cooldown expires, let
+			// one real request test it. This also recovers failures that have not
+			// reached the circuit-open threshold without requiring manual probing.
 			channel.CircuitState = CircuitHalfOpen
 			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
-				if fresh.CircuitState == CircuitOpen {
+				cooldownExpired := fresh.CooldownUntil == nil || !now.Before(*fresh.CooldownUntil)
+				if cooldownExpired && (fresh.CircuitState == CircuitOpen || (fresh.FailureCount > 0 && fresh.LastStatus == probe.StatusError)) {
 					fresh.CircuitState = CircuitHalfOpen
 				}
 			})
@@ -154,10 +157,10 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 			channel.CircuitState = CircuitClosed
 			channel.CooldownUntil = nil
 			channel.LastLatencyMs = &latency
-			// The forwarder returns after the first upstream bytes are available.
-			// Until a separate TTFT value is supplied, keep routing metrics
-			// internally consistent instead of retaining an older TTFT.
-			channel.LastTTFTMs = &latency
+			// Protocol forwarders can supply the measured time to first byte on
+			// the channel snapshot. Do not substitute total request duration when
+			// it is absent; keep the last actual TTFT measurement instead.
+			ttft := channel.LastTTFTMs
 			channel.LastCheckedAt = timePtr(time.Now().UTC())
 			_ = r.store.UpdateRuntime(context.Background(), channel.ID, func(fresh *Channel) {
 				fresh.LastStatus = probe.StatusOperational
@@ -166,7 +169,10 @@ func (r *Router) RouteCandidates(ctx context.Context, model string, candidates [
 				fresh.CircuitState = CircuitClosed
 				fresh.CooldownUntil = nil
 				fresh.LastLatencyMs = &latency
-				fresh.LastTTFTMs = &latency
+				if ttft != nil && *ttft > 0 {
+					ttftCopy := *ttft
+					fresh.LastTTFTMs = &ttftCopy
+				}
 				fresh.LastCheckedAt = timePtr(time.Now().UTC())
 			})
 			return channel, nil
@@ -234,6 +240,11 @@ func (r *Router) releaseHalfOpen(id int64) {
 
 func (r *Router) sortCandidates(channels []*Channel, model, strategy string) {
 	sort.SliceStable(channels, func(i, j int) bool {
+		// Recovery probes should get a chance promptly under every routing
+		// strategy. RouteCandidates still enforces one in-flight half-open call.
+		if (channels[i].CircuitState == CircuitHalfOpen) != (channels[j].CircuitState == CircuitHalfOpen) {
+			return channels[i].CircuitState == CircuitHalfOpen
+		}
 		switch strategy {
 		case RouteLatency:
 			return responsivenessOf(channels[i]) < responsivenessOf(channels[j])
@@ -269,7 +280,7 @@ func qualityScore(channel *Channel) int {
 	}
 
 	if channel.CircuitState == CircuitHalfOpen {
-		score -= 2000
+		score += 20000
 	} else if channel.CircuitState == CircuitOpen {
 		score -= 8000
 	}

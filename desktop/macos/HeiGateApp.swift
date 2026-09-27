@@ -32,6 +32,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
     private var statusMenu: NSMenu?
     private var autoStartMenuItem: NSMenuItem?
     private var stoppingServer = false
+    private var serverGeneration = 0
+    private var serverRestartAttempts = 0
+    private var serverStartupFailureShown = false
+    private let maxServerRestartAttempts = 3
     private var port = 18080
     private let launchAgentLabel = "com.heigate.autostart"
     private let windowFrameKey = "HeiGateMainWindowFrame"
@@ -101,8 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         appWindow.makeKeyAndOrderFront(nil)
         window = appWindow
 
-        startServer()
-        waitForServer(attempt: 0)
+        let generation = startServer()
+        waitForServer(attempt: 0, generation: generation)
     }
 
     private func persistWindowFrame(_ win: NSWindow) {
@@ -134,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         if let win = window {
             persistWindowFrame(win)
         }
+        serverGeneration += 1
         stoppingServer = true
         stopServer()
     }
@@ -159,11 +164,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
     }
 
     @objc private func restartServer(_ sender: Any?) {
+        serverGeneration += 1
         stoppingServer = true
         stopServer()
         stoppingServer = false
-        startServer()
-        waitForServer(attempt: 0)
+        serverRestartAttempts = 0
+        serverStartupFailureShown = false
+        let generation = startServer()
+        waitForServer(attempt: 0, generation: generation)
     }
 
     @objc private func quitApplication(_ sender: Any?) {
@@ -418,7 +426,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         self.server = nil
     }
 
-    private func startServer() {
+    @discardableResult
+    private func startServer() -> Int {
+        serverGeneration += 1
+        let generation = serverGeneration
         let binaryURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/heigate-gateway")
         let dataURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("HeiGate", isDirectory: true)
@@ -433,17 +444,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         env["DATA_DIR"] = dataURL.path
         process.environment = env
         do {
-            process.terminationHandler = { [weak self] _ in
+            process.terminationHandler = { [weak self] terminatedProcess in
                 DispatchQueue.main.async {
-                    guard let self, !self.stoppingServer else { return }
-                    self.startServer()
-                    self.waitForServer(attempt: 0)
+                    guard let self,
+                          !self.stoppingServer,
+                          self.serverGeneration == generation else { return }
+                    self.server = nil
+                    self.recoverServer(
+                        message: "网关进程意外退出（状态码 \(terminatedProcess.terminationStatus)）",
+                        generation: generation
+                    )
                 }
             }
             try process.run()
             server = process
         } catch {
-            showError("无法启动本地网关：\(error.localizedDescription)")
+            recoverServer(message: "无法启动本地网关：\(error.localizedDescription)", generation: generation)
+        }
+        return generation
+    }
+
+    private func recoverServer(message: String, generation: Int) {
+        guard generation == serverGeneration, !serverStartupFailureShown else { return }
+
+        guard serverRestartAttempts < maxServerRestartAttempts else {
+            serverStartupFailureShown = true
+            serverGeneration += 1
+            stoppingServer = true
+            stopServer()
+            showError("本地网关连续启动失败。\(message)。请检查应用日志后重试。")
+            return
+        }
+
+        serverRestartAttempts += 1
+        serverGeneration += 1 // Invalidate pending health checks and this process' termination callback.
+        let nextGeneration = serverGeneration
+        stoppingServer = true
+        stopServer()
+        stoppingServer = false
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self,
+                  self.serverGeneration == nextGeneration,
+                  !self.serverStartupFailureShown else { return }
+            let nextGeneration = self.startServer()
+            self.waitForServer(attempt: 0, generation: nextGeneration)
         }
     }
 
@@ -498,15 +543,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
         return Int(UInt16(bigEndian: boundAddress.sin_port))
     }
 
-    private func waitForServer(attempt: Int) {
+    private func waitForServer(attempt: Int, generation: Int) {
+        guard generation == serverGeneration, !serverStartupFailureShown else { return }
         if attempt > 80 {
-            showError("本地网关启动超时，请检查应用日志。")
+            recoverServer(message: "等待本地网关启动超时", generation: generation)
             return
         }
         let healthURL = URL(string: "http://127.0.0.1:\(port)/health")!
         URLSession.shared.dataTask(with: healthURL) { [weak self] data, response, _ in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self,
+                      self.serverGeneration == generation,
+                      !self.serverStartupFailureShown else { return }
                 if let http = response as? HTTPURLResponse, http.statusCode == 200 {
                     // A healthy response from another local service must not be
                     // mistaken for the desktop gateway.
@@ -514,15 +562,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
                     let isDesktop = payload?["mode"] as? String == "desktop"
                     guard isDesktop else {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                            self.waitForServer(attempt: attempt + 1)
+                            self.waitForServer(attempt: attempt + 1, generation: generation)
                         }
                         return
                     }
                     let url = URL(string: "http://127.0.0.1:\(self.port)/")!
                     self.webView?.load(URLRequest(url: url))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 60.0) { [weak self] in
+                        guard let self,
+                              self.serverGeneration == generation,
+                              self.server?.isRunning == true else { return }
+                        self.serverRestartAttempts = 0
+                    }
                 } else {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        self.waitForServer(attempt: attempt + 1)
+                        self.waitForServer(attempt: attempt + 1, generation: generation)
                     }
                 }
             }
@@ -530,6 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, NSWindow
     }
 
     private func showError(_ message: String) {
+        serverStartupFailureShown = true
         let alert = NSAlert()
         alert.messageText = "HeiGate"
         alert.informativeText = message

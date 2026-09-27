@@ -514,7 +514,7 @@ interface AggregateModelCard {
   rawNames: string[]
   aliases: string[]
   providerCount: number
-  status: 'healthy' | 'degraded' | 'offline'
+  status: 'healthy' | 'degraded' | 'unknown' | 'offline'
   latencies: number[]
   providers: string[]
   channelDetails: Array<{
@@ -538,7 +538,7 @@ const models = computed(() => {
       upstreamModel: string
     }>
     latencies: number[]
-    status: 'healthy' | 'degraded' | 'offline'
+    status: 'healthy' | 'degraded' | 'unknown' | 'offline'
   }>()
 
   channels.value.forEach((channel) => {
@@ -565,7 +565,7 @@ const models = computed(() => {
         : (isPrimary ? (channel.ttft ?? channel.latency) : null)
       const effectiveStatus = specificEntry?.status
         ? (specificEntry.status === 'operational' ? 'healthy' : specificEntry.status === 'degraded' ? 'degraded' : 'offline')
-        : (isPrimary ? channel.status : 'offline')
+        : (isPrimary ? channel.status : 'unknown')
 
       if (!current.providers.includes(channel.name)) {
         current.providers.push(channel.name)
@@ -580,6 +580,7 @@ const models = computed(() => {
 
       if (effectiveStatus === 'healthy') current.status = 'healthy'
       else if (effectiveStatus === 'degraded' && current.status !== 'healthy') current.status = 'degraded'
+      else if (effectiveStatus === 'unknown' && current.status === 'offline') current.status = 'unknown'
       if (effectiveLat != null && effectiveLat > 0) current.latencies.push(effectiveLat)
 
       groups.set(groupKey, current)
@@ -622,7 +623,8 @@ const models = computed(() => {
     const latencies = details.map((item) => item.latency).filter((value): value is number => value != null && value > 0)
     const status = details.some((item) => item.status === 'healthy')
       ? 'healthy'
-      : details.some((item) => item.status === 'degraded') ? 'degraded' : 'offline'
+      : details.some((item) => item.status === 'degraded') ? 'degraded'
+        : details.some((item) => item.status === 'unknown') ? 'unknown' : 'offline'
     const avgLatency = latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : null
     list.unshift({
       name: 'Auto',
@@ -640,7 +642,7 @@ const models = computed(() => {
   }
 
   return list.sort((a, b) => {
-    const statusWeight = (s: 'healthy' | 'degraded' | 'offline') => (s === 'healthy' ? 0 : s === 'degraded' ? 1 : 2)
+    const statusWeight = (s: AggregateModelCard['status']) => (s === 'healthy' ? 0 : s === 'degraded' ? 1 : s === 'unknown' ? 2 : 3)
     const swA = statusWeight(a.status)
     const swB = statusWeight(b.status)
     if (swA !== swB) return swA - swB
@@ -4170,7 +4172,7 @@ function handleContextMenu(event: MouseEvent) {
                 <div class="m26-model-status-chip" :class="m.status">
                   <span class="m26-status-indicator-dot" :class="m.status"></span>
                   <span class="m26-status-indicator-text font-mono">
-                    {{ m.status === 'healthy' ? m.latency : m.status === 'degraded' ? `${m.latency} 波动` : '离线' }}
+                    {{ m.status === 'healthy' ? m.latency : m.status === 'degraded' ? `${m.latency} 波动` : m.status === 'unknown' ? '待探活' : '离线' }}
                   </span>
                 </div>
               </div>
@@ -8453,6 +8455,12 @@ input:checked + .m26-slider:before {
   border: 1px solid rgba(225, 29, 72, 0.15);
 }
 
+.m26-model-status-chip.unknown {
+  background: rgba(100, 116, 139, 0.08);
+  color: #64748b;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+}
+
 .m26-status-indicator-dot {
   width: 5px;
   height: 5px;
@@ -8472,6 +8480,10 @@ input:checked + .m26-slider:before {
 
 .m26-status-indicator-dot.offline {
   background: var(--m26-rose);
+}
+
+.m26-status-indicator-dot.unknown {
+  background: #94a3b8;
 }
 
 /* Main Info: Canonical Name + Copy Button */
