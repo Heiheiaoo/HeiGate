@@ -280,6 +280,45 @@ func TestStreamTokenTrackerSawDone(t *testing.T) {
 	tracker2.Feed([]byte("data: {\"type\":\"message_stop\"}\n\n"))
 	require.True(t, tracker2.sawDone)
 	require.Equal(t, "stop", tracker2.finishReason)
+
+	// OpenAI Responses API uses response.completed instead of [DONE].
+	tracker3 := &streamTokenTracker{}
+	tracker3.Feed([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"))
+	require.True(t, tracker3.sawDone)
+	require.Equal(t, "stop", tracker3.finishReason)
+}
+
+func TestResponsesStreamingResponseCompletedIsSuccessful(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/responses", r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n")
+	}))
+	defer server.Close()
+
+	store := newTestStoreForHandler(t)
+	ch := &channel.Channel{
+		Name: "responses", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeResponses,
+		Endpoint: server.URL, APIKey: "key", PrimaryModel: "gpt-test", Enabled: true,
+		LastStatus: probe.StatusOperational,
+	}
+	require.NoError(t, store.Save(context.Background(), ch))
+	h := NewHandler(store, channel.NewProbeRunner(store))
+	r := gin.New()
+	r.POST("/v1/responses", h.forwardResponses)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hello"}`))
+	r.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "response.completed")
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusOperational, loaded.LastStatus)
+	require.Equal(t, 0, loaded.FailureCount)
+	require.Nil(t, loaded.CooldownUntil)
 }
 
 func TestParseUpstreamErrorMessage(t *testing.T) {

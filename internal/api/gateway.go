@@ -1143,6 +1143,17 @@ func (t *streamTokenTracker) Feed(chunk []byte) {
 			}
 		}
 
+		// OpenAI Responses API terminates a stream with a typed
+		// response.completed event rather than data: [DONE]. Treat it as the
+		// authoritative completion marker so normal Codex traffic is not
+		// recorded as a truncated response.
+		if typ, _ := generic["type"].(string); typ == "response.completed" {
+			t.sawDone = true
+			if t.finishReason == "" {
+				t.finishReason = "stop"
+			}
+		}
+
 		// 1. Standard OpenAI usage in chunk
 		if usage, ok := generic["usage"].(map[string]any); ok && usage != nil {
 			pTokens := getIntField(usage, "prompt_tokens", "input_tokens")
