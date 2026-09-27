@@ -295,6 +295,45 @@ func adaptUnsupportedReasoningEffort(body []byte, message string) ([]byte, bool)
 	return adapted, true
 }
 
+func readInitialStreamPrefix(body io.Reader) ([]byte, error) {
+	const maxPrefixBytes = 64 << 10
+	var prefix []byte
+	buf := make([]byte, 4096)
+	for len(prefix) < maxPrefixBytes {
+		n, err := body.Read(buf)
+		if n > 0 {
+			prefix = append(prefix, buf[:n]...)
+			if bytes.Contains(prefix, []byte("\n\n")) || bytes.Contains(prefix, []byte("\r\n\r\n")) {
+				return prefix, nil
+			}
+		}
+		if err != nil {
+			if len(prefix) > 0 {
+				return prefix, nil
+			}
+			return nil, err
+		}
+	}
+	return prefix, nil
+}
+
+func upstreamStreamError(prefix []byte) (string, int, bool) {
+	for _, line := range strings.Split(string(prefix), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if message, status, ok := upstreamErrorPayload([]byte(payload)); ok {
+			return message, status, true
+		}
+	}
+	return "", 0, false
+}
+
 func supportedReasoningEfforts(message string) []string {
 	lower := strings.ToLower(message)
 	marker := strings.Index(lower, "supported types")
@@ -563,8 +602,18 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			// produced its first response bytes. A transport failure before that
 			// point is still safe to fail over; after bytes are committed, replaying
 			// would duplicate assistant output.
-			prefix := make([]byte, 4096)
-			n, readErr := io.ReadAtLeast(response.body, prefix, 1)
+			var prefix []byte
+			var readErr error
+			isUpstreamSSE := strings.Contains(strings.ToLower(response.header.Get("Content-Type")), "text/event-stream")
+			if isUpstreamSSE {
+				prefix, readErr = readInitialStreamPrefix(response.body)
+			} else {
+				prefix = make([]byte, 4096)
+				var n int
+				n, readErr = io.ReadAtLeast(response.body, prefix, 1)
+				prefix = prefix[:n]
+			}
+			n := len(prefix)
 			if n == 0 {
 				_ = response.body.Close()
 				streamErr := &streamStartError{err: readErr}
@@ -578,6 +627,20 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 				}
 				failedAttempts = append(failedAttempts, fmt.Sprintf("%s (传输中断)", ch.Name))
 				return streamErr
+			}
+			if isUpstreamSSE {
+				if message, status, isError := upstreamStreamError(prefix); isError {
+					if adapted, ok := adaptUnsupportedReasoningEffort(body, message); ok && attempt == 0 {
+						_ = response.body.Close()
+						retryBody = adapted
+						lastCandidateErr = &upstreamStatusError{status: status, message: message}
+						step.StatusCode = status
+						step.Error = message
+						step.RawError = message
+						traceSteps = append(traceSteps, step)
+						continue
+					}
+				}
 			}
 			winningTtft = int(time.Since(startOverall) / time.Millisecond)
 			// The request log keeps the client-perceived wait (including any
