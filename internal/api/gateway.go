@@ -80,18 +80,7 @@ func (h *Handler) resolveModelAlias(ctx context.Context, requestedModel string) 
 	if requestedModel == "" {
 		return ""
 	}
-	// 1. Check custom slot mappings from setting
-	if h.store != nil {
-		if mappingStr, err := h.store.GetSetting(ctx, "claude_desktop_model_mappings", ""); err == nil && mappingStr != "" {
-			var mappings map[string]string
-			if json.Unmarshal([]byte(mappingStr), &mappings) == nil {
-				if target, ok := mappings[strings.ToLower(requestedModel)]; ok && strings.TrimSpace(target) != "" {
-					return strings.TrimSpace(target)
-				}
-			}
-		}
-	}
-	// 2. Check if channels directly support this model
+	// Check if channels directly support this model.
 	if h.store != nil {
 		if channels, err := h.store.List(ctx); err == nil {
 			for _, ch := range channels {
@@ -99,7 +88,7 @@ func (h *Handler) resolveModelAlias(ctx context.Context, requestedModel string) 
 					return requestedModel
 				}
 			}
-			// 3. Fallback: if requestedModel starts with "claude-" but no channel
+			// Fallback: if requestedModel starts with "claude-" but no channel
 			// has it, use the primary model of the healthiest enabled channel.
 			// Preferring a channel that is actually serving traffic matters: the
 			// previous "first enabled" rule could hand a working request to a

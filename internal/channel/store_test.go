@@ -11,6 +11,32 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestInitializeDeletesObsoleteClaudeDesktopMapping(t *testing.T) {
+	store, err := OpenStore("file:desktop_obsolete_setting_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	if err := store.SetSetting(ctx, "claude_desktop_model_mappings", `{"claude-slot":"upstream-model"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSetting(ctx, "custom_model_mappings", `{"alias":"model"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := store.GetSetting(ctx, "claude_desktop_model_mappings", ""); err != nil || got != "" {
+		t.Fatalf("obsolete Claude desktop setting remains: value=%q err=%v", got, err)
+	}
+	if got, err := store.GetSetting(ctx, "custom_model_mappings", ""); err != nil || got != `{"alias":"model"}` {
+		t.Fatalf("unrelated custom model mappings changed: value=%q err=%v", got, err)
+	}
+}
+
 func TestChannelStoreCRUD(t *testing.T) {
 	db, err := sql.Open("sqlite", "file:desktop_channel_store_test?mode=memory&cache=shared")
 	if err != nil {

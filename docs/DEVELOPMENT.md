@@ -9,11 +9,11 @@
 1. `internal/middleware.LoopbackOnly` 确认连接来自本机、`Host` 是本机地址
 2. `internal/middleware.BearerAuth` 校验网关密钥
 3. `internal/api.forward` 读取请求体，解析出模型名
-4. `resolveModelAlias` 应用自定义模型映射；若无渠道支持该模型，会退回到任一可用渠道的主模型
-5. `internal/channel.Router.CandidatesMatching` 过滤出支持该模型且协议匹配的渠道，按健康度分层（healthy → degraded → failed → cooling down），再按策略排序
+4. `resolveModelAlias` 对没有直连渠道支持的 `claude-*` 请求名回退到健康渠道主模型；其他未知模型保留原值
+5. `internal/channel.Router.CandidatesMatching` 按精确名、规范名/自定义映射及协议筛选渠道，再按健康度分层（healthy → degraded → failed → cooling down）和策略排序
 6. 先写一条状态为「传输中」的日志，让界面能实时看到
 7. `RouteCandidates` 依次尝试候选渠道，每个渠道最多重试一次
-8. `forwardUpstream` 判断是否需要协议转换：客户端说 Anthropic 而上游是 OpenAI 时走 `forwardTranslated`，否则直接转发并改写模型名
+8. 选定渠道后，用该渠道实际配置的模型名改写请求；`forwardUpstream` 判断是否需要协议转换：客户端说 Anthropic 而上游是 OpenAI 时走 `forwardTranslated`，否则直接转发
 9. **首字节之后不再故障转移** —— 已经发给客户端的内容不能重放，否则会出现重复输出
 10. 边转发边统计 token，定期更新日志；结束时写入最终状态
 

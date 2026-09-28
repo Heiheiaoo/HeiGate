@@ -23,11 +23,10 @@ import (
 // Authentication is deliberately not part of this handler; callers must mount
 // it behind LoopbackOnly so it cannot become a public unauthenticated API.
 type Handler struct {
-	store   *channel.Store
-	runner  *channel.ProbeRunner
-	router  *channel.Router
-	key     string
-	baseURL string // e.g. http://127.0.0.1:8080, advertised to client integrations
+	store  *channel.Store
+	runner *channel.ProbeRunner
+	router *channel.Router
+	key    string
 }
 
 func NewHandler(store *channel.Store, runner *channel.ProbeRunner) *Handler {
@@ -35,7 +34,7 @@ func NewHandler(store *channel.Store, runner *channel.ProbeRunner) *Handler {
 }
 
 func NewHandlerWithGatewayKey(store *channel.Store, runner *channel.ProbeRunner, key string) *Handler {
-	h := &Handler{store: store, runner: runner, router: channel.NewRouter(store), key: key, baseURL: "http://127.0.0.1:8080"}
+	h := &Handler{store: store, runner: runner, router: channel.NewRouter(store), key: key}
 	if store != nil {
 		if raw, err := store.GetSetting(context.Background(), "custom_model_mappings", "{}"); err == nil && raw != "" {
 			var mappings map[string]string
@@ -45,14 +44,6 @@ func NewHandlerWithGatewayKey(store *channel.Store, runner *channel.ProbeRunner,
 		}
 	}
 	return h
-}
-
-// SetGatewayBaseURL records the address clients should use to reach the
-// gateway; it is written into Claude / Codex configuration files.
-func (h *Handler) SetGatewayBaseURL(baseURL string) {
-	if u := strings.TrimRight(strings.TrimSpace(baseURL), "/"); u != "" {
-		h.baseURL = u
-	}
 }
 
 // RegisterRoutes mounts the local management API below the supplied group.
@@ -80,11 +71,6 @@ func (h *Handler) RegisterRoutes(group *gin.RouterGroup) {
 	group.POST("/logs/prune", h.pruneLogs)
 	group.GET("/system", h.systemInfo)
 	group.PUT("/settings", h.updateSettings)
-	group.GET("/clients", h.listClients)
-	group.POST("/clients/claude/configure", h.configureClaude)
-	group.POST("/clients/claude/launch", h.launchClaude)
-	group.POST("/clients/codex/configure", h.configureCodex)
-	group.POST("/clients/codex/launch", h.launchCodex)
 }
 
 func (h *Handler) session(c *gin.Context) {

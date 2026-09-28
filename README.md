@@ -24,7 +24,7 @@
 - **协议互通** — 用 Anthropic 的客户端调 OpenAI 兼容的上游，请求和响应（含流式）实时转换
 - **健康探活** — 手动触发，用主模型执行轻量算术题，需要时再队列检查全部模型，验证密钥、端点、模型名是否真的可用；不在后台定时消耗额度
 - **用量统计** — 每次请求的渠道、模型、token、首字延迟、失败链路都记在本地，可按天/模型/渠道汇总
-- **客户端集成** — 一键把 Claude 桌面端和 Codex 的配置指向 HeiGate
+- **客户端接入** — 通过网关地址和 API Key 手动接入 Claude Code、Cursor、Codex CLI 等工具
 
 数据保存在系统用户目录下的 SQLite 文件里（macOS：`~/Library/Application Support/HeiGate`，Windows：`%APPDATA%\HeiGate`），不上传任何地方。网关只监听回环地址。
 
@@ -55,7 +55,7 @@ xattr -dr com.apple.quarantine /Applications/HeiGate.app
 
 ## 连接你的工具
 
-启动 HeiGate 后，在界面里添加渠道，然后在「客户端集成」页面一键配置 Claude 桌面端或 Codex。也可以手动配置任何工具。
+启动 HeiGate 后，在界面里添加渠道，然后将设置页显示的网关地址和 API Key 填入客户端。支持任何兼容 OpenAI、Responses 或 Anthropic 协议的工具。
 
 界面上的「网关密钥」用于客户端认证，它保存在数据目录下的 `gateway.key`（macOS：`~/Library/Application Support/HeiGate/gateway.key`，权限 `0600`；Windows：`%APPDATA%\HeiGate\gateway.key`）。
 
