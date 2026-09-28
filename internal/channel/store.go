@@ -187,6 +187,10 @@ func (s *Store) initialize(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("create desktop channel schema: %w", err)
 	}
+	// The Claude desktop integration that created this setting has been removed.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM desktop_settings WHERE key = 'claude_desktop_model_mappings'`); err != nil {
+		return fmt.Errorf("remove obsolete desktop setting: %w", err)
+	}
 	// Keep existing desktop databases forward-compatible with the resilience,
 	// token metrics, and rich trace audit fields added after the initial desktop release.
 	for _, statement := range []string{

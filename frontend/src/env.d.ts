@@ -1,0 +1,1 @@
+declare const __HEIGATE_DEV_GATEWAY_URL__: string

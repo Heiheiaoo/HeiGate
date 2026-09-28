@@ -24,7 +24,7 @@ If you juggle several AI API endpoints — official keys, a relay, a local Ollam
 - **Protocol translation** — talk to an OpenAI-compatible upstream with an Anthropic client; requests and responses (including streaming) are converted on the fly
 - **Health probes** — on demand, exercise the primary model with a tiny arithmetic question, with queued checks for every configured model when you ask for them; nothing spends quota in the background
 - **Usage tracking** — every request records its channel, model, tokens, time to first token, and failover chain locally, with daily/model/channel rollups
-- **Client integration** — point the Claude desktop app or Codex at HeiGate with one click
+- **Client access** — connect Claude Code, Cursor, Codex CLI, and other clients with the gateway URL and API key
 
 Everything lives in a local SQLite file (macOS: `~/Library/Application Support/HeiGate`; Windows: `%APPDATA%\HeiGate`). Nothing is uploaded. The gateway listens on loopback only.
 
@@ -55,7 +55,7 @@ xattr -dr com.apple.quarantine /Applications/HeiGate.app
 
 ## Connect your tools
 
-Start HeiGate, add a channel in the UI, then use the client integration page to configure the Claude desktop app or Codex automatically. Manual setup works with any tool.
+Start HeiGate, add a channel in the UI, then copy the gateway URL and API key from Settings into your client. Manual setup works with any OpenAI-, Responses-, or Anthropic-compatible tool.
 
 The gateway key shown in the UI authenticates clients. It is stored as `gateway.key` in the data directory (macOS: `~/Library/Application Support/HeiGate/gateway.key` with `0600` permissions; Windows: `%APPDATA%\HeiGate\gateway.key`).
 

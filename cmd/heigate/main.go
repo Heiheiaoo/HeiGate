@@ -116,9 +116,7 @@ func run(host string, port int) error {
 	}
 	boundPort := listener.Addr().(*net.TCPAddr).Port
 	baseURL := "http://" + net.JoinHostPort(host, strconv.Itoa(boundPort))
-
 	handler := api.NewHandlerWithGatewayKey(store, runner, gatewayKey)
-	handler.SetGatewayBaseURL(baseURL)
 
 	gin.SetMode(gin.ReleaseMode)
 	router := newRouter(handler, gatewayKey)

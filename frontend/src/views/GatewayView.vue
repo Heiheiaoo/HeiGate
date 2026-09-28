@@ -295,10 +295,8 @@ function showToast(msg: string) {
 }
 
 const gatewayBaseUrl = computed(() => {
-  if (typeof window === 'undefined') return 'http://127.0.0.1:8080/v1'
-  if (window.location.port === '5173' || window.location.port === '3000') {
-    return 'http://127.0.0.1:8080/v1'
-  }
+  if (import.meta.env.DEV) return __HEIGATE_DEV_GATEWAY_URL__
+  if (typeof window === 'undefined') return 'http://127.0.0.1:18080/v1'
   return `${window.location.origin}/v1`
 })
 

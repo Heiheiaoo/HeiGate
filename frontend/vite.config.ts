@@ -6,9 +6,13 @@ import { fileURLToPath, URL } from 'node:url'
 // locally running gateway (`make run`). In production the Go binary serves
 // the built files itself, so everything is same-origin.
 const gateway = process.env.HEIGATE_DEV_TARGET ?? 'http://127.0.0.1:8080'
+const devGatewayURL = `${gateway.replace(/\/+$/, '')}/v1`
 
 export default defineConfig({
   plugins: [vue()],
+  define: {
+    __HEIGATE_DEV_GATEWAY_URL__: JSON.stringify(devGatewayURL),
+  },
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
