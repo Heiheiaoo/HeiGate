@@ -35,6 +35,7 @@ import {
   isModelEquivalent,
   selectCanonicalDisplayName,
 } from '@/services/modelNaming'
+import { vFocusTrap } from '@/directives/focusTrap'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
@@ -4712,16 +4713,16 @@ function handleContextMenu(event: MouseEvent) {
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
 
     <!-- MODAL: INJECTION CHECK (Redesigned) -->
-    <div v-if="showInjectionModal" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
+    <div v-if="showInjectionModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-1" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
       <div class="m26-modal-sheet m26-inject-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2.5">
-            <h3 class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
+            <h3 id="m26-modal-title-1" class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
             <span class="m26-inject-pill" :class="injectionChannel?.injectionState ?? 'unknown'">
               {{ injectionStateLabel(injectionChannel!) }}
             </span>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showInjectionModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showInjectionModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body m26-inject-body">
@@ -4858,11 +4859,11 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: ADD CHANNEL -->
-    <div v-if="showAddChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
+    <div v-if="showAddChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-2" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
       <div class="m26-modal-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <h3 class="m26-modal-title">添加供应商渠道</h3>
-          <button class="m26-close-btn" data-no-drag @click="showAddChannel = false">✕</button>
+          <h3 id="m26-modal-title-2" class="m26-modal-title">添加供应商渠道</h3>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showAddChannel = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -4933,11 +4934,11 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: EDIT CHANNEL -->
-    <div v-if="showEditChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showEditChannel = false)">
+    <div v-if="showEditChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-3" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showEditChannel = false)">
       <div class="m26-modal-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <h3 class="m26-modal-title">编辑渠道配置</h3>
-          <button class="m26-close-btn" data-no-drag @click="showEditChannel = false">✕</button>
+          <h3 id="m26-modal-title-3" class="m26-modal-title">编辑渠道配置</h3>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showEditChannel = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5008,11 +5009,11 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: CONFIRM ACTION -->
-    <div v-if="confirmModal" class="m26-modal-backdrop m26-confirm-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => confirmModal = null)">
+    <div v-if="confirmModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-4" class="m26-modal-backdrop m26-confirm-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => confirmModal = null)">
       <div class="m26-modal-sheet m26-confirm-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <h3 class="m26-modal-title">{{ confirmModal.title }}</h3>
-          <button class="m26-close-btn" data-no-drag @click="confirmModal = null">✕</button>
+          <h3 id="m26-modal-title-4" class="m26-modal-title">{{ confirmModal.title }}</h3>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="confirmModal = null">✕</button>
         </div>
         <div class="m26-modal-body">
           <div class="m26-confirm-content">
@@ -5041,12 +5042,12 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: MODEL LATENCY & SPEED TEST -->
-    <div v-if="activeModelLatencyChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
+    <div v-if="activeModelLatencyChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-5" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
       <div class="m26-modal-sheet m26-models-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div>
             <div class="flex items-center gap-2">
-              <h3 class="m26-modal-title">模型管理</h3>
+              <h3 id="m26-modal-title-5" class="m26-modal-title">模型管理</h3>
               <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
                 {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
               </span>
@@ -5055,7 +5056,7 @@ function handleContextMenu(event: MouseEvent) {
             {{ activeModelLatencyChannel.name }} · {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
             </p>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
         </div>
 
         <div class="m26-modal-toolbar">
@@ -5259,7 +5260,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: MODEL MULTI-PROVIDER SPEED TEST (测试此模型所有供应商) -->
     <div
       v-if="activeModelSpeedTestName"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-label="模型测速" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, closeModelSpeedTestModal)"
     >
@@ -5304,7 +5305,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="closeModelSpeedTestModal">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="closeModelSpeedTestModal">✕</button>
         </div>
 
         <!-- Toolbar -->
@@ -5431,7 +5432,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: MODEL ALIASES DETAIL -->
     <div
       v-if="activeAliasModalModel"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-label="模型别名" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, closeAliasModal)"
     >
@@ -5472,7 +5473,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="closeAliasModal">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="closeAliasModal">✕</button>
         </div>
 
         <div class="m26-modal-toolbar">
@@ -5717,7 +5718,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: QUICK MODEL CLASSIFY -->
     <div
       v-if="showClassifyModal"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-6" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, () => showClassifyModal = false)"
     >
@@ -5727,9 +5728,9 @@ function handleContextMenu(event: MouseEvent) {
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
             </svg>
-            <h3 class="m26-modal-title">手动模型归并</h3>
+            <h3 id="m26-modal-title-6" class="m26-modal-title">手动模型归并</h3>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showClassifyModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showClassifyModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5783,7 +5784,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: CUSTOM MODEL MAPPINGS MANAGER -->
     <div
       v-if="showCustomMappingsModal"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-7" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, () => showCustomMappingsModal = false)"
     >
@@ -5793,9 +5794,9 @@ function handleContextMenu(event: MouseEvent) {
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
             </svg>
-            <h3 class="m26-modal-title">自定义模型归类设置</h3>
+            <h3 id="m26-modal-title-7" class="m26-modal-title">自定义模型归类设置</h3>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showCustomMappingsModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showCustomMappingsModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5891,7 +5892,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: CHANNEL PROBE & ERROR DIAGNOSIS -->
-    <div v-if="activeDiagnosticChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeDiagnosticChannel = null)">
+    <div v-if="activeDiagnosticChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-8" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeDiagnosticChannel = null)">
       <div class="m26-modal-sheet m26-diagnostic-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2">
@@ -5901,13 +5902,13 @@ function handleContextMenu(event: MouseEvent) {
               </svg>
             </div>
             <div>
-              <h3 class="m26-modal-title">探活诊断与报错详情</h3>
+              <h3 id="m26-modal-title-8" class="m26-modal-title">探活诊断与报错详情</h3>
               <p class="m26-modal-subtitle">
                 渠道 “{{ activeDiagnosticChannel.name }}” · {{ activeDiagnosticChannel.url }}
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="activeDiagnosticChannel = null">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeDiagnosticChannel = null">✕</button>
         </div>
 
         <div class="m26-modal-body m26-diagnostic-body">
@@ -5985,7 +5986,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: LOG DETAIL -->
-    <div v-if="activeLogDetail" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeLogDetail = null)">
+    <div v-if="activeLogDetail" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-9" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeLogDetail = null)">
       <div class="m26-modal-sheet m26-log-detail-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2">
@@ -6009,13 +6010,13 @@ function handleContextMenu(event: MouseEvent) {
               </svg>
             </div>
             <div>
-              <h3 class="m26-modal-title">请求流水详情 #{{ activeLogDetail.id }}</h3>
+              <h3 id="m26-modal-title-9" class="m26-modal-title">请求流水详情 #{{ activeLogDetail.id }}</h3>
               <p class="m26-modal-subtitle">
                 {{ formatLogTime(activeLogDetail.created_at) }} · 网关全链路诊断
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="activeLogDetail = null">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeLogDetail = null">✕</button>
         </div>
 
         <div class="m26-modal-body m26-diagnostic-body">
@@ -6199,7 +6200,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: KEYBOARD SHORTCUTS CHEAT SHEET -->
-    <div v-if="showShortcutsModal" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showShortcutsModal = false)">
+    <div v-if="showShortcutsModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-10" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showShortcutsModal = false)">
       <div class="m26-modal-sheet m26-shortcuts-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2">
@@ -6210,11 +6211,11 @@ function handleContextMenu(event: MouseEvent) {
               </svg>
             </div>
             <div>
-              <h3 class="m26-modal-title">键盘快捷键速查</h3>
+              <h3 id="m26-modal-title-10" class="m26-modal-title">键盘快捷键速查</h3>
               <p class="m26-modal-subtitle">原生 macOS 全局键位与极速交互体验</p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showShortcutsModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showShortcutsModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body m26-shortcuts-body">
