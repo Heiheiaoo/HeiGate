@@ -250,6 +250,7 @@ const configInput = ref<HTMLInputElement | null>(null)
 const gatewayApiActive = ref(false)
 const gatewayOnline = ref(false)
 const gatewayLatency = ref<number | null>(null)
+const appVersion = ref<string>(__HEIGATE_APP_VERSION__)
 const gatewayLastChecked = ref('尚未检测')
 const gatewayApiKey = ref('')
 const maskedOverviewApiKey = computed(() => {
@@ -2586,6 +2587,7 @@ async function refreshGatewayHealth() {
   const health = await checkGatewayHealth()
   gatewayOnline.value = health.ok
   gatewayLatency.value = health.latency
+  if (health.version) appVersion.value = health.version
   gatewayLastChecked.value = health.ok ? `${formatLatencySec(health.latency)} 响应` : '无法连接'
 }
 
@@ -4844,6 +4846,32 @@ function handleContextMenu(event: MouseEvent) {
                 <div class="m26-pref-row" v-else>
                   <div class="text-xs text-slate-400 py-2">
                     暂无自定义归类规则。系统当前按内置智能规约算法聚合。遇到未识别的特殊名称可在上方添加映射，或在【模型】卡片上直接点击“归并”。
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="m26-pref-group">
+              <div class="m26-pref-group-header">
+                <div class="m26-pref-group-icon icon-version">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="9" />
+                    <line x1="12" y1="11" x2="12" y2="16" />
+                    <circle cx="12" cy="8" r="0.5" fill="currentColor" />
+                  </svg>
+                </div>
+                <div class="m26-pref-group-titles">
+                  <h3 class="m26-pref-title">关于 HeiGate</h3>
+                  <span class="m26-pref-subtitle">应用构建信息</span>
+                </div>
+              </div>
+              <div class="m26-pref-card">
+                <div class="m26-pref-row">
+                  <div class="m26-pref-meta">
+                    <span class="label">当前版本</span>
+                  </div>
+                  <div class="m26-pref-ctrl">
+                    <span class="m26-db-chip font-mono">v{{ appVersion }}</span>
                   </div>
                 </div>
               </div>
@@ -9417,6 +9445,11 @@ input:checked + .m26-slider:before {
 .m26-pref-group-icon.icon-storage {
   background: rgba(16, 185, 129, 0.1);
   color: #059669;
+}
+
+.m26-pref-group-icon.icon-version {
+  background: rgba(20, 184, 166, 0.1);
+  color: #0f766e;
 }
 
 .m26-pref-group-titles {
