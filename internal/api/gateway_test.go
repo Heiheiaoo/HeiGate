@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Heiheiaoo/heigate/internal/channel"
 	"github.com/Heiheiaoo/heigate/internal/probe"
@@ -564,6 +565,270 @@ func TestResolveModelAliasPrefersHealthyChannel(t *testing.T) {
 	if got := handler.resolveModelAlias(context.Background(), "claude-sonnet-4-6"); got == "" || got == "claude-sonnet-4-6" {
 		t.Fatalf("expected a last-resort model, got %q", got)
 	}
+}
+
+// TestUpstreamErrorPayloadPolicy locks the whole shape matrix to the policy
+// documented on upstreamErrorPayload: a body is an error only when `error` is a
+// non-empty value, or the top-level `code` is an HTTP status outside 2xx. A bare
+// top-level `message` is not a signal. Two failure modes matter equally here — a
+// false positive fails over a healthy channel and benches it, a false negative
+// hands the client an empty answer — so both directions are pinned.
+func TestUpstreamErrorPayloadPolicy(t *testing.T) {
+	cases := []struct {
+		body       string
+		wantErr    bool
+		wantStatus int
+		why        string
+	}{
+		// No signal at all.
+		{`{"choices":[{"delta":{"content":"hi"}}]}`, false, 0, "normal stream frame"},
+		{`{"type":"message_start","message":{"id":"m1"}}`, false, 0, "anthropic frame, no error key"},
+
+		// Empty error slots — upstreams include these routinely.
+		{`{"error":null}`, false, 0, "null"},
+		{`{"error":{}}`, false, 0, "empty object"},
+		{`{"error":{ }}`, false, 0, "empty object, whitespace"},
+		{`{"error":[]}`, false, 0, "empty array"},
+		{`{"error":""}`, false, 0, "empty string"},
+		{`{"error":false}`, false, 0, "false idiom"},
+		{`{"error":0}`, false, 0, "numeric zero"},
+		{`{"error":{"type":"","message":""}}`, false, 0, "object with all-empty values"},
+		{`{"error":{},"choices":[{"delta":{"content":"x"}}]}`, false, 0, "empty slot beside content"},
+
+		// A bare message is informational, not a failure signal.
+		{`{"error":null,"message":"served by node-3"}`, false, 0, "explicit null + info message"},
+		{`{"error":{},"message":"served by node-3"}`, false, 0, "empty slot + info message"},
+		{`{"error":{},"message":{"id":"msg_1"}}`, false, 0, "message is an object"},
+		{`{"message":"rate limited"}`, false, 0, "message with no code"},
+
+		// Top-level code: only a 4xx/5xx HTTP status is a signal.
+		{`{"code":0}`, false, 0, "0 is a success code"},
+		{`{"code":"0"}`, false, 0, "0 as a string"},
+		{`{"code":200}`, false, 0, "2xx"},
+		{`{"code":199}`, false, 0, "1xx is not a failure"},
+		{`{"code":301}`, false, 0, "3xx is not a failure"},
+		{`{"code":301,"data":{"x":1}}`, false, 0, "business code in the 3xx range"},
+		{`{"code":1000}`, false, 0, "outside the HTTP range"},
+		{`{"code":"success"}`, false, 0, "non-numeric code"},
+
+		// Non-empty error values.
+		{`{"error":{"message":"rate limited","type":"rate_limit_error"}}`, true, 429, "typed rate limit"},
+		{`{"error":{"message":"bad key","type":"invalid_api_key"}}`, true, 401, "typed auth failure"},
+		{`{"error":"boom"}`, true, 502, "string error"},
+		{`{"error":{"type":"overloaded_error"}}`, true, 502, "type only"},
+		{`{"error":{"message":"x"}}`, true, 502, "message only"},
+
+		// Top-level code in the failure range, with or without an error slot.
+		{`{"error":{},"code":429}`, true, 429, "empty slot + code"},
+		{`{"error":0,"code":429}`, true, 429, "zero slot + code"},
+		{`{"code":429,"message":"rate limited"}`, true, 429, "no error key at all"},
+		{`{"code":"429"}`, true, 429, "numeric string code"},
+		{`{"code":429.0}`, true, 429, "integral number code"},
+		{`{"code":404}`, true, 404, "4xx code"},
+		{`{"code":503}`, true, 503, "5xx code"},
+		{`{"error":{},"message":"rate limited","code":429}`, true, 429, "code wins over text"},
+
+		// Nested error.code is as authoritative as the top-level one. Getting
+		// this wrong maps an auth failure to 502, whose cooldown is 15s instead
+		// of the 10 minutes an auth failure is meant to get.
+		{`{"error":{"code":401}}`, true, 401, "nested numeric code"},
+		{`{"error":{"code":429}}`, true, 429, "nested rate-limit code"},
+		{`{"error":{"code":"429"}}`, true, 429, "nested numeric string code"},
+		{`{"error":{"message":"x","code":503}}`, true, 503, "nested code beside message"},
+		{`{"error":{"code":"invalid_api_key"}}`, true, 401, "non-numeric code still classified by text"},
+		{`{"error":{"code":0,"message":"boom"}}`, true, 502, "nested zero code is not a status"},
+		{`{"error":{"code":301,"message":"boom"}}`, true, 502, "nested 3xx is not a failure status"},
+
+		// OpenAI Responses API nests the failure under `response`.
+		{`{"type":"response.failed","response":{"error":{"message":"boom","code":"server_error"}}}`, true, 502, "responses failure"},
+		{`{"type":"response.failed","response":{"error":{"code":429,"message":"slow down"}}}`, true, 429, "responses failure with code"},
+		{`{"type":"response.completed","response":{"id":"r1","status":"completed","error":null}}`, false, 0, "responses success with null error"},
+		{`{"type":"response.created","response":{"id":"r1","status":"in_progress"}}`, false, 0, "responses in-progress"},
+		{`{"response":{"code":200,"status":"completed"}}`, false, 0, "responses 2xx code"},
+	}
+
+	for _, tc := range cases {
+		_, status, isErr := upstreamErrorPayload([]byte(tc.body))
+		if isErr != tc.wantErr {
+			t.Errorf("%s: isError=%v want %v (%s)", tc.body, isErr, tc.wantErr, tc.why)
+			continue
+		}
+		if tc.wantErr && status != tc.wantStatus {
+			t.Errorf("%s: status=%d want %d (%s)", tc.body, status, tc.wantStatus, tc.why)
+		}
+	}
+}
+
+// A string-valued `error` keeps its text instead of degrading to the raw JSON.
+func TestParseUpstreamErrorMessageUnwrapsStringError(t *testing.T) {
+	require.Equal(t, "boom", parseUpstreamErrorMessage(`{"error":"boom"}`))
+	require.Equal(t, "rate limited", parseUpstreamErrorMessage(`{"error":{"message":"rate limited"}}`))
+	require.Equal(t, "rate limited", parseUpstreamErrorMessage(`{"message":"rate limited"}`))
+	require.Equal(t, "rate limited", parseUpstreamErrorMessage(`{"msg":"rate limited"}`))
+}
+
+// Truncation of echoed text is bounded, so a large body cannot be amplified.
+func TestParseUpstreamErrorMessageTruncatesLongBody(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	got := parseUpstreamErrorMessage(long)
+	require.Len(t, got, maxEchoedErrorText+3)
+	require.True(t, strings.HasSuffix(got, "..."))
+
+	// A stream value that is not a boolean is echoed back bounded too.
+	body := `{"model":"m","stream":"` + long + `"}`
+	_, _, err := requestModel([]byte(body))
+	require.Error(t, err)
+	require.Less(t, len(err.Error()), 400)
+}
+
+// Truncation must cut on a rune boundary: a multi-byte character split in half
+// would put invalid UTF-8 into the response and the logs.
+func TestTruncateEchoedKeepsValidUTF8(t *testing.T) {
+	// 3 bytes per rune: some lengths make the 200-byte cut land mid-rune.
+	for _, n := range []int{100, 150, 201, 500} {
+		got := truncateEchoed(strings.Repeat("中", n))
+		require.True(t, utf8.ValidString(got), "n=%d produced invalid UTF-8", n)
+		require.LessOrEqual(t, len(got), maxEchoedErrorText+3)
+	}
+	// ASCII is unaffected.
+	require.Equal(t, "abc", truncateEchoed("abc"))
+}
+
+// A `stream` that is not a JSON boolean is rejected with a message naming the
+// field, rather than the struct-field decode error a plain `bool` gives. The
+// flag decides whether the reply is translated as SSE, so it must be
+// unambiguous rather than guessed at.
+func TestRequestModelRejectsNonBoolStream(t *testing.T) {
+	cases := []struct {
+		body       string
+		wantStream bool
+	}{
+		{`{"model":"m"}`, false},
+		{`{"model":"m","stream":true}`, true},
+		{`{"model":"m","stream":false}`, false},
+		{`{"model":"m","stream":null}`, false},
+	}
+	for _, tc := range cases {
+		model, stream, err := requestModel([]byte(tc.body))
+		require.NoError(t, err, tc.body)
+		require.Equal(t, "m", model, tc.body)
+		require.Equal(t, tc.wantStream, stream, tc.body)
+	}
+
+	for _, body := range []string{
+		`{"model":"m","stream":"true"}`,
+		`{"model":"m","stream":1}`,
+		`{"model":"m","stream":{}}`,
+	} {
+		_, _, err := requestModel([]byte(body))
+		require.Error(t, err, body)
+		require.Contains(t, err.Error(), "invalid `stream`", body)
+	}
+
+	if _, _, err := requestModel([]byte(`{"stream":true}`)); err == nil {
+		t.Error("a missing model must still be rejected")
+	}
+}
+
+// Regression: a normal SSE frame carrying an empty `error` slot must stream
+// through as success rather than being mistaken for an in-band error, which
+// would fail over to another channel and penalize this one.
+func TestForwardStreamsThroughEmptyErrorSlot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"error\":{}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	store := namedTestStore(t, "desktop_empty_error_slot_test")
+	ch := &channel.Channel{
+		Name: "only", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions,
+		Endpoint: server.URL, APIKey: "k", PrimaryModel: "m", Enabled: true,
+		LastStatus: probe.StatusOperational,
+	}
+	require.NoError(t, store.Save(context.Background(), ch))
+
+	h := NewHandler(store, channel.NewProbeRunner(store))
+	r := gin.New()
+	r.POST("/v1/chat/completions", h.forwardChatCompletions)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, hits)
+	require.Contains(t, rec.Body.String(), "hi")
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusOperational, loaded.LastStatus, "an empty error slot must not penalize the channel")
+	require.Equal(t, 0, loaded.FailureCount)
+}
+
+// The Responses API reports a failure as a `response.failed` event with the
+// error nested under `response`, so it needs the same first-byte failover as a
+// top-level in-band error. This is the Responses counterpart of
+// TestForwardFailsOverOnInBandStreamError.
+func TestForwardFailsOverOnResponsesStreamFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var badHits, goodHits int
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		badHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstream boom\",\"code\":429}}}\n\n")
+	}))
+	defer badServer.Close()
+	goodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n")
+	}))
+	defer goodServer.Close()
+
+	store := namedTestStore(t, "desktop_responses_failover_test")
+	fastTTFT, slowTTFT := 5, 50
+	bad := &channel.Channel{
+		Name: "bad", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeResponses,
+		Endpoint: badServer.URL, APIKey: "k1", PrimaryModel: "m", Enabled: true,
+		LastStatus: probe.StatusOperational, LastTTFTMs: &fastTTFT,
+	}
+	good := &channel.Channel{
+		Name: "good", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeResponses,
+		Endpoint: goodServer.URL, APIKey: "k2", PrimaryModel: "m", Enabled: true,
+		LastStatus: probe.StatusOperational, LastTTFTMs: &slowTTFT,
+	}
+	for _, c := range []*channel.Channel{bad, good} {
+		require.NoError(t, store.Save(context.Background(), c))
+	}
+
+	h := NewHandler(store, channel.NewProbeRunner(store))
+	r := gin.New()
+	r.POST("/v1/responses", h.forwardResponses)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		strings.NewReader(`{"model":"m","stream":true,"input":"hi"}`))
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, badHits, "the failing channel should have been tried once")
+	require.Equal(t, 1, goodHits, "must fail over to the healthy channel")
+	require.Contains(t, rec.Body.String(), "hi")
+	require.NotContains(t, rec.Body.String(), "upstream boom", "the failure must not reach the client")
+
+	loadedBad, err := store.Get(context.Background(), bad.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusError, loadedBad.LastStatus)
+
+	loadedGood, err := store.Get(context.Background(), good.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusOperational, loadedGood.LastStatus)
 }
 
 // namedTestStore opens a store on its own shared-cache in-memory database so
