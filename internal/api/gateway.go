@@ -475,7 +475,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body is too large"})
 		return
 	}
-	model, err := requestModel(body)
+	model, streamRequested, err := requestModel(body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -495,8 +495,6 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		// Never silently replace a client's requested model with an unrelated
 		// healthy model. Explicit aliases are resolved above; everything else
 		// must fail clearly so callers can decide how to recover.
-	}
-	if err != nil {
 		if proto == protocolAnthropic {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"type": "error",
@@ -529,7 +527,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 	startOverall := time.Now()
 	var winningTtft int
 	initialPromptTokens := estimatePromptTokens(body)
-	isStreamRequest := bytes.Contains(body, []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`)) || strings.Contains(strings.ToLower(c.Request.Header.Get("Accept")), "text/event-stream")
+	isStreamRequest := streamRequested || strings.Contains(strings.ToLower(c.Request.Header.Get("Accept")), "text/event-stream")
 
 	clientIP := c.ClientIP()
 	userAgent := c.Request.UserAgent()
@@ -656,16 +654,29 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			}
 			if isUpstreamSSE {
 				if message, status, isError := upstreamStreamError(prefix); isError {
+					// An SSE stream can carry an error frame under an HTTP 200
+					// (rate-limit, overload, quota — common from OpenAI-compatible
+					// aggregators). Nothing has been sent to the client yet, so this
+					// is still safe to fail over: closing the body and returning the
+					// error lets RouteCandidates try the next channel instead of
+					// committing this one and streaming the error through.
+					upErr := &upstreamStatusError{status: status, message: message}
+					_ = response.body.Close()
+					lastCandidateErr = upErr
+					step.StatusCode = status
+					step.Error = message
+					step.RawError = message
 					if adapted, ok := adaptUnsupportedReasoningEffort(body, message); ok && attempt == 0 {
-						_ = response.body.Close()
 						retryBody = adapted
-						lastCandidateErr = &upstreamStatusError{status: status, message: message}
-						step.StatusCode = status
-						step.Error = message
-						step.RawError = message
 						traceSteps = append(traceSteps, step)
 						continue
 					}
+					traceSteps = append(traceSteps, step)
+					if attempt == 0 && channel.FailureIsRetryable(upErr.FailureInfo()) {
+						continue
+					}
+					failedAttempts = append(failedAttempts, fmt.Sprintf("%s (%d: %s)", ch.Name, status, message))
+					return upErr
 				}
 			}
 			winningTtft = int(time.Since(startOverall) / time.Millisecond)
@@ -803,6 +814,12 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 	}
 
 	for key, values := range upstream.header {
+		// Hop-by-hop headers describe the upstream connection, not the payload;
+		// forwarding them (or a stale Content-Length) is incorrect proxy
+		// behavior and can desync framing. The net/http server sets its own.
+		if isHopByHopHeader(key) {
+			continue
+		}
 		for _, value := range values {
 			c.Writer.Header().Add(key, value)
 		}
@@ -1001,6 +1018,27 @@ func (e *upstreamStatusError) FailureInfo() channel.FailureInfo {
 	return info
 }
 
+// hopByHopHeaders are connection-scoped headers a proxy must not forward to the
+// client (RFC 7230 §6.1), plus Content-Length, which no longer describes the
+// body once the server re-frames the response.
+var hopByHopHeaders = map[string]struct{}{
+	"connection":          {},
+	"proxy-connection":    {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+	"content-length":      {},
+}
+
+func isHopByHopHeader(key string) bool {
+	_, ok := hopByHopHeaders[strings.ToLower(strings.TrimSpace(key))]
+	return ok
+}
+
 type transportError struct{ err error }
 
 func (e *transportError) Error() string { return "upstream request failed" }
@@ -1174,17 +1212,26 @@ func (h *Handler) gatewayModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
 
-func requestModel(body []byte) (string, error) {
+// requestModel extracts the requested model and stream flag from the request
+// body in a single parse. The stream flag must come from the decoded JSON, not
+// a substring scan of the raw bytes: a non-streaming request whose content
+// merely mentions `"stream":true` (a prompt about streaming APIs, a JSON
+// example) would otherwise be misclassified as streaming, and its plain JSON
+// response would then be fed to the streaming token tracker — which finds no
+// SSE frames, reports an unexpected EOF, and wrongly penalizes a healthy
+// channel while logging a successful request as a 502.
+func requestModel(body []byte) (model string, stream bool, err error) {
 	var payload struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("invalid JSON request: %w", err)
+		return "", false, fmt.Errorf("invalid JSON request: %w", err)
 	}
 	if strings.TrimSpace(payload.Model) == "" {
-		return "", fmt.Errorf("model is required")
+		return "", false, fmt.Errorf("model is required")
 	}
-	return strings.TrimSpace(payload.Model), nil
+	return strings.TrimSpace(payload.Model), payload.Stream, nil
 }
 
 func gatewayCandidateMatcher(proto gatewayProtocol) func(*channel.Channel) bool {
@@ -1596,7 +1643,7 @@ func forwardTranslated(ctx context.Context, inbound *http.Request, body []byte, 
 	}
 
 	if !msgReq.Stream {
-		respBytes, err := io.ReadAll(response.Body)
+		respBytes, err := io.ReadAll(io.LimitReader(response.Body, maxRequestBody))
 		_ = response.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("read chat completions response: %w", err)

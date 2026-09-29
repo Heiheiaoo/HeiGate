@@ -565,3 +565,119 @@ func TestResolveModelAliasPrefersHealthyChannel(t *testing.T) {
 		t.Fatalf("expected a last-resort model, got %q", got)
 	}
 }
+
+// namedTestStore opens a store on its own shared-cache in-memory database so
+// tests that record channel health don't bleed state into one another.
+func namedTestStore(t *testing.T, name string) *channel.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+name+"?mode=memory&cache=shared")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := channel.NewStore(db)
+	require.NoError(t, err)
+	return store
+}
+
+// B1 regression: an OpenAI-compatible upstream can report an error inside an
+// HTTP 200 SSE stream (rate limit, overload). Because nothing has reached the
+// client yet, forward() must fail over to a healthy sibling channel instead of
+// committing the errored channel and streaming the error through.
+func TestForwardFailsOverOnInBandStreamError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var badHits, goodHits int
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		badHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"error\":{\"message\":\"rate limit exceeded\",\"type\":\"rate_limit_error\"}}\n\n")
+	}))
+	defer badServer.Close()
+	goodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer goodServer.Close()
+
+	store := namedTestStore(t, "desktop_inband_failover_test")
+	fastTTFT := 5
+	slowTTFT := 50
+	// Latency routing tries the faster (bad) channel first.
+	bad := &channel.Channel{
+		Name: "bad", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions,
+		Endpoint: badServer.URL, APIKey: "k1", PrimaryModel: "shared-model", Enabled: true,
+		LastStatus: probe.StatusOperational, LastTTFTMs: &fastTTFT,
+	}
+	good := &channel.Channel{
+		Name: "good", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions,
+		Endpoint: goodServer.URL, APIKey: "k2", PrimaryModel: "shared-model", Enabled: true,
+		LastStatus: probe.StatusOperational, LastTTFTMs: &slowTTFT,
+	}
+	for _, c := range []*channel.Channel{bad, good} {
+		require.NoError(t, store.Save(context.Background(), c))
+	}
+
+	h := NewHandler(store, channel.NewProbeRunner(store))
+	r := gin.New()
+	r.POST("/v1/chat/completions", h.forwardChatCompletions)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"shared-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, badHits, "bad channel should have been tried once")
+	require.Equal(t, 1, goodHits, "must fail over to the healthy channel")
+	require.Contains(t, rec.Body.String(), "hi")
+	require.NotContains(t, rec.Body.String(), "rate limit", "the in-band error must not reach the client")
+
+	loadedBad, err := store.Get(context.Background(), bad.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusError, loadedBad.LastStatus, "the errored channel must be penalized")
+	require.NotNil(t, loadedBad.CooldownUntil)
+
+	loadedGood, err := store.Get(context.Background(), good.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusOperational, loadedGood.LastStatus)
+	require.Equal(t, 0, loadedGood.FailureCount)
+}
+
+// B2 regression: a non-streaming request whose body merely mentions the literal
+// "stream":true (e.g. a prompt discussing streaming APIs) must not be treated
+// as a stream. Misclassifying it would feed the plain JSON response to the SSE
+// tracker, wrongly penalize the channel, and log a 502 for a successful call.
+func TestForwardDoesNotMisclassifyStreamMentionAsStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	store := namedTestStore(t, "desktop_stream_mention_test")
+	ch := &channel.Channel{
+		Name: "json", Provider: probe.ProviderOpenAI, APIMode: probe.APIModeChatCompletions,
+		Endpoint: server.URL, APIKey: "key", PrimaryModel: "m", Enabled: true,
+		LastStatus: probe.StatusOperational,
+	}
+	require.NoError(t, store.Save(context.Background(), ch))
+
+	h := NewHandler(store, channel.NewProbeRunner(store))
+	r := gin.New()
+	r.POST("/v1/chat/completions", h.forwardChatCompletions)
+	rec := httptest.NewRecorder()
+	// stream is false, but the user content contains the literal `"stream":true`.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","stream":false,"messages":[{"role":"user","content":"what does {\"stream\":true} do?"}]}`))
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "ok")
+
+	loaded, err := store.Get(context.Background(), ch.ID)
+	require.NoError(t, err)
+	require.Equal(t, probe.StatusOperational, loaded.LastStatus, "a successful non-stream request must not penalize the channel")
+	require.Equal(t, 0, loaded.FailureCount)
+	require.Nil(t, loaded.CooldownUntil)
+}
