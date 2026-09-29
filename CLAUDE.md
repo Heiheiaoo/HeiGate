@@ -12,8 +12,9 @@
 ```bash
 make help     # 列出所有目标
 make run      # 从源码跑网关，数据落在 ./desktop-data
-make test     # 后端 go test + 前端 typecheck/vitest
+make test     # 后端 go test -race + 前端 typecheck/vitest
 make lint     # go vet + eslint
+make check    # 提交前完整门禁（与 CI 一致）
 make app      # 构建 dist/HeiGate.app（需要 Xcode Command Line Tools）
 make windows  # 在 Windows 上构建 dist/windows-x64（需要 .NET 8 SDK 与 PowerShell 7）
 ```
@@ -25,7 +26,7 @@ make run                       # 终端 1：网关，8080
 pnpm --dir frontend run dev    # 终端 2：Vite，5273，API 代理到 8080
 ```
 
-提交前请跑：`gofmt -w ./cmd ./internal && go vet ./... && go test ./... && pnpm --dir frontend run typecheck && pnpm --dir frontend run lint`
+提交前请跑 `make check`：它等价于 gofmt 检查 + `go vet` + `go test -race` + 前端 typecheck/lint/vitest + 构建，与 CI 保持一致。手动等价命令：`test -z "$(gofmt -l ./cmd ./internal)" && go vet ./... && go test -race ./... && pnpm --dir frontend run typecheck && pnpm --dir frontend run lint`（注意 `gofmt -l` 只是列出文件、始终退出 0，必须用 `test -z "..."` 包一层才会真正拦下未格式化的代码）
 
 ## 目录结构
 
@@ -86,7 +87,7 @@ scripts             Windows 构建与打包脚本（PowerShell）
 
 网关端点（`/v1/*`）用 `gateway.key` 做 Bearer 认证，密钥文件权限 `0600`。渠道 API Key 在接口返回时打码，只有显式 `include_secrets` 才返回完整值。
 
-诊断建议用了 `v-html`，插值处必须走 `escapeHtml()`。
+前端目前不使用 `v-html`，所有动态文本都走 `{{ }}` 插值（Vue 自动转义）。若将来确需 `v-html`，插值处必须先经 `escapeHtml()`。
 
 ## 环境变量
 

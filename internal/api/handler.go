@@ -458,16 +458,24 @@ func channelID(c *gin.Context) (int64, bool) {
 	return id, true
 }
 
+// writeError maps a handler error to an HTTP status. It checks typed sentinel
+// errors rather than matching on message text: substring matching silently
+// reclassifies any lower-level error whose wording happens to contain "invalid"
+// or "not found" (e.g. a driver or JSON error), and breaks the moment a message
+// is reworded.
 func writeError(c *gin.Context, err error) {
-	status := http.StatusInternalServerError
-	if strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(strings.ToLower(err.Error()), "invalid") || strings.Contains(strings.ToLower(err.Error()), "required") {
-		if strings.Contains(strings.ToLower(err.Error()), "not found") {
-			status = http.StatusNotFound
-		} else {
-			status = http.StatusBadRequest
-		}
+	switch {
+	case errors.Is(err, channel.ErrChannelNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, probe.ErrInvalidProvider),
+		errors.Is(err, probe.ErrInvalidAPIMode),
+		errors.Is(err, probe.ErrInvalidEndpoint),
+		errors.Is(err, probe.ErrInvalidInterval),
+		errors.Is(err, probe.ErrMissingPrimaryModel):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	}
-	c.JSON(status, gin.H{"error": err.Error()})
 }
 
 func (h *Handler) duplicate(c *gin.Context) {

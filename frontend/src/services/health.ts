@@ -4,6 +4,7 @@ export type GatewayHealth = {
   ok: boolean
   latency: number | null
   url: string
+  version: string | null
 }
 
 export async function checkGatewayHealth(baseUrl = DEFAULT_GATEWAY_URL): Promise<GatewayHealth> {
@@ -14,9 +15,18 @@ export async function checkGatewayHealth(baseUrl = DEFAULT_GATEWAY_URL): Promise
 
   try {
     const response = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } })
-    return { ok: response.ok, latency: Math.round(performance.now() - startedAt), url: baseUrl || window.location.origin }
+    const payload: unknown = response.ok ? await response.json().catch(() => null) : null
+    const version = payload && typeof payload === 'object' && 'version' in payload && typeof payload.version === 'string'
+      ? payload.version
+      : null
+    return {
+      ok: response.ok,
+      latency: Math.round(performance.now() - startedAt),
+      url: baseUrl || window.location.origin,
+      version,
+    }
   } catch {
-    return { ok: false, latency: null, url: baseUrl || window.location.origin }
+    return { ok: false, latency: null, url: baseUrl || window.location.origin, version: null }
   } finally {
     window.clearTimeout(timeout)
   }

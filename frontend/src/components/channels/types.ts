@@ -6,6 +6,15 @@ export type ChannelCircuitState = 'closed' | 'open' | 'half_open'
 
 export type ChannelInjectionState = 'unknown' | 'clean' | 'suspected' | 'detected' | 'error'
 
+export type ModelHealth = {
+  model: string
+  status: string
+  latencyMs: number | null
+  ttftMs: number | null
+  error: string
+  checkedAt: string | null
+}
+
 export type Channel = {
   name: string
   url: string
@@ -30,6 +39,7 @@ export type Channel = {
   injectionTokens?: number | null
   injectionContent?: string
   injectionCheckedAt?: string | null
+  modelHealth?: ModelHealth[]
 }
 
 export type ChannelViewMode = 'grid' | 'list'

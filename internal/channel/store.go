@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -14,6 +15,11 @@ import (
 	"github.com/Heiheiaoo/heigate/internal/probe"
 	_ "modernc.org/sqlite"
 )
+
+// ErrChannelNotFound is returned when a channel lookup by id matches no row.
+// HTTP handlers map it to 404 via errors.Is rather than matching on message
+// text, which silently reclassifies responses when wording changes.
+var ErrChannelNotFound = errors.New("desktop channel not found")
 
 // Channel is the local-only channel record used by the desktop gateway.
 // It deliberately has no user, group, billing, or cloud-sync fields.
@@ -153,7 +159,18 @@ CREATE TABLE IF NOT EXISTS desktop_model_health (
 
 // OpenStore opens or creates a local SQLite database.
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout lets a second process (e.g. a mistakenly launched second app
+	// instance sharing the data dir) wait for the lock instead of failing
+	// immediately with SQLITE_BUSY. The connection pool is still capped at 1
+	// below, which serializes this process's own writes. The caller's path may
+	// already carry a query string (tests use file: DSNs), so append with the
+	// right separator instead of assuming there is none.
+	sep := "?"
+	if strings.ContainsRune(path, '?') {
+		sep = "&"
+	}
+	dsn := path + sep + "_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open desktop channel database: %w", err)
 	}
@@ -335,7 +352,7 @@ FROM desktop_channels WHERE id = ?`, id)
 	channel, err := scanChannel(row)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("desktop channel %d not found", id)
+			return nil, fmt.Errorf("desktop channel %d: %w", id, ErrChannelNotFound)
 		}
 		return nil, err
 	}

@@ -30,45 +30,22 @@ import {
   type SystemInfo,
   type AnalyticsResult,
 } from '@/services/gatewayApi'
-import type { ChannelFilterStatus } from '@/components/channels/types'
+import {
+  getCanonicalGroupKey as modelGroupKey,
+  isModelEquivalent,
+  selectCanonicalDisplayName,
+} from '@/services/modelNaming'
+import { vFocusTrap } from '@/directives/focusTrap'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 
-export type Channel = {
-  name: string
-  url: string
-  protocol: 'anthropic' | 'openai-compatible' | 'openai-responses'
-  status: 'healthy' | 'degraded' | 'offline' | 'unknown'
-  latency: number | null
-  ttft: number | null
-  models: number
-  lastCheck: string
-  accent: string
-  enabled: boolean
-  apiKey?: string
-  primaryModel?: string
-  modelNames?: string[]
-  probing?: boolean
-  gatewayId?: number
-  failureCount?: number
-  circuitState?: 'closed' | 'open' | 'half_open'
-  cooldownUntil?: string | null
-  lastError?: string
-  injectionState?: 'unknown' | 'clean' | 'suspected' | 'detected' | 'error'
-  injectionTokens?: number | null
-  injectionContent?: string
-  injectionCheckedAt?: string | null
-  modelHealth?: Array<{
-    model: string
-    status: string
-    latencyMs: number | null
-    ttftMs: number | null
-    error: string
-    checkedAt: string | null
-  }>
-}
+import type { Channel, ChannelFilterStatus } from '@/components/channels/types'
+
+// Re-exported so existing imports of Channel from this view keep working; the
+// canonical definition lives in components/channels/types.ts.
+export type { Channel }
 
 export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
 
@@ -81,8 +58,15 @@ watch(activeSection, async (val) => {
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem('heigate_active_section', val)
   }
+  // Single dispatch point for per-section loads. Keeping this in one watcher
+  // avoids firing each section's fetches twice on every tab switch.
   if (val === 'analytics') {
     void loadAnalytics()
+    void refreshGatewayHealth()
+  } else if (val === 'logs') {
+    void refreshLogs()
+  } else if (val === 'settings') {
+    void refreshSystemInfo()
     void refreshGatewayHealth()
   }
 })
@@ -250,6 +234,7 @@ const configInput = ref<HTMLInputElement | null>(null)
 const gatewayApiActive = ref(false)
 const gatewayOnline = ref(false)
 const gatewayLatency = ref<number | null>(null)
+const appVersion = ref<string>(__HEIGATE_APP_VERSION__)
 const gatewayLastChecked = ref('尚未检测')
 const gatewayApiKey = ref('')
 const maskedOverviewApiKey = computed(() => {
@@ -301,17 +286,7 @@ const gatewayBaseUrl = computed(() => {
 })
 
 
-type RequestEvent = {
-  time: string
-  model: string
-  channel: string
-  result: string
-  detail: string
-  tone: string
-}
-
 const channels = ref<Channel[]>([])
-const events = ref<RequestEvent[]>([])
 
 const channelStatusFilter = ref<ChannelFilterStatus>('all')
 const channelToolbarRef = ref<InstanceType<typeof ChannelToolbar> | null>(null)
@@ -361,49 +336,6 @@ const sortedChannels = computed(() => {
 
 const enabledChannels = computed(() => channels.value.filter((channel) => channel.enabled))
 
-const VENDOR_PREFIX_RE = /^(z-ai|qwen|deepseek-ai|deepseek|openai|anthropic|google|mistralai|mistral|meta-llama|meta|nvidia|01-ai|baichuan-inc|minimaxai|minimax|tencent|aliyun|moonshotai|bytedance|togethercomputer)\//i
-const BILLING_SUFFIX_RE = /(:free|[-_]free|[-_]trial|[-_]vip|[-_]plus|[-_]preview|[-_]latest|[-_]next)$/i
-const DATE_SUFFIX_RE = /(-\d{4}-\d{2}-\d{2}|-\d{8}|-\d{4})$/i
-const PUNCT_RE = /[-_.\s/:]+/g
-
-function cleanModelNameFrontend(raw: string): string {
-  let s = (raw || '').trim()
-  if (!s) return ''
-  if (VENDOR_PREFIX_RE.test(s)) {
-    s = s.replace(VENDOR_PREFIX_RE, '')
-  } else {
-    const idx = s.indexOf('/')
-    if (idx !== -1 && idx < s.length - 1) {
-      const prefix = s.slice(0, idx).toLowerCase()
-      if (!prefix.includes('gpt') && !prefix.includes('claude') && !prefix.includes('gemini')) {
-        s = s.slice(idx + 1)
-      }
-    }
-  }
-  s = s.replace(BILLING_SUFFIX_RE, '')
-  s = s.replace(DATE_SUFFIX_RE, '')
-  return s.trim()
-}
-
-function canonicalModelKeyFrontend(raw: string): string {
-  const cleaned = cleanModelNameFrontend(raw)
-  return cleaned.toLowerCase().replace(PUNCT_RE, '')
-}
-
-const KNOWN_EQUIVALENCE_FRONTEND: string[][] = [
-  ['glm53', 'glm53flash'],
-  ['glm4', 'glm4flash', 'glm4air'],
-  ['deepseekchat', 'deepseekv3'],
-  ['deepseekreasoner', 'deepseekr1'],
-  ['qwen38flash', 'qwen38flashnext'],
-  ['claude35sonnet', 'claude35sonnet20241022'],
-  ['claude35haiku', 'claude35haiku20241022'],
-  ['claude37sonnet', 'claude37sonnet20250219'],
-  ['claude3opus', 'claude3opus20240229'],
-  ['gpt4o', 'gpt4o20240806', 'gpt4o20240513'],
-  ['gpt4omini', 'gpt4omini20240718'],
-]
-
 const customModelMappings = ref<Record<string, string>>({})
 
 async function loadCustomModelMappings() {
@@ -415,95 +347,19 @@ async function loadCustomModelMappings() {
   }
 }
 
+// Thin wrappers binding the pure helpers in services/modelNaming.ts to the
+// current custom-mapping dictionary. The normalization logic and its tests live
+// in that module; these just supply the reactive mappings.
 function getCanonicalGroupKey(raw: string): string {
-  const trim = (raw || '').trim()
-  if (!trim) return ''
-  let curr = trim
-  for (let i = 0; i < 5; i++) {
-    let target = customModelMappings.value[curr] || customModelMappings.value[curr.toLowerCase()]
-    if (!target) {
-      const cleaned = cleanModelNameFrontend(curr).toLowerCase()
-      if (cleaned && cleaned !== curr.toLowerCase()) {
-        target = customModelMappings.value[cleaned]
-      }
-    }
-    if (!target) {
-      const cKey = canonicalModelKeyFrontend(curr)
-      if (cKey) {
-        for (const [k, v] of Object.entries(customModelMappings.value)) {
-          if (canonicalModelKeyFrontend(k) === cKey && v) {
-            target = v
-            break
-          }
-        }
-      }
-    }
-    if (target && target.toLowerCase() !== curr.toLowerCase()) {
-      curr = target
-    } else {
-      break
-    }
-  }
-  const key = canonicalModelKeyFrontend(curr)
-  if (!key) return curr
-  for (const group of KNOWN_EQUIVALENCE_FRONTEND) {
-    if (group.includes(key)) {
-      return group[0]
-    }
-  }
-  return key
+  return modelGroupKey(raw, customModelMappings.value)
 }
 
 function isModelEquivalentFrontend(a: string, b: string): boolean {
-  if (a.toLowerCase() === b.toLowerCase()) return true
-  const keyA = getCanonicalGroupKey(a)
-  const keyB = getCanonicalGroupKey(b)
-  return Boolean(keyA && keyB && keyA === keyB)
+  return isModelEquivalent(a, b, customModelMappings.value)
 }
 
 function selectCanonicalDisplayNameFrontend(models: string[]): string {
-  if (!models.length) return ''
-  let customTarget = ''
-  for (const m of models) {
-    const t = customModelMappings.value[m] || customModelMappings.value[m.toLowerCase()]
-    if (t) {
-      customTarget = t
-      break
-    }
-  }
-  const candidateList = [...models]
-  if (customTarget && !candidateList.some(c => c.toLowerCase() === customTarget.toLowerCase())) {
-    candidateList.push(customTarget)
-  }
-
-  let best = ''
-  let bestScore = -999
-  for (const m of candidateList) {
-    let score = 0
-    const lower = m.toLowerCase()
-    if (customTarget && lower === customTarget.toLowerCase()) score += 60
-    if (m.includes('/')) score -= 30
-    if (lower.includes('-free') || lower.includes(':free') || lower.includes('_free')) score -= 40
-    if (lower.includes('-preview') || lower.includes('-trial') || lower.includes('-next')) score -= 20
-    if (DATE_SUFFIX_RE.test(lower)) score -= 15
-    if (lower.includes('-flash') || lower.includes('-pro') || lower.includes('-turbo')) score += 10
-    score -= m.length
-    if (score > bestScore || !best) {
-      bestScore = score
-      best = m
-    }
-  }
-  if (best) {
-    if (customTarget && best.toLowerCase() === customTarget.toLowerCase()) {
-      return best
-    }
-    const cleaned = cleanModelNameFrontend(best)
-    if (cleaned && !cleaned.includes('/') && !cleaned.toLowerCase().includes('free')) {
-      return cleaned
-    }
-    return best
-  }
-  return models[0]
+  return selectCanonicalDisplayName(models, customModelMappings.value)
 }
 
 interface AggregateModelCard {
@@ -2571,21 +2427,11 @@ onBeforeUnmount(() => {
 
 watch(channels, () => { if (!gatewayApiActive.value) void saveChannels() }, { deep: true })
 
-watch(activeSection, (section) => {
-  if (section === 'logs') {
-    void refreshLogs()
-  } else if (section === 'analytics') {
-    void loadAnalytics()
-    void refreshGatewayHealth()
-  } else if (section === 'settings') {
-    void refreshSystemInfo()
-  }
-})
-
 async function refreshGatewayHealth() {
   const health = await checkGatewayHealth()
   gatewayOnline.value = health.ok
   gatewayLatency.value = health.latency
+  if (health.version) appVersion.value = health.version
   gatewayLastChecked.value = health.ok ? `${formatLatencySec(health.latency)} 响应` : '无法连接'
 }
 
@@ -2896,17 +2742,6 @@ function calculateTokenSpeed(log: RequestLog): string {
   return '-'
 }
 
-function updateOverviewEvents() {
-  events.value = desktopLogs.value.slice(0, 8).map((log) => ({
-    time: formatLogTime(log.created_at),
-    model: log.model || '通用模型',
-    channel: log.is_failover && log.failover_from ? `${log.failover_from} ➔ ${log.channel_name}` : log.channel_name || '默认',
-    result: log.status_code === 0 ? '传输中' : log.is_failover ? '轮转成功' : log.status_code >= 200 && log.status_code < 300 ? '200 OK' : `异常 (${log.status_code})`,
-    detail: formatLatencySec(log.latency_ms),
-    tone: log.status_code === 0 ? 'badge-sky' : log.is_failover ? 'badge-amber' : log.status_code >= 200 && log.status_code < 300 ? 'badge-emerald' : 'badge-rose',
-  }))
-}
-
 function startLogsStream() {
   if (logsUnsubscribe) return
   logsUnsubscribe = subscribeLogs({
@@ -2924,7 +2759,6 @@ function startLogsStream() {
           desktopLogs.value.pop()
         }
       }
-      updateOverviewEvents()
       if (autoScrollLogs.value && activeSection.value === 'logs') {
         nextTick(() => {
           if (logsTableWrapRef.value) {
@@ -2947,11 +2781,9 @@ function startLogsStream() {
       if (activeLogDetail.value && activeLogDetail.value.id === updatedLog.id) {
         activeLogDetail.value = { ...activeLogDetail.value, ...updatedLog }
       }
-      updateOverviewEvents()
     },
     onCleared: () => {
       desktopLogs.value = []
-      events.value = []
     },
     onPruned: () => {
       void refreshLogs()
@@ -3163,7 +2995,6 @@ async function refreshLogs() {
     const logs = await listLogs(100)
     if (logs) {
       desktopLogs.value = logs
-      updateOverviewEvents()
     }
   } finally {
     isRefreshingLogs = false
@@ -3246,7 +3077,6 @@ function handleClearLogs() {
         const ok = await clearLogs()
         if (ok) {
           desktopLogs.value = []
-          events.value = []
           showToast('已清空全部本地流水日志')
           await refreshSystemInfo()
         }
@@ -4848,6 +4678,32 @@ function handleContextMenu(event: MouseEvent) {
                 </div>
               </div>
             </div>
+
+            <div class="m26-pref-group">
+              <div class="m26-pref-group-header">
+                <div class="m26-pref-group-icon icon-version">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="9" />
+                    <line x1="12" y1="11" x2="12" y2="16" />
+                    <circle cx="12" cy="8" r="0.5" fill="currentColor" />
+                  </svg>
+                </div>
+                <div class="m26-pref-group-titles">
+                  <h3 class="m26-pref-title">关于 HeiGate</h3>
+                  <span class="m26-pref-subtitle">应用构建信息</span>
+                </div>
+              </div>
+              <div class="m26-pref-card">
+                <div class="m26-pref-row">
+                  <div class="m26-pref-meta">
+                    <span class="label">当前版本</span>
+                  </div>
+                  <div class="m26-pref-ctrl">
+                    <span class="m26-db-chip font-mono">v{{ appVersion }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -4857,16 +4713,16 @@ function handleContextMenu(event: MouseEvent) {
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
 
     <!-- MODAL: INJECTION CHECK (Redesigned) -->
-    <div v-if="showInjectionModal" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
+    <div v-if="showInjectionModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-1" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
       <div class="m26-modal-sheet m26-inject-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2.5">
-            <h3 class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
+            <h3 id="m26-modal-title-1" class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
             <span class="m26-inject-pill" :class="injectionChannel?.injectionState ?? 'unknown'">
               {{ injectionStateLabel(injectionChannel!) }}
             </span>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showInjectionModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showInjectionModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body m26-inject-body">
@@ -5003,11 +4859,11 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: ADD CHANNEL -->
-    <div v-if="showAddChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
+    <div v-if="showAddChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-2" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
       <div class="m26-modal-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <h3 class="m26-modal-title">添加供应商渠道</h3>
-          <button class="m26-close-btn" data-no-drag @click="showAddChannel = false">✕</button>
+          <h3 id="m26-modal-title-2" class="m26-modal-title">添加供应商渠道</h3>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showAddChannel = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5078,11 +4934,11 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: EDIT CHANNEL -->
-    <div v-if="showEditChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showEditChannel = false)">
+    <div v-if="showEditChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-3" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showEditChannel = false)">
       <div class="m26-modal-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <h3 class="m26-modal-title">编辑渠道配置</h3>
-          <button class="m26-close-btn" data-no-drag @click="showEditChannel = false">✕</button>
+          <h3 id="m26-modal-title-3" class="m26-modal-title">编辑渠道配置</h3>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showEditChannel = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5153,11 +5009,11 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: CONFIRM ACTION -->
-    <div v-if="confirmModal" class="m26-modal-backdrop m26-confirm-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => confirmModal = null)">
+    <div v-if="confirmModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-4" class="m26-modal-backdrop m26-confirm-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => confirmModal = null)">
       <div class="m26-modal-sheet m26-confirm-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <h3 class="m26-modal-title">{{ confirmModal.title }}</h3>
-          <button class="m26-close-btn" data-no-drag @click="confirmModal = null">✕</button>
+          <h3 id="m26-modal-title-4" class="m26-modal-title">{{ confirmModal.title }}</h3>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="confirmModal = null">✕</button>
         </div>
         <div class="m26-modal-body">
           <div class="m26-confirm-content">
@@ -5186,12 +5042,12 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: MODEL LATENCY & SPEED TEST -->
-    <div v-if="activeModelLatencyChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
+    <div v-if="activeModelLatencyChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-5" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
       <div class="m26-modal-sheet m26-models-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div>
             <div class="flex items-center gap-2">
-              <h3 class="m26-modal-title">模型管理</h3>
+              <h3 id="m26-modal-title-5" class="m26-modal-title">模型管理</h3>
               <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
                 {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
               </span>
@@ -5200,7 +5056,7 @@ function handleContextMenu(event: MouseEvent) {
             {{ activeModelLatencyChannel.name }} · {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
             </p>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
         </div>
 
         <div class="m26-modal-toolbar">
@@ -5404,7 +5260,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: MODEL MULTI-PROVIDER SPEED TEST (测试此模型所有供应商) -->
     <div
       v-if="activeModelSpeedTestName"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-label="模型测速" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, closeModelSpeedTestModal)"
     >
@@ -5449,7 +5305,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="closeModelSpeedTestModal">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="closeModelSpeedTestModal">✕</button>
         </div>
 
         <!-- Toolbar -->
@@ -5576,7 +5432,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: MODEL ALIASES DETAIL -->
     <div
       v-if="activeAliasModalModel"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-label="模型别名" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, closeAliasModal)"
     >
@@ -5617,7 +5473,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="closeAliasModal">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="closeAliasModal">✕</button>
         </div>
 
         <div class="m26-modal-toolbar">
@@ -5862,7 +5718,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: QUICK MODEL CLASSIFY -->
     <div
       v-if="showClassifyModal"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-6" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, () => showClassifyModal = false)"
     >
@@ -5872,9 +5728,9 @@ function handleContextMenu(event: MouseEvent) {
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
             </svg>
-            <h3 class="m26-modal-title">手动模型归并</h3>
+            <h3 id="m26-modal-title-6" class="m26-modal-title">手动模型归并</h3>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showClassifyModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showClassifyModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5928,7 +5784,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: CUSTOM MODEL MAPPINGS MANAGER -->
     <div
       v-if="showCustomMappingsModal"
-      class="m26-modal-backdrop"
+      v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-7" class="m26-modal-backdrop"
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, () => showCustomMappingsModal = false)"
     >
@@ -5938,9 +5794,9 @@ function handleContextMenu(event: MouseEvent) {
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
             </svg>
-            <h3 class="m26-modal-title">自定义模型归类设置</h3>
+            <h3 id="m26-modal-title-7" class="m26-modal-title">自定义模型归类设置</h3>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showCustomMappingsModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showCustomMappingsModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -6036,7 +5892,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: CHANNEL PROBE & ERROR DIAGNOSIS -->
-    <div v-if="activeDiagnosticChannel" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeDiagnosticChannel = null)">
+    <div v-if="activeDiagnosticChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-8" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeDiagnosticChannel = null)">
       <div class="m26-modal-sheet m26-diagnostic-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2">
@@ -6046,13 +5902,13 @@ function handleContextMenu(event: MouseEvent) {
               </svg>
             </div>
             <div>
-              <h3 class="m26-modal-title">探活诊断与报错详情</h3>
+              <h3 id="m26-modal-title-8" class="m26-modal-title">探活诊断与报错详情</h3>
               <p class="m26-modal-subtitle">
                 渠道 “{{ activeDiagnosticChannel.name }}” · {{ activeDiagnosticChannel.url }}
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="activeDiagnosticChannel = null">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeDiagnosticChannel = null">✕</button>
         </div>
 
         <div class="m26-modal-body m26-diagnostic-body">
@@ -6130,7 +5986,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: LOG DETAIL -->
-    <div v-if="activeLogDetail" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeLogDetail = null)">
+    <div v-if="activeLogDetail" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-9" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeLogDetail = null)">
       <div class="m26-modal-sheet m26-log-detail-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2">
@@ -6154,13 +6010,13 @@ function handleContextMenu(event: MouseEvent) {
               </svg>
             </div>
             <div>
-              <h3 class="m26-modal-title">请求流水详情 #{{ activeLogDetail.id }}</h3>
+              <h3 id="m26-modal-title-9" class="m26-modal-title">请求流水详情 #{{ activeLogDetail.id }}</h3>
               <p class="m26-modal-subtitle">
                 {{ formatLogTime(activeLogDetail.created_at) }} · 网关全链路诊断
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="activeLogDetail = null">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeLogDetail = null">✕</button>
         </div>
 
         <div class="m26-modal-body m26-diagnostic-body">
@@ -6344,7 +6200,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- MODAL: KEYBOARD SHORTCUTS CHEAT SHEET -->
-    <div v-if="showShortcutsModal" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showShortcutsModal = false)">
+    <div v-if="showShortcutsModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-10" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showShortcutsModal = false)">
       <div class="m26-modal-sheet m26-shortcuts-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="flex items-center gap-2">
@@ -6355,11 +6211,11 @@ function handleContextMenu(event: MouseEvent) {
               </svg>
             </div>
             <div>
-              <h3 class="m26-modal-title">键盘快捷键速查</h3>
+              <h3 id="m26-modal-title-10" class="m26-modal-title">键盘快捷键速查</h3>
               <p class="m26-modal-subtitle">原生 macOS 全局键位与极速交互体验</p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag @click="showShortcutsModal = false">✕</button>
+          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showShortcutsModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body m26-shortcuts-body">
@@ -9417,6 +9273,11 @@ input:checked + .m26-slider:before {
 .m26-pref-group-icon.icon-storage {
   background: rgba(16, 185, 129, 0.1);
   color: #059669;
+}
+
+.m26-pref-group-icon.icon-version {
+  background: rgba(20, 184, 166, 0.1);
+  color: #0f766e;
 }
 
 .m26-pref-group-titles {

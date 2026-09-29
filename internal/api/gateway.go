@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Heiheiaoo/heigate/internal/channel"
 	"github.com/Heiheiaoo/heigate/internal/probe"
@@ -221,6 +222,23 @@ type TraceStep struct {
 	Succeeded   bool   `json:"succeeded"`
 }
 
+// maxEchoedErrorText bounds how much of an untrusted value is echoed back in an
+// error message, so a large body cannot be amplified into the response or logs.
+const maxEchoedErrorText = 200
+
+// truncateEchoed caps a value before it is placed in an error message, cutting
+// on a rune boundary so the result is never invalid UTF-8.
+func truncateEchoed(text string) string {
+	if len(text) <= maxEchoedErrorText {
+		return text
+	}
+	cut := maxEchoedErrorText
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "..."
+}
+
 func parseUpstreamErrorMessage(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -233,6 +251,10 @@ func parseUpstreamErrorMessage(raw string) string {
 				return strings.TrimSpace(msg)
 			}
 		}
+		// Some upstreams send the error as a bare string rather than an object.
+		if errText, ok := obj["error"].(string); ok && strings.TrimSpace(errText) != "" {
+			return strings.TrimSpace(errText)
+		}
 		if msg, ok := obj["message"].(string); ok && strings.TrimSpace(msg) != "" {
 			return strings.TrimSpace(msg)
 		}
@@ -240,10 +262,7 @@ func parseUpstreamErrorMessage(raw string) string {
 			return strings.TrimSpace(msg)
 		}
 	}
-	if len(raw) > 200 {
-		return raw[:200] + "..."
-	}
-	return raw
+	return truncateEchoed(raw)
 }
 
 // adaptUnsupportedReasoningEffort adjusts only an explicit provider
@@ -417,38 +436,189 @@ func compatibleReasoningEffort(requested string, supported []string) string {
 	return ""
 }
 
+// upstreamErrorPayload reports whether an upstream response body is an error and
+// extracts its message and an HTTP-equivalent status.
+//
+// Policy — a body counts as an error only when it carries an *unambiguous*
+// failure signal, because a false positive fails over a healthy channel (and
+// benches it) while a false negative hands the client an empty answer. There are
+// exactly two signals:
+//
+//  1. `error` is a non-empty value: a non-empty string, or an object/array
+//     holding at least one non-empty value. `null`, `false`, `0`, `""`, `{}`,
+//     `[]` and `{"type":"","message":""}` all mean "no error" — upstreams
+//     commonly include such an empty slot in normal responses.
+//  2. the top-level `code` is a 4xx or 5xx HTTP status. This catches the
+//     "HTTP 200 with the failure described in the body" pattern, which uses no
+//     `error` field at all. Only 4xx/5xx count: business-code APIs reuse the
+//     1xx/3xx ranges and `0` for their own meanings, so a code there is not
+//     evidence of failure.
+//
+// Both signals are also checked one level down under `response`, because the
+// OpenAI Responses API reports a failure as `{"type":"response.failed",
+// "response":{"error":{...}}}`. Only that one key is unwrapped — searching the
+// whole tree for anything named `error` would resurrect the false positives
+// this policy exists to prevent.
+//
+// A bare top-level `message` is deliberately NOT a signal: it is frequently
+// informational ("served by node-3"), and treating it as a failure fails over a
+// healthy channel — the very bug this policy exists to avoid. It is still used
+// as the message text once a failure has been established by (1) or (2).
+//
+// TestUpstreamErrorPayloadPolicy locks the whole shape matrix to this policy.
 func upstreamErrorPayload(raw []byte) (string, int, bool) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return "", 0, false
 	}
-	errorValue, exists := envelope["error"]
-	if !exists || len(bytes.TrimSpace(errorValue)) == 0 || bytes.Equal(bytes.TrimSpace(errorValue), []byte("null")) {
+	if message, status, ok := classifyErrorEnvelope(envelope, raw); ok {
+		return message, status, true
+	}
+	if nested, ok := envelope["response"]; ok {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(nested, &inner) == nil {
+			if message, status, ok := classifyErrorEnvelope(inner, nested); ok {
+				return message, status, true
+			}
+		}
+	}
+	return "", 0, false
+}
+
+// classifyErrorEnvelope applies the upstreamErrorPayload policy to one decoded
+// object. raw is that same object's JSON, used for message extraction.
+func classifyErrorEnvelope(envelope map[string]json.RawMessage, raw []byte) (string, int, bool) {
+	errorValue, hasErrorSlot := envelope["error"]
+	errorSlotEmpty := !hasErrorSlot || isEmptyErrorValue(errorValue)
+	statusFromBody := failingStatusCode(envelope)
+	if errorSlotEmpty && statusFromBody == 0 {
 		return "", 0, false
 	}
+
 	message := parseUpstreamErrorMessage(string(raw))
-	if message == "" {
-		message = string(errorValue)
-	}
-	status := http.StatusBadGateway
+
 	var detail struct {
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
 	}
-	_ = json.Unmarshal(errorValue, &detail)
-	classification := strings.ToLower(detail.Type + " " + detail.Code + " " + message)
+	if hasErrorSlot {
+		_ = json.Unmarshal(errorValue, &detail)
+	}
+
+	// Status precedence: a status named by the body beats one guessed from text.
+	// The nested `error.code` is as authoritative as the top-level one — missing
+	// it mapped an auth failure to 502, which carries a 15s cooldown instead of
+	// the 10 minutes an auth failure is meant to get (see resilience.go).
+	status := http.StatusBadGateway
 	switch {
-	case strings.Contains(classification, "rate_limit"), strings.Contains(classification, "rate limit"), strings.Contains(classification, "too_many_requests"), strings.Contains(classification, "too many requests"):
-		status = http.StatusTooManyRequests
-	case strings.Contains(classification, "authentication"), strings.Contains(classification, "unauthorized"), strings.Contains(classification, "invalid_api_key"):
-		status = http.StatusUnauthorized
-	case strings.Contains(classification, "permission"), strings.Contains(classification, "forbidden"):
-		status = http.StatusForbidden
-	case strings.Contains(classification, "model_not_found"), strings.Contains(classification, "unknown model"):
-		status = http.StatusNotFound
+	case statusFromBody != 0:
+		status = statusFromBody
+	default:
+		if code, ok := decodeStatusCode(detail.Code); ok && code >= 400 && code <= 599 {
+			status = code
+			break
+		}
+		var codeText string
+		_ = json.Unmarshal(detail.Code, &codeText)
+		classification := strings.ToLower(detail.Type + " " + codeText + " " + message)
+		switch {
+		case strings.Contains(classification, "rate_limit"), strings.Contains(classification, "rate limit"), strings.Contains(classification, "too_many_requests"), strings.Contains(classification, "too many requests"):
+			status = http.StatusTooManyRequests
+		case strings.Contains(classification, "authentication"), strings.Contains(classification, "unauthorized"), strings.Contains(classification, "invalid_api_key"):
+			status = http.StatusUnauthorized
+		case strings.Contains(classification, "permission"), strings.Contains(classification, "forbidden"):
+			status = http.StatusForbidden
+		case strings.Contains(classification, "model_not_found"), strings.Contains(classification, "unknown model"):
+			status = http.StatusNotFound
+		}
 	}
 	return message, status, true
+}
+
+// failingStatusCode returns the HTTP-equivalent status named by a top-level
+// `code`, or 0 when there is none. Only 4xx/5xx count: 1xx and 3xx are not
+// failures, and APIs that number their own business codes reuse those ranges
+// (and `0` for success) — treating them as failures would fail over a healthy
+// channel.
+func failingStatusCode(envelope map[string]json.RawMessage) int {
+	raw, ok := envelope["code"]
+	if !ok {
+		return 0
+	}
+	code, ok := decodeStatusCode(raw)
+	if !ok || code < 400 || code > 599 {
+		return 0
+	}
+	return code
+}
+
+// decodeStatusCode reads a status from a `code` field that may be a JSON number
+// or a numeric string, rejecting anything that is not an integer.
+func decodeStatusCode(raw json.RawMessage) (int, bool) {
+	var number float64
+	if err := json.Unmarshal(raw, &number); err == nil {
+		if number != float64(int(number)) {
+			return 0, false
+		}
+		return int(number), true
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+// isEmptyErrorValue reports whether an `error` field carries no actual failure —
+// see the policy on upstreamErrorPayload.
+func isEmptyErrorValue(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return true
+	}
+	var value any
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		// Not valid JSON: leave it to the caller to report as an error body.
+		return false
+	}
+	return isEmptyErrorDetail(value)
+}
+
+// isEmptyErrorDetail reports whether a decoded error value carries no
+// information: null, a falsy scalar (`false`, `0`, `""`), an empty container,
+// or a container whose values are all themselves empty — e.g.
+// `{"type":"","message":""}`, which some upstreams emit in normal frames.
+func isEmptyErrorDetail(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return true
+	case bool:
+		return !typed
+	case float64:
+		return typed == 0
+	case string:
+		return strings.TrimSpace(typed) == ""
+	case map[string]any:
+		for _, v := range typed {
+			if !isEmptyErrorDetail(v) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		for _, v := range typed {
+			if !isEmptyErrorDetail(v) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func isClientClosedConn(err error) bool {
@@ -475,7 +645,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body is too large"})
 		return
 	}
-	model, err := requestModel(body)
+	model, streamRequested, err := requestModel(body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -495,8 +665,6 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 		// Never silently replace a client's requested model with an unrelated
 		// healthy model. Explicit aliases are resolved above; everything else
 		// must fail clearly so callers can decide how to recover.
-	}
-	if err != nil {
 		if proto == protocolAnthropic {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"type": "error",
@@ -529,7 +697,7 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 	startOverall := time.Now()
 	var winningTtft int
 	initialPromptTokens := estimatePromptTokens(body)
-	isStreamRequest := bytes.Contains(body, []byte(`"stream":true`)) || bytes.Contains(body, []byte(`"stream": true`)) || strings.Contains(strings.ToLower(c.Request.Header.Get("Accept")), "text/event-stream")
+	isStreamRequest := streamRequested || strings.Contains(strings.ToLower(c.Request.Header.Get("Accept")), "text/event-stream")
 
 	clientIP := c.ClientIP()
 	userAgent := c.Request.UserAgent()
@@ -656,16 +824,29 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 			}
 			if isUpstreamSSE {
 				if message, status, isError := upstreamStreamError(prefix); isError {
+					// An SSE stream can carry an error frame under an HTTP 200
+					// (rate-limit, overload, quota — common from OpenAI-compatible
+					// aggregators). Nothing has been sent to the client yet, so this
+					// is still safe to fail over: closing the body and returning the
+					// error lets RouteCandidates try the next channel instead of
+					// committing this one and streaming the error through.
+					upErr := &upstreamStatusError{status: status, message: message}
+					_ = response.body.Close()
+					lastCandidateErr = upErr
+					step.StatusCode = status
+					step.Error = message
+					step.RawError = message
 					if adapted, ok := adaptUnsupportedReasoningEffort(body, message); ok && attempt == 0 {
-						_ = response.body.Close()
 						retryBody = adapted
-						lastCandidateErr = &upstreamStatusError{status: status, message: message}
-						step.StatusCode = status
-						step.Error = message
-						step.RawError = message
 						traceSteps = append(traceSteps, step)
 						continue
 					}
+					traceSteps = append(traceSteps, step)
+					if attempt == 0 && channel.FailureIsRetryable(upErr.FailureInfo()) {
+						continue
+					}
+					failedAttempts = append(failedAttempts, fmt.Sprintf("%s (%d: %s)", ch.Name, status, message))
+					return upErr
 				}
 			}
 			winningTtft = int(time.Since(startOverall) / time.Millisecond)
@@ -803,6 +984,12 @@ func (h *Handler) forward(c *gin.Context, proto gatewayProtocol) {
 	}
 
 	for key, values := range upstream.header {
+		// Hop-by-hop headers describe the upstream connection, not the payload;
+		// forwarding them (or a stale Content-Length) is incorrect proxy
+		// behavior and can desync framing. The net/http server sets its own.
+		if isHopByHopHeader(key) {
+			continue
+		}
 		for _, value := range values {
 			c.Writer.Header().Add(key, value)
 		}
@@ -1001,6 +1188,27 @@ func (e *upstreamStatusError) FailureInfo() channel.FailureInfo {
 	return info
 }
 
+// hopByHopHeaders are connection-scoped headers a proxy must not forward to the
+// client (RFC 7230 §6.1), plus Content-Length, which no longer describes the
+// body once the server re-frames the response.
+var hopByHopHeaders = map[string]struct{}{
+	"connection":          {},
+	"proxy-connection":    {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+	"content-length":      {},
+}
+
+func isHopByHopHeader(key string) bool {
+	_, ok := hopByHopHeaders[strings.ToLower(strings.TrimSpace(key))]
+	return ok
+}
+
 type transportError struct{ err error }
 
 func (e *transportError) Error() string { return "upstream request failed" }
@@ -1174,17 +1382,52 @@ func (h *Handler) gatewayModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
 
-func requestModel(body []byte) (string, error) {
+// requestModel extracts the requested model and stream flag from the request
+// body in a single parse. The stream flag must come from the decoded JSON, not
+// a substring scan of the raw bytes: a non-streaming request whose content
+// merely mentions `"stream":true` (a prompt about streaming APIs, a JSON
+// example) would otherwise be misclassified as streaming, and its plain JSON
+// response would then be fed to the streaming token tracker — which finds no
+// SSE frames, reports an unexpected EOF, and wrongly penalizes a healthy
+// channel while logging a successful request as a 502.
+//
+// `stream` must be unambiguously a JSON boolean. It is not just local
+// bookkeeping: it decides whether the reply is translated as SSE on the
+// translated path, while the body is forwarded verbatim on the pass-through
+// path. Guessing at a loosely-typed value ("true", 1) would risk returning a
+// non-streaming reply to a client that asked for a stream, or reporting a
+// healthy passthrough response as a truncated stream, so an ambiguous value is
+// rejected with a clear message instead.
+func requestModel(body []byte) (model string, stream bool, err error) {
 	var payload struct {
-		Model string `json:"model"`
+		Model  string          `json:"model"`
+		Stream json.RawMessage `json:"stream"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("invalid JSON request: %w", err)
+		return "", false, fmt.Errorf("invalid JSON request: %w", err)
 	}
 	if strings.TrimSpace(payload.Model) == "" {
-		return "", fmt.Errorf("model is required")
+		return "", false, fmt.Errorf("model is required")
 	}
-	return strings.TrimSpace(payload.Model), nil
+	stream, err = parseStreamFlag(payload.Stream)
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(payload.Model), stream, nil
+}
+
+// parseStreamFlag accepts an absent, null, false or true `stream` value. An
+// explicit "invalid `stream`" error is clearer than the struct-field decode
+// error a `bool` field would produce.
+func parseStreamFlag(raw json.RawMessage) (bool, error) {
+	switch trimmed := bytes.TrimSpace(raw); {
+	case len(trimmed) == 0, bytes.Equal(trimmed, []byte("null")), bytes.Equal(trimmed, []byte("false")):
+		return false, nil
+	case bytes.Equal(trimmed, []byte("true")):
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid `stream`: expected a JSON boolean (true or false), got %s", truncateEchoed(string(trimmed)))
+	}
 }
 
 func gatewayCandidateMatcher(proto gatewayProtocol) func(*channel.Channel) bool {
@@ -1596,10 +1839,16 @@ func forwardTranslated(ctx context.Context, inbound *http.Request, body []byte, 
 	}
 
 	if !msgReq.Stream {
-		respBytes, err := io.ReadAll(response.Body)
+		// Read one byte past the cap so an oversized body can be reported as a
+		// size error rather than silently truncating into a confusing JSON
+		// decode failure.
+		respBytes, err := io.ReadAll(io.LimitReader(response.Body, maxRequestBody+1))
 		_ = response.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("read chat completions response: %w", err)
+		}
+		if len(respBytes) > maxRequestBody {
+			return nil, fmt.Errorf("upstream chat completions response exceeds %d bytes", maxRequestBody)
 		}
 		if message, status, isError := upstreamErrorPayload(respBytes); isError {
 			return nil, &upstreamStatusError{status: status, message: message}
