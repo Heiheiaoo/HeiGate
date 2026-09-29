@@ -30,45 +30,21 @@ import {
   type SystemInfo,
   type AnalyticsResult,
 } from '@/services/gatewayApi'
-import type { ChannelFilterStatus } from '@/components/channels/types'
+import {
+  getCanonicalGroupKey as modelGroupKey,
+  isModelEquivalent,
+  selectCanonicalDisplayName,
+} from '@/services/modelNaming'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 
-export type Channel = {
-  name: string
-  url: string
-  protocol: 'anthropic' | 'openai-compatible' | 'openai-responses'
-  status: 'healthy' | 'degraded' | 'offline' | 'unknown'
-  latency: number | null
-  ttft: number | null
-  models: number
-  lastCheck: string
-  accent: string
-  enabled: boolean
-  apiKey?: string
-  primaryModel?: string
-  modelNames?: string[]
-  probing?: boolean
-  gatewayId?: number
-  failureCount?: number
-  circuitState?: 'closed' | 'open' | 'half_open'
-  cooldownUntil?: string | null
-  lastError?: string
-  injectionState?: 'unknown' | 'clean' | 'suspected' | 'detected' | 'error'
-  injectionTokens?: number | null
-  injectionContent?: string
-  injectionCheckedAt?: string | null
-  modelHealth?: Array<{
-    model: string
-    status: string
-    latencyMs: number | null
-    ttftMs: number | null
-    error: string
-    checkedAt: string | null
-  }>
-}
+import type { Channel, ChannelFilterStatus } from '@/components/channels/types'
+
+// Re-exported so existing imports of Channel from this view keep working; the
+// canonical definition lives in components/channels/types.ts.
+export type { Channel }
 
 export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
 
@@ -81,8 +57,15 @@ watch(activeSection, async (val) => {
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem('heigate_active_section', val)
   }
+  // Single dispatch point for per-section loads. Keeping this in one watcher
+  // avoids firing each section's fetches twice on every tab switch.
   if (val === 'analytics') {
     void loadAnalytics()
+    void refreshGatewayHealth()
+  } else if (val === 'logs') {
+    void refreshLogs()
+  } else if (val === 'settings') {
+    void refreshSystemInfo()
     void refreshGatewayHealth()
   }
 })
@@ -302,17 +285,7 @@ const gatewayBaseUrl = computed(() => {
 })
 
 
-type RequestEvent = {
-  time: string
-  model: string
-  channel: string
-  result: string
-  detail: string
-  tone: string
-}
-
 const channels = ref<Channel[]>([])
-const events = ref<RequestEvent[]>([])
 
 const channelStatusFilter = ref<ChannelFilterStatus>('all')
 const channelToolbarRef = ref<InstanceType<typeof ChannelToolbar> | null>(null)
@@ -362,49 +335,6 @@ const sortedChannels = computed(() => {
 
 const enabledChannels = computed(() => channels.value.filter((channel) => channel.enabled))
 
-const VENDOR_PREFIX_RE = /^(z-ai|qwen|deepseek-ai|deepseek|openai|anthropic|google|mistralai|mistral|meta-llama|meta|nvidia|01-ai|baichuan-inc|minimaxai|minimax|tencent|aliyun|moonshotai|bytedance|togethercomputer)\//i
-const BILLING_SUFFIX_RE = /(:free|[-_]free|[-_]trial|[-_]vip|[-_]plus|[-_]preview|[-_]latest|[-_]next)$/i
-const DATE_SUFFIX_RE = /(-\d{4}-\d{2}-\d{2}|-\d{8}|-\d{4})$/i
-const PUNCT_RE = /[-_.\s/:]+/g
-
-function cleanModelNameFrontend(raw: string): string {
-  let s = (raw || '').trim()
-  if (!s) return ''
-  if (VENDOR_PREFIX_RE.test(s)) {
-    s = s.replace(VENDOR_PREFIX_RE, '')
-  } else {
-    const idx = s.indexOf('/')
-    if (idx !== -1 && idx < s.length - 1) {
-      const prefix = s.slice(0, idx).toLowerCase()
-      if (!prefix.includes('gpt') && !prefix.includes('claude') && !prefix.includes('gemini')) {
-        s = s.slice(idx + 1)
-      }
-    }
-  }
-  s = s.replace(BILLING_SUFFIX_RE, '')
-  s = s.replace(DATE_SUFFIX_RE, '')
-  return s.trim()
-}
-
-function canonicalModelKeyFrontend(raw: string): string {
-  const cleaned = cleanModelNameFrontend(raw)
-  return cleaned.toLowerCase().replace(PUNCT_RE, '')
-}
-
-const KNOWN_EQUIVALENCE_FRONTEND: string[][] = [
-  ['glm53', 'glm53flash'],
-  ['glm4', 'glm4flash', 'glm4air'],
-  ['deepseekchat', 'deepseekv3'],
-  ['deepseekreasoner', 'deepseekr1'],
-  ['qwen38flash', 'qwen38flashnext'],
-  ['claude35sonnet', 'claude35sonnet20241022'],
-  ['claude35haiku', 'claude35haiku20241022'],
-  ['claude37sonnet', 'claude37sonnet20250219'],
-  ['claude3opus', 'claude3opus20240229'],
-  ['gpt4o', 'gpt4o20240806', 'gpt4o20240513'],
-  ['gpt4omini', 'gpt4omini20240718'],
-]
-
 const customModelMappings = ref<Record<string, string>>({})
 
 async function loadCustomModelMappings() {
@@ -416,95 +346,19 @@ async function loadCustomModelMappings() {
   }
 }
 
+// Thin wrappers binding the pure helpers in services/modelNaming.ts to the
+// current custom-mapping dictionary. The normalization logic and its tests live
+// in that module; these just supply the reactive mappings.
 function getCanonicalGroupKey(raw: string): string {
-  const trim = (raw || '').trim()
-  if (!trim) return ''
-  let curr = trim
-  for (let i = 0; i < 5; i++) {
-    let target = customModelMappings.value[curr] || customModelMappings.value[curr.toLowerCase()]
-    if (!target) {
-      const cleaned = cleanModelNameFrontend(curr).toLowerCase()
-      if (cleaned && cleaned !== curr.toLowerCase()) {
-        target = customModelMappings.value[cleaned]
-      }
-    }
-    if (!target) {
-      const cKey = canonicalModelKeyFrontend(curr)
-      if (cKey) {
-        for (const [k, v] of Object.entries(customModelMappings.value)) {
-          if (canonicalModelKeyFrontend(k) === cKey && v) {
-            target = v
-            break
-          }
-        }
-      }
-    }
-    if (target && target.toLowerCase() !== curr.toLowerCase()) {
-      curr = target
-    } else {
-      break
-    }
-  }
-  const key = canonicalModelKeyFrontend(curr)
-  if (!key) return curr
-  for (const group of KNOWN_EQUIVALENCE_FRONTEND) {
-    if (group.includes(key)) {
-      return group[0]
-    }
-  }
-  return key
+  return modelGroupKey(raw, customModelMappings.value)
 }
 
 function isModelEquivalentFrontend(a: string, b: string): boolean {
-  if (a.toLowerCase() === b.toLowerCase()) return true
-  const keyA = getCanonicalGroupKey(a)
-  const keyB = getCanonicalGroupKey(b)
-  return Boolean(keyA && keyB && keyA === keyB)
+  return isModelEquivalent(a, b, customModelMappings.value)
 }
 
 function selectCanonicalDisplayNameFrontend(models: string[]): string {
-  if (!models.length) return ''
-  let customTarget = ''
-  for (const m of models) {
-    const t = customModelMappings.value[m] || customModelMappings.value[m.toLowerCase()]
-    if (t) {
-      customTarget = t
-      break
-    }
-  }
-  const candidateList = [...models]
-  if (customTarget && !candidateList.some(c => c.toLowerCase() === customTarget.toLowerCase())) {
-    candidateList.push(customTarget)
-  }
-
-  let best = ''
-  let bestScore = -999
-  for (const m of candidateList) {
-    let score = 0
-    const lower = m.toLowerCase()
-    if (customTarget && lower === customTarget.toLowerCase()) score += 60
-    if (m.includes('/')) score -= 30
-    if (lower.includes('-free') || lower.includes(':free') || lower.includes('_free')) score -= 40
-    if (lower.includes('-preview') || lower.includes('-trial') || lower.includes('-next')) score -= 20
-    if (DATE_SUFFIX_RE.test(lower)) score -= 15
-    if (lower.includes('-flash') || lower.includes('-pro') || lower.includes('-turbo')) score += 10
-    score -= m.length
-    if (score > bestScore || !best) {
-      bestScore = score
-      best = m
-    }
-  }
-  if (best) {
-    if (customTarget && best.toLowerCase() === customTarget.toLowerCase()) {
-      return best
-    }
-    const cleaned = cleanModelNameFrontend(best)
-    if (cleaned && !cleaned.includes('/') && !cleaned.toLowerCase().includes('free')) {
-      return cleaned
-    }
-    return best
-  }
-  return models[0]
+  return selectCanonicalDisplayName(models, customModelMappings.value)
 }
 
 interface AggregateModelCard {
@@ -2572,17 +2426,6 @@ onBeforeUnmount(() => {
 
 watch(channels, () => { if (!gatewayApiActive.value) void saveChannels() }, { deep: true })
 
-watch(activeSection, (section) => {
-  if (section === 'logs') {
-    void refreshLogs()
-  } else if (section === 'analytics') {
-    void loadAnalytics()
-    void refreshGatewayHealth()
-  } else if (section === 'settings') {
-    void refreshSystemInfo()
-  }
-})
-
 async function refreshGatewayHealth() {
   const health = await checkGatewayHealth()
   gatewayOnline.value = health.ok
@@ -2898,17 +2741,6 @@ function calculateTokenSpeed(log: RequestLog): string {
   return '-'
 }
 
-function updateOverviewEvents() {
-  events.value = desktopLogs.value.slice(0, 8).map((log) => ({
-    time: formatLogTime(log.created_at),
-    model: log.model || '通用模型',
-    channel: log.is_failover && log.failover_from ? `${log.failover_from} ➔ ${log.channel_name}` : log.channel_name || '默认',
-    result: log.status_code === 0 ? '传输中' : log.is_failover ? '轮转成功' : log.status_code >= 200 && log.status_code < 300 ? '200 OK' : `异常 (${log.status_code})`,
-    detail: formatLatencySec(log.latency_ms),
-    tone: log.status_code === 0 ? 'badge-sky' : log.is_failover ? 'badge-amber' : log.status_code >= 200 && log.status_code < 300 ? 'badge-emerald' : 'badge-rose',
-  }))
-}
-
 function startLogsStream() {
   if (logsUnsubscribe) return
   logsUnsubscribe = subscribeLogs({
@@ -2926,7 +2758,6 @@ function startLogsStream() {
           desktopLogs.value.pop()
         }
       }
-      updateOverviewEvents()
       if (autoScrollLogs.value && activeSection.value === 'logs') {
         nextTick(() => {
           if (logsTableWrapRef.value) {
@@ -2949,11 +2780,9 @@ function startLogsStream() {
       if (activeLogDetail.value && activeLogDetail.value.id === updatedLog.id) {
         activeLogDetail.value = { ...activeLogDetail.value, ...updatedLog }
       }
-      updateOverviewEvents()
     },
     onCleared: () => {
       desktopLogs.value = []
-      events.value = []
     },
     onPruned: () => {
       void refreshLogs()
@@ -3165,7 +2994,6 @@ async function refreshLogs() {
     const logs = await listLogs(100)
     if (logs) {
       desktopLogs.value = logs
-      updateOverviewEvents()
     }
   } finally {
     isRefreshingLogs = false
@@ -3248,7 +3076,6 @@ function handleClearLogs() {
         const ok = await clearLogs()
         if (ok) {
           desktopLogs.value = []
-          events.value = []
           showToast('已清空全部本地流水日志')
           await refreshSystemInfo()
         }
