@@ -1,4 +1,4 @@
-.PHONY: help frontend backend desktop app app-macos-arm64 windows package-windows test test-backend test-frontend lint clean run
+.PHONY: help frontend backend desktop app app-macos-arm64 windows package-windows test test-backend test-frontend lint fmt fmt-check check install-frontend clean run
 
 VERSION ?= $(shell tr -d '\r\n' < VERSION)
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -15,10 +15,15 @@ help:
 	@echo "  make run        - run the gateway from source with a local data directory"
 	@echo "  make test       - run backend and frontend tests"
 	@echo "  make lint       - run go vet and frontend lint/typecheck"
+	@echo "  make fmt        - gofmt-format the Go sources in place"
+	@echo "  make check      - run the full pre-commit gate (fmt-check, vet, race tests, UI, build)"
 
 frontend:
 	@pnpm --dir frontend install --frozen-lockfile
 	@pnpm --dir frontend run build
+
+install-frontend:
+	@pnpm --dir frontend install --frozen-lockfile
 
 backend:
 	@mkdir -p dist
@@ -56,15 +61,35 @@ run:
 test: test-backend test-frontend
 
 test-backend:
-	@go test -count=1 ./...
+	@go test -race -count=1 ./...
 
-test-frontend:
+test-frontend: install-frontend
 	@pnpm --dir frontend run typecheck
 	@pnpm --dir frontend run test:run
 
-lint:
+lint: install-frontend
 	@go vet ./...
 	@pnpm --dir frontend run lint
+
+fmt:
+	@gofmt -w ./cmd ./internal
+
+# Fails (listing the offenders) when any Go source is not gofmt-clean, matching
+# the CI gate so `make check` reproduces it locally.
+fmt-check:
+	@unformatted=$$(gofmt -l ./cmd ./internal); \
+	if [ -n "$$unformatted" ]; then \
+		echo "These files need gofmt:"; echo "$$unformatted"; exit 1; \
+	fi
+
+# Mirror of the CI pipeline so a green `make check` means a green CI.
+check: fmt-check install-frontend
+	@go vet ./...
+	@go test -race -count=1 ./...
+	@pnpm --dir frontend run typecheck
+	@pnpm --dir frontend run lint
+	@pnpm --dir frontend run test:run
+	@pnpm --dir frontend run build
 
 clean:
 	@rm -rf dist frontend/dist internal/web/dist/assets internal/web/dist/index.html internal/web/dist/*.svg internal/web/dist/*.png

@@ -17,8 +17,45 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  verify:
+    name: Verify (gofmt, vet, tests, UI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: pnpm run typecheck
+        working-directory: frontend
+      - run: pnpm run lint
+        working-directory: frontend
+      - run: pnpm run test:run
+        working-directory: frontend
+
   macos-arm64:
     name: Package macOS arm64
+    needs: verify
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +98,7 @@ jobs:
 
   windows-x64:
     name: Package Windows x64
+    needs: verify
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

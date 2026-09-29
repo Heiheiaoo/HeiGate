@@ -86,7 +86,7 @@ scripts             Windows 构建与打包脚本（PowerShell）
 
 网关端点（`/v1/*`）用 `gateway.key` 做 Bearer 认证，密钥文件权限 `0600`。渠道 API Key 在接口返回时打码，只有显式 `include_secrets` 才返回完整值。
 
-诊断建议用了 `v-html`，插值处必须走 `escapeHtml()`。
+前端目前不使用 `v-html`，所有动态文本都走 `{{ }}` 插值（Vue 自动转义）。若将来确需 `v-html`，插值处必须先经 `escapeHtml()`。
 
 ## 环境变量
 

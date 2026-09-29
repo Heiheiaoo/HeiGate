@@ -5,6 +5,12 @@ on:
     branches: [main, master]
   pull_request:
 
+# Cancel superseded runs: a new push to the same branch/PR makes the previous
+# in-flight CI run pointless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
