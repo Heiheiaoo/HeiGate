@@ -4,6 +4,15 @@
 // canonical group key so the UI can aggregate equivalent models into one card,
 // honoring user-defined custom mappings on top of the built-in rules.
 //
+// This is a deliberate twin of the normalization in
+// internal/channel/canonical.go (CleanModelName, CanonicalModelKey,
+// knownEquivalenceGroups, GetCanonicalGroupKey, AreModelsEquivalent,
+// SelectCanonicalDisplayName). The two cannot share code — the UI groups model
+// cards locally rather than calling the gateway — so a change to the vendor
+// prefix list, a billing/date suffix, or an equivalence group here must be
+// mirrored there (and vice versa), or the UI will group models differently from
+// how the gateway routes them.
+//
 // Every function is pure: the custom-mapping dictionary is passed in rather
 // than read from a reactive ref, which keeps this module free of Vue and
 // unit-testable in isolation.

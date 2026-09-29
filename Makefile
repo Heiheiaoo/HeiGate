@@ -22,8 +22,16 @@ frontend:
 	@pnpm --dir frontend install --frozen-lockfile
 	@pnpm --dir frontend run build
 
-install-frontend:
+# Install frontend dependencies when they are missing or older than the manifest
+# and lockfile. Tracking node_modules as a file target lets make skip the
+# registry round-trip when nothing changed, while still reinstalling when
+# dependencies actually move — so `make check` cannot quietly run against stale
+# node_modules and diverge from CI's fresh install.
+frontend/node_modules: frontend/package.json frontend/pnpm-lock.yaml
 	@pnpm --dir frontend install --frozen-lockfile
+	@touch frontend/node_modules
+
+install-frontend: frontend/node_modules
 
 backend:
 	@mkdir -p dist
@@ -82,13 +90,10 @@ fmt-check:
 		echo "These files need gofmt:"; echo "$$unformatted"; exit 1; \
 	fi
 
-# Mirror of the CI pipeline so a green `make check` means a green CI.
-check: fmt-check install-frontend
-	@go vet ./...
-	@go test -race -count=1 ./...
-	@pnpm --dir frontend run typecheck
-	@pnpm --dir frontend run lint
-	@pnpm --dir frontend run test:run
+# Mirror of the CI pipeline so a green `make check` means a green CI. Built from
+# the individual targets rather than re-listing their commands, so a flag change
+# in one of them cannot silently leave this out of step with CI.
+check: fmt-check lint test-backend test-frontend
 	@pnpm --dir frontend run build
 
 clean:

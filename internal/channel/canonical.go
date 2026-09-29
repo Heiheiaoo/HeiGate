@@ -89,6 +89,15 @@ var (
 	punctuationCleaner = regexp.MustCompile(`[-_.\s/:]+`)
 )
 
+// Model-name normalization below (CleanModelName, CanonicalModelKey,
+// knownEquivalenceGroups, GetCanonicalGroupKey, AreModelsEquivalent,
+// SelectCanonicalDisplayName) has a deliberate frontend twin in
+// frontend/src/services/modelNaming.ts, which the UI uses to group model cards
+// without a round-trip to the gateway. The two cannot share code, so a change
+// to the vendor-prefix list, a billing/date suffix, or an equivalence group
+// here must be mirrored there (and vice versa), or the UI will group models
+// differently from how the gateway routes them.
+
 // CanonicalModelKey computes a clean, lowercased alphanumeric key used to group
 // aliases of the same base model together across providers.
 // Examples:
@@ -134,7 +143,7 @@ func CleanModelName(raw string) string {
 	return strings.TrimSpace(s)
 }
 
-// KnownEquivalencePairs maps alternative keys to their canonical equivalents.
+// knownEquivalenceGroups maps alternative keys to their canonical equivalents.
 // For example, in many free aggregators:
 //
 //	"glm53" <=> "glm53flash" (e.g. z-ai/glm-5.3-free vs glm-5.3-flash)
