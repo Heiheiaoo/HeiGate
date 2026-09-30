@@ -40,8 +40,8 @@ const restoreTo = new WeakMap<HTMLElement, HTMLElement | null>()
  * is rendered with `v-if` — mounted/unmounted already fire exactly on open and
  * close, so no extra ref or watcher is needed per modal.
  *
- * Esc and ⌘+Enter stay with the existing global key handler; this only owns Tab
- * containment and focus restoration so the two never fight over a key event.
+ * This directive owns Tab containment and focus restoration only; dialogs are
+ * dismissed by their own close button or a backdrop click.
  */
 export const vFocusTrap: Directive<HTMLElement> = {
   mounted(el) {

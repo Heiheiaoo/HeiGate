@@ -53,12 +53,11 @@ defineExpose({
         <button
           v-if="search"
           class="m26-ch-search-clear"
-          title="清空搜索 (Esc)"
+          title="清空搜索"
           @click="emit('update:search', '')"
         >
           ✕
         </button>
-        <span v-else class="m26-ch-kbd">⌘K</span>
       </div>
 
       <!-- Filter Status Pills -->
@@ -151,7 +150,7 @@ defineExpose({
     <div class="m26-ch-toolbar-right">
       <button
         class="m26-ch-btn m26-ch-btn-primary icon-only"
-        title="新建渠道 (⌘N)"
+        title="新建渠道"
         aria-label="添加渠道"
         @click="emit('add-channel')"
       >
@@ -241,17 +240,6 @@ defineExpose({
   color: #475569;
 }
 
-.m26-ch-kbd {
-  margin-right: 6px;
-  padding: 1px 4px;
-  background: rgba(0, 0, 0, 0.05);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 4px;
-  font-size: 10px;
-  font-family: inherit;
-  color: #64748b;
-  pointer-events: none;
-}
 
 .m26-ch-filter-pills {
   display: flex;
