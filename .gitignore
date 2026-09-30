@@ -1,5 +1,6 @@
 # ---- Build outputs ----
 /dist/
+/target/
 /frontend/dist/
 /internal/web/dist/*
 !/internal/web/dist/.keep
