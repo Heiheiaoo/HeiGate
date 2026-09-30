@@ -73,6 +73,8 @@ frontend                 Vue 3 单页界面
 
 **前端刻意不用路由和全局状态管理。** 只有一个页面，主要状态仍由 `GatewayView.vue` 管理；渠道卡片、表格、工具栏和模型编辑器位于 `components/channels/`，`services/` 负责跟后端通信。日志实时更新走 SSE（`GET /api/logs/stream`），不是轮询。
 
+**外壳的托盘与自启动。** `src-tauri` 建了托盘图标与菜单（显示主窗口 / 开机自启 / 退出），关闭窗口只是隐藏、进程继续服务，退出要在托盘里显式选。开机自启用 `tauri-plugin-autostart`（macOS 走 LaunchAgent）。
+
 **外壳与前端是「本地 HTTP + WebView」。** `src-tauri` 起 `heigate-core` 的 axum 服务（回环端口），窗口直接指向 `http://127.0.0.1:<port>`，所以前端用相对路径调 API，跟前端契约完全一致。构建出的前端作为 Tauri 资源打进 `HeiGate.app/Contents/Resources/dist`。
 
 ## 安全模型
@@ -110,7 +112,6 @@ git tag v1.0.0 && git push origin v1.0.0
 ## 已知待办
 
 - 未使用 Apple Developer ID / Windows 代码签名证书，首次打开需要用户手动放行
-- 外壳还没有托盘与自启动（旧版本有），计划用 Tauri 插件补齐
 - 前端只有 API 层的测试，UI 交互没有测试覆盖
 - `GatewayView.vue` 仍然较大；新增独立交互时优先继续拆到对应功能组件
 - 探活和网关目前只支持 Anthropic 和 OpenAI 两种 provider，Gemini 等需要新增 adapter
