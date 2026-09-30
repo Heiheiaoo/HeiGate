@@ -1626,62 +1626,20 @@ function isModelProbing(channel: Channel, modelName: string): boolean {
   return Boolean(modelLatencies.value[getModelKey(channel, modelName)]?.probing)
 }
 
-function getModelSortScore(channel: Channel, modelName: string): { rank: number; latency: number; name: string } {
-  const isFailed = isModelFailed(channel, modelName)
-  const isProbing = isModelProbing(channel, modelName)
-  const key = getModelKey(channel, modelName)
-  const entry = modelLatencies.value[key]
-
-  // 1. 失败 / 报错 / 超时 -> 最底端 (Rank 5)
-  if (isFailed) {
-    return { rank: 5, latency: 999999, name: modelName }
-  }
-
-  // 2. 探活中 -> 倒数第二 (Rank 4)
-  if (isProbing) {
-    return { rank: 4, latency: 999999, name: modelName }
-  }
-
-  // 3. 已测出有效延迟的模型 (Rank 1 正常 / Rank 2 稍慢，按实际延迟从小到大排序)
-  const entryLat = entry?.ttft != null && entry.ttft > 0 ? entry.ttft : (entry?.latency != null && entry.latency > 0 ? entry.latency : null)
-  if (entryLat != null) {
-    if (entry.status === 'degraded' || entryLat >= 3000) {
-      return { rank: 2, latency: entryLat, name: modelName }
-    }
-    return { rank: 1, latency: entryLat, name: modelName }
-  }
-
-  // 4. 探活主模型默认继承的渠道有效延迟 (若渠道本身 healthy)
-  const isPrimary = isPrimaryModel(channel, modelName)
-  const chanLat = channel.ttft != null && channel.ttft > 0 ? channel.ttft : (channel.latency != null && channel.latency > 0 ? channel.latency : null)
-  if (isPrimary && chanLat != null && channel.status !== 'offline') {
-    if (channel.status === 'degraded' || chanLat >= 3000) {
-      return { rank: 2, latency: chanLat, name: modelName }
-    }
-    return { rank: 1, latency: chanLat, name: modelName }
-  }
-
-  // 5. 待探活 / 未测状态 (Rank 3)
-  return { rank: 3, latency: 999999, name: modelName }
-}
-
 const filteredModalModels = computed(() => {
   const ch = activeModelLatencyChannel.value
   if (!ch) return []
   const list = ch.modelNames?.length ? [...ch.modelNames] : [ch.name]
 
-  return list.sort((a, b) => {
-    const isPriA = isPrimaryModel(ch, a)
-    const isPriB = isPrimaryModel(ch, b)
-    if (isPriA && !isPriB) return -1
-    if (!isPriA && isPriB) return 1
-
-    const sA = getModelSortScore(ch, a)
-    const sB = getModelSortScore(ch, b)
-    if (sA.rank !== sB.rank) return sA.rank - sB.rank
-    if (sA.latency !== sB.latency) return sA.latency - sB.latency
-    return sA.name.localeCompare(sB.name)
-  })
+  // The configured order, not a ranking: the primary model first, then exactly
+  // as the channel lists them. Ranking by probe result made the rows rearrange
+  // themselves mid-probe, moving the row the user was about to act on.
+  const primaryIndex = list.findIndex((model) => isPrimaryModel(ch, model))
+  if (primaryIndex > 0) {
+    const [primary] = list.splice(primaryIndex, 1)
+    list.unshift(primary)
+  }
+  return list
 })
 
 type ModelProbeOutcome = 'completed' | 'busy' | 'failed'
