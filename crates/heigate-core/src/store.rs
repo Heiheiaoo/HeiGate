@@ -331,7 +331,7 @@ impl Store {
     }
 
     fn prune_all_model_health(&self) -> Result<()> {
-        let channels: Vec<(i64, String, String)> = {
+        let channels: Vec<(i64, String, Option<String>)> = {
             let conn = self.lock();
             let mut stmt =
                 conn.prepare("SELECT id, primary_model, extra_models_json FROM desktop_channels")?;
@@ -339,15 +339,14 @@ impl Store {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (id, primary, extra_json) in channels {
-            let extra: Vec<String> = serde_json::from_str(&extra_json)?;
             let mut models = vec![primary];
-            models.extend(extra);
+            models.extend(decode_extra_models(extra_json.as_deref()));
             self.prune_model_health(id, &models)?;
         }
         Ok(())
@@ -1222,15 +1221,26 @@ fn analytics_cutoff(days: i64) -> Option<String> {
     Some(format_time(start.with_timezone(&Utc)))
 }
 
+/// Decodes the `extra_models_json` column. Go marshals a nil slice as `null`
+/// and reads it back as an empty list, so a legacy row holding `null` (or any
+/// other non-array value) must degrade to "no extra models" instead of failing
+/// the whole store — a single old row must not stop the gateway from opening.
+fn decode_extra_models(raw: Option<&str>) -> Vec<String> {
+    raw.map(str::trim)
+        .filter(|text| !text.is_empty())
+        .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+        .unwrap_or_default()
+}
+
 fn scan_channel_row(row: &Row<'_>) -> rusqlite::Result<Channel> {
-    let extra_json: String = row.get(7)?;
+    let extra_json: Option<String> = row.get(7)?;
     let enabled: i64 = row.get(8)?;
     let last_checked: Option<String> = row.get(15)?;
     let cooldown: Option<String> = row.get(19)?;
     let inject_checked: Option<String> = row.get(23)?;
     let created: Option<String> = row.get(24)?;
     let updated: Option<String> = row.get(25)?;
-    let extra_models: Vec<String> = serde_json::from_str(&extra_json).unwrap_or_default();
+    let extra_models = decode_extra_models(extra_json.as_deref());
 
     let circuit_state: String = row.get(18)?;
     Ok(Channel {
@@ -1451,5 +1461,51 @@ mod tests {
         );
         assert_eq!(parse_time(None), None);
         assert_eq!(parse_time(Some("")), None);
+    }
+
+    #[test]
+    fn decodes_legacy_extra_models() {
+        assert_eq!(decode_extra_models(Some("null")), Vec::<String>::new());
+        assert_eq!(decode_extra_models(None), Vec::<String>::new());
+        assert_eq!(decode_extra_models(Some("  ")), Vec::<String>::new());
+        assert_eq!(decode_extra_models(Some("not json")), Vec::<String>::new());
+        assert_eq!(
+            decode_extra_models(Some("[\"a\",\"b\"]")),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn opens_a_database_with_a_legacy_null_extra_models_row() {
+        // Go marshals a nil slice as the JSON literal `null`; opening such a
+        // database used to abort startup because the health prune parsed it
+        // strictly. It must now open and report no extra models.
+        let path = std::env::temp_dir().join(format!(
+            "heigate-legacy-null-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        {
+            let store = Store::open(&path).unwrap();
+            let mut ch = channel("legacy");
+            store.save(&mut ch).unwrap();
+        }
+        {
+            // Rewrite the column the way the Go implementation would have.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("UPDATE desktop_channels SET extra_models_json = 'null'", [])
+                .unwrap();
+        }
+
+        let store = Store::open(&path).expect("store must open despite the legacy row");
+        let channels = store.list().unwrap();
+        assert_eq!(channels.len(), 1);
+        assert!(channels[0].extra_models.is_empty());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
