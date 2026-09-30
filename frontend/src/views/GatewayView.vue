@@ -6016,12 +6016,14 @@ function handleContextMenu(event: MouseEvent) {
   position: relative;
   z-index: 50;
   width: 100%;
-  height: 96px;
-  min-height: 96px;
+  height: 78px;
+  min-height: 78px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 30px 24px 10px 24px;
+  /* The top padding clears the traffic lights, which float over the content
+     because the window uses an overlay title bar. */
+  padding: 26px 24px 6px 24px;
   background: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
