@@ -28,9 +28,16 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Build the frontend the crate bundles
         run: |
-          corepack enable
           pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend run build
       - run: cargo fmt --check
