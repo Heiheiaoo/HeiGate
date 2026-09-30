@@ -5004,12 +5004,18 @@ function handleContextMenu(event: MouseEvent) {
       <div class="m26-modal-sheet m26-models-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
           <div class="m26-modal-heading">
-            <h3 id="m26-modal-title-5" class="m26-modal-title">模型管理</h3>
+            <!-- The channel name is the title: it is what identifies this modal,
+                 and a generic "模型管理" heading only repeats the button that
+                 opened it. -->
+            <h3
+              id="m26-modal-title-5"
+              class="m26-modal-title m26-modal-channel"
+              :title="activeModelLatencyChannel.url"
+            >
+              {{ activeModelLatencyChannel.name }}
+            </h3>
             <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
               {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
-            </span>
-            <span class="m26-modal-channel" :title="activeModelLatencyChannel.url">
-              {{ activeModelLatencyChannel.name }}
             </span>
             <span class="m26-modal-count">
               · {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
@@ -9940,7 +9946,7 @@ input:checked + .m26-slider:before {
 .m26-modal-channel {
   font-weight: 700;
   color: var(--m26-text);
-  max-width: 260px;
+  max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
