@@ -65,6 +65,34 @@ fn static_dir(app: &tauri::AppHandle) -> PathBuf {
         .join("dist")
 }
 
+/// The window size in logical points for a display of `available` size: the
+/// layout's ideal 1200x800, capped to what that display can actually show — a
+/// portrait monitor is narrower than the ideal — and never below a floor that
+/// keeps the window usable.
+fn limits_for(available: Option<(f64, f64)>) -> (f64, f64) {
+    const IDEAL: (f64, f64) = (1200.0, 800.0);
+    const FLOOR: (f64, f64) = (640.0, 480.0);
+    // Room for the menu bar, the Dock and the window chrome.
+    const MARGIN: (f64, f64) = (40.0, 120.0);
+
+    let (available_w, available_h) = available.unwrap_or((IDEAL.0 + MARGIN.0, IDEAL.1 + MARGIN.1));
+    (
+        IDEAL.0.min((available_w - MARGIN.0).max(FLOOR.0)),
+        IDEAL.1.min((available_h - MARGIN.1).max(FLOOR.1)),
+    )
+}
+
+/// [`limits_for`] using a real monitor's logical size.
+fn size_limits(monitor: Option<&tauri::Monitor>) -> (f64, f64) {
+    limits_for(monitor.map(|monitor| {
+        let scale = monitor.scale_factor();
+        (
+            monitor.size().width as f64 / scale,
+            monitor.size().height as f64 / scale,
+        )
+    }))
+}
+
 /// Applies the platform window chrome the UI's layout expects. On macOS the
 /// content must extend under a transparent title bar, because the UI draws its
 /// own header where the traffic lights sit; the title bar style is macOS-only,
@@ -131,12 +159,14 @@ pub fn run() {
                 .parse::<tauri::Url>()
                 .expect("valid local server url");
 
+            let limits = size_limits(app.primary_monitor().ok().flatten().as_ref());
             let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("HeiGate")
-                .inner_size(1200.0, 800.0)
-                // The layout is designed for this width; below it the nav pill
-                // and the bento grid start collapsing.
-                .min_inner_size(1200.0, 800.0)
+                .inner_size(limits.0, limits.1)
+                // The layout is designed for the ideal size, but the window may
+                // live on a smaller display (a portrait monitor, for instance),
+                // so the minimum never exceeds what that display can show.
+                .min_inner_size(limits.0, limits.1)
                 .initialization_script(DESKTOP_BRIDGE);
 
             let window = with_platform_chrome(builder).build()?;
@@ -144,10 +174,21 @@ pub fn run() {
             // Closing the window hides it: the gateway keeps serving and the
             // tray icon is how the user brings it back. Quitting is explicit.
             let hide_target = window.clone();
+            let move_target = window.clone();
             window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = hide_target.hide();
+                match event {
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = hide_target.hide();
+                    }
+                    // Moving to another display changes what "too small" means.
+                    WindowEvent::Moved(_) => {
+                        let limits =
+                            size_limits(move_target.current_monitor().ok().flatten().as_ref());
+                        let _ = move_target
+                            .set_min_size(Some(tauri::LogicalSize::new(limits.0, limits.1)));
+                    }
+                    _ => {}
                 }
             });
 
@@ -213,4 +254,21 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::limits_for;
+
+    #[test]
+    fn size_limits_follow_the_display() {
+        // A large display gets the layout's ideal size.
+        assert_eq!(limits_for(Some((2560.0, 1440.0))), (1200.0, 800.0));
+        // A portrait display is too narrow for the ideal width.
+        assert_eq!(limits_for(Some((1080.0, 1920.0))), (1040.0, 800.0));
+        // A small display cannot give up the margin, so the floor applies.
+        assert_eq!(limits_for(Some((600.0, 400.0))), (640.0, 480.0));
+        // Without a monitor, assume the ideal fits.
+        assert_eq!(limits_for(None), (1200.0, 800.0));
+    }
 }
