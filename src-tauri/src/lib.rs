@@ -96,16 +96,23 @@ pub fn run() {
                 .parse::<tauri::Url>()
                 .expect("valid local server url");
 
-            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("HeiGate")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(900.0, 600.0)
-                .initialization_script(DESKTOP_BRIDGE)
-                // The UI draws its own header where the traffic lights sit, so
-                // the content must extend under a transparent title bar.
-                .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .hidden_title(true)
-                .build()?;
+                .initialization_script(DESKTOP_BRIDGE);
+
+            // The UI draws its own header where the traffic lights sit, so on
+            // macOS the content must extend under a transparent title bar. The
+            // title bar style is macOS-only; elsewhere the native chrome stays.
+            #[cfg(target_os = "macos")]
+            {
+                builder = builder
+                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                    .hidden_title(true);
+            }
+
+            let window = builder.build()?;
 
             // Closing the window hides it: the gateway keeps serving and the
             // tray icon is how the user brings it back. Quitting is explicit.
