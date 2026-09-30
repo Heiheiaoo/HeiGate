@@ -84,6 +84,22 @@ fn with_platform_chrome<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
     }
 }
 
+/// Renders the tray glyph as a macOS template image, so the menu bar draws it
+/// in its own foreground colour (white on a dark bar, black on a light one) and
+/// it stays legible over any wallpaper. Other platforms keep the image as-is.
+fn with_tray_platform<R: tauri::Runtime>(
+    builder: tauri::tray::TrayIconBuilder<R>,
+) -> tauri::tray::TrayIconBuilder<R> {
+    #[cfg(target_os = "macos")]
+    {
+        builder.icon_as_template(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder
+    }
+}
+
 /// Brings the main window back to the foreground.
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -155,13 +171,13 @@ pub fn run() {
                 ],
             )?;
 
+            // A monochrome, transparent glyph rather than the full-colour app
+            // icon: menu bar art is drawn in the system's own colour.
+            let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+
             let autostart_entry = autostart_item.clone();
-            TrayIconBuilder::with_id("main")
-                .icon(
-                    app.default_window_icon()
-                        .cloned()
-                        .expect("the bundle ships a window icon"),
-                )
+            let tray = TrayIconBuilder::with_id("main")
+                .icon(tray_icon)
                 .tooltip("HeiGate")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -188,8 +204,8 @@ pub fn run() {
                     {
                         show_main_window(tray.app_handle());
                     }
-                })
-                .build(app)?;
+                });
+            with_tray_platform(tray).build(app)?;
 
             Ok(())
         })
