@@ -6,11 +6,11 @@
 
 以一次 `POST /v1/messages` 为例：
 
-1. `internal/middleware.LoopbackOnly` 确认连接来自本机、`Host` 是本机地址
-2. `internal/middleware.BearerAuth` 校验网关密钥
-3. `internal/api.forward` 读取请求体，解析出模型名
+1. ``middleware::loopback_only`` 确认连接来自本机、`Host` 是本机地址
+2. ``middleware::bearer_auth`` 校验网关密钥
+3. ``api::gateway::Gateway::forward`` 读取请求体，解析出模型名
 4. `resolveModelAlias` 对没有直连渠道支持的 `claude-*` 请求名回退到健康渠道主模型；其他未知模型保留原值
-5. `internal/channel.Router.CandidatesMatching` 按精确名、规范名/自定义映射及协议筛选渠道，再按健康度分层（healthy → degraded → failed → cooling down）和策略排序
+5. ``router::Router::candidates_matching`` 按精确名、规范名/自定义映射及协议筛选渠道，再按健康度分层（healthy → degraded → failed → cooling down）和策略排序
 6. 先写一条状态为「传输中」的日志，让界面能实时看到
 7. `RouteCandidates` 依次尝试候选渠道，每个渠道最多重试一次
 8. 选定渠道后，用该渠道实际配置的模型名改写请求；`forwardUpstream` 判断是否需要协议转换：客户端说 Anthropic 而上游是 OpenAI 时走 `forwardTranslated`，否则直接转发
@@ -23,7 +23,7 @@
 
 ## 熔断
 
-`internal/channel/resilience.go` 把失败分类，不同类型冷却时间不同：认证错误 10 分钟（重试没意义），模型不存在 2 分钟；上游给了 `Retry-After` 就按它来（封顶 1 小时）；限流、网络和 5xx 走指数退避（15 秒起，上限 5 分钟）。连续三次可熔断的失败会把渠道置为 open。
+``src/resilience.rs`` 把失败分类，不同类型冷却时间不同：认证错误 10 分钟（重试没意义），模型不存在 2 分钟；上游给了 `Retry-After` 就按它来（封顶 1 小时）；限流、网络和 5xx 走指数退避（15 秒起，上限 5 分钟）。连续三次可熔断的失败会把渠道置为 open。
 
 恢复是惰性的：不起定时器。报过错的渠道冷却期过后，第一个请求到来时会把它改成 half_open，排到候选最前面放一个真实请求过去当探针，同一时刻只放一个。成功就关闭熔断，失败则重新冷却。正因为恢复后会被优先尝试，每类失败都必须有非零冷却，否则一个持续报错（比如一直 429）的渠道会被每个请求先打一遍。冷却中的渠道不会被丢弃，没有别的渠道可用时仍会兜底。
 
@@ -41,7 +41,7 @@
 
 ## SQLite 的取舍
 
-`internal/channel/store.go` 把连接池限制为 1 个连接。桌面场景写入量很小，串行化让探活更新和日志写入的顺序变得确定，省掉了一堆并发问题。schema 用 `CREATE TABLE IF NOT EXISTS` 加逐条 `ALTER TABLE`（忽略「列已存在」错误）来做迁移，不需要迁移框架。
+``src/store.rs`` 把连接池限制为 1 个连接。桌面场景写入量很小，串行化让探活更新和日志写入的顺序变得确定，省掉了一堆并发问题。schema 用 `CREATE TABLE IF NOT EXISTS` 加逐条 `ALTER TABLE`（忽略「列已存在」错误）来做迁移，不需要迁移框架。
 
 ## 前端
 

@@ -95,7 +95,10 @@ mod tests {
     fn creates_a_prefixed_hex_key() {
         let path = unique_path();
         let key = load_or_create_gateway_key(&path).unwrap();
-        assert!(key.starts_with("hg_"), "key should carry the hg_ prefix: {key}");
+        assert!(
+            key.starts_with("hg_"),
+            "key should carry the hg_ prefix: {key}"
+        );
         assert_eq!(key.len(), 3 + 64, "key should be hg_ plus 64 hex chars");
         assert!(key[3..].chars().all(|c| c.is_ascii_hexdigit()));
         let _ = fs::remove_file(&path);

@@ -274,7 +274,7 @@ fn supported_reasoning_efforts(message: &str) -> Vec<String> {
 
 fn compatible_reasoning_effort(requested: &str, supported: &[String]) -> Option<String> {
     let requested = requested.trim().to_lowercase();
-    if supported.iter().any(|e| *e == requested) {
+    if supported.contains(&requested) {
         return Some(requested);
     }
     let preferences: &[(&str, &[&str])] = &[
@@ -313,7 +313,10 @@ pub fn upstream_error_payload(raw: &str) -> Option<(String, i32)> {
         return Some(found);
     }
     if let Some(Value::Object(inner)) = envelope.get("response") {
-        let nested_raw = envelope.get("response").map(Value::to_string).unwrap_or_default();
+        let nested_raw = envelope
+            .get("response")
+            .map(Value::to_string)
+            .unwrap_or_default();
         if let Some(found) = classify_error_envelope(inner, &nested_raw) {
             return Some(found);
         }
@@ -323,8 +326,7 @@ pub fn upstream_error_payload(raw: &str) -> Option<(String, i32)> {
 
 fn classify_error_envelope(envelope: &Map<String, Value>, raw: &str) -> Option<(String, i32)> {
     let has_error_slot = envelope.contains_key("error");
-    let error_slot_empty = !has_error_slot
-        || is_empty_error_value(envelope.get("error"));
+    let error_slot_empty = !has_error_slot || is_empty_error_value(envelope.get("error"));
     let status_from_body = failing_status_code(envelope);
     if error_slot_empty && status_from_body == 0 {
         return None;
@@ -334,9 +336,17 @@ fn classify_error_envelope(envelope: &Map<String, Value>, raw: &str) -> Option<(
 
     let (detail_type, detail_code, detail_message) = match envelope.get("error") {
         Some(Value::Object(error)) => (
-            error.get("type").and_then(Value::as_str).unwrap_or("").to_string(),
+            error
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             error.get("code").cloned(),
-            error.get("message").and_then(Value::as_str).unwrap_or("").to_string(),
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
         ),
         Some(Value::String(text)) => (String::new(), None, text.clone()),
         _ => (String::new(), None, String::new()),
@@ -366,7 +376,10 @@ fn classify_error_envelope(envelope: &Map<String, Value>, raw: &str) -> Option<(
 fn classification_status(detail_type: &str, message: &str, code_text: &str) -> i32 {
     let classification = format!("{detail_type} {code_text} {message}").to_lowercase();
     let has = |needle: &str| classification.contains(needle);
-    if has("rate_limit") || has("rate limit") || has("too_many_requests") || has("too many requests")
+    if has("rate_limit")
+        || has("rate limit")
+        || has("too_many_requests")
+        || has("too many requests")
     {
         429
     } else if has("authentication") || has("unauthorized") || has("invalid_api_key") {
@@ -395,10 +408,12 @@ fn failing_status_code(envelope: &Map<String, Value>) -> i32 {
 /// Reads a status from a `code` that may be a JSON number or numeric string.
 fn decode_status_code(raw: &Value) -> Option<i32> {
     match raw {
-        Value::Number(number) => number
-            .as_i64()
-            .map(|n| n as i32)
-            .or_else(|| number.as_f64().filter(|f| *f == f.trunc()).map(|f| f as i32)),
+        Value::Number(number) => number.as_i64().map(|n| n as i32).or_else(|| {
+            number
+                .as_f64()
+                .filter(|f| *f == f.trunc())
+                .map(|f| f as i32)
+        }),
         Value::String(text) => text.trim().parse::<i32>().ok(),
         _ => None,
     }
@@ -547,7 +562,9 @@ mod tests {
         );
         // Default when nothing identifies the class.
         assert_eq!(
-            upstream_error_payload(r#"{"error":{"message":"weird"}}"#).unwrap().1,
+            upstream_error_payload(r#"{"error":{"message":"weird"}}"#)
+                .unwrap()
+                .1,
             502
         );
     }

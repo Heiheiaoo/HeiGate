@@ -12,11 +12,13 @@ use axum::{middleware, Json, Router};
 use serde_json::{json, Value};
 
 use crate::api::gateway::Gateway;
-use crate::api::handlers::{self, AppState};
 use crate::api::handlers::SharedState;
+use crate::api::handlers::{self, AppState};
 use crate::auth::load_or_create_gateway_key;
 use crate::datadir;
-use crate::middleware::{bearer_auth, loopback_only, same_origin_only, security_headers, GatewayKey};
+use crate::middleware::{
+    bearer_auth, loopback_only, same_origin_only, security_headers, GatewayKey,
+};
 use crate::router::Router as ChannelRouter;
 use crate::runner::ProbeRunner;
 use crate::store::Store;
@@ -72,9 +74,15 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
 
     let api = Router::new()
         .route("/session", get(handlers::session))
-        .route("/channels", get(handlers::list_channels).post(handlers::create_channel))
+        .route(
+            "/channels",
+            get(handlers::list_channels).post(handlers::create_channel),
+        )
         .route("/channels/candidates", get(handlers::candidates))
-        .route("/channels/upstream-models", post(handlers::fetch_upstream_models))
+        .route(
+            "/channels/upstream-models",
+            post(handlers::fetch_upstream_models),
+        )
         .route(
             "/channels/{id}",
             get(handlers::get_channel)
@@ -82,8 +90,14 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
                 .delete(handlers::delete_channel),
         )
         .route("/channels/{id}/probe", post(handlers::probe_channel))
-        .route("/channels/{id}/injection-check", post(handlers::injection_check))
-        .route("/channels/{id}/duplicate", post(handlers::duplicate_channel))
+        .route(
+            "/channels/{id}/injection-check",
+            post(handlers::injection_check),
+        )
+        .route(
+            "/channels/{id}/duplicate",
+            post(handlers::duplicate_channel),
+        )
         .route("/models", get(handlers::list_models))
         .route(
             "/custom-model-mappings",
@@ -92,7 +106,10 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
                 .delete(handlers::delete_custom_mapping),
         )
         .route("/analytics", get(handlers::analytics))
-        .route("/logs", get(handlers::get_logs).delete(handlers::clear_logs))
+        .route(
+            "/logs",
+            get(handlers::get_logs).delete(handlers::clear_logs),
+        )
         .route("/logs/stream", get(handlers::stream_logs))
         .route("/logs/prune", post(handlers::prune_logs))
         .route("/system", get(handlers::system_info))
@@ -101,13 +118,13 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
 
     let gateway = Router::new()
         .route("/v1/messages", post(handlers::forward_messages))
-        .route("/v1/chat/completions", post(handlers::forward_chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(handlers::forward_chat_completions),
+        )
         .route("/v1/responses", post(handlers::forward_responses))
         .route("/v1/models", get(handlers::gateway_models))
-        .layer(middleware::from_fn_with_state(
-            GatewayKey(key),
-            bearer_auth,
-        ))
+        .layer(middleware::from_fn_with_state(GatewayKey(key), bearer_auth))
         .layer(middleware::from_fn(loopback_only));
 
     let index = static_dir.join("index.html");

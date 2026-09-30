@@ -92,8 +92,10 @@ impl Router {
                 channel.circuit_state = CIRCUIT_HALF_OPEN.to_string();
                 let channel_id = channel.id;
                 let _ = self.store.update_runtime(channel_id, move |fresh| {
-                    let cooldown_expired =
-                        fresh.cooldown_until.map(|until| now >= until).unwrap_or(true);
+                    let cooldown_expired = fresh
+                        .cooldown_until
+                        .map(|until| now >= until)
+                        .unwrap_or(true);
                     if cooldown_expired
                         && (fresh.circuit_state == CIRCUIT_OPEN
                             || (fresh.failure_count > 0 && fresh.last_status == STATUS_ERROR))
@@ -150,6 +152,8 @@ impl Router {
         let mut last_err: Option<String> = None;
         let mut claimed_half_open: Vec<i64> = Vec::new();
 
+        // Indexed: the winner is cloned out and returned by position.
+        #[allow(clippy::needless_range_loop)]
         for index in 0..candidates.len() {
             // A half-open circuit is a single recovery probe, not a concurrency
             // bucket. Claim the persisted half-open channel before forwarding.
@@ -190,9 +194,11 @@ impl Router {
 
         self.release_half_open(claimed_half_open);
 
-        let last_err =
-            last_err.unwrap_or_else(|| "all candidate channels are currently recovering".to_string());
-        Err(format!("all desktop channels failed for model {model:?}: {last_err}"))
+        let last_err = last_err
+            .unwrap_or_else(|| "all candidate channels are currently recovering".to_string());
+        Err(format!(
+            "all desktop channels failed for model {model:?}: {last_err}"
+        ))
     }
 
     /// Clears a channel's transient failure state and records a fresh latency.
@@ -295,7 +301,7 @@ impl Router {
         }
     }
 
-    fn sort_candidates(&self, channels: &mut Vec<Channel>, model: &str, strategy: &str) {
+    fn sort_candidates(&self, channels: &mut [Channel], model: &str, strategy: &str) {
         channels.sort_by(|a, b| {
             // Recovery probes go first under every strategy; RouteCandidates
             // still enforces one in-flight half-open call.
@@ -424,7 +430,9 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         seed(&store, "a", "gpt-4o", STATUS_OPERATIONAL);
         let router = Router::new(store);
-        assert!(router.candidates("unknown-model", ROUTE_SMART_QUALITY).is_err());
+        assert!(router
+            .candidates("unknown-model", ROUTE_SMART_QUALITY)
+            .is_err());
     }
 
     #[tokio::test]

@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
-use crate::probe::{
-    self, Config, ProbeResult, STATUS_DEGRADED, STATUS_ERROR, STATUS_OPERATIONAL,
-};
+use crate::probe::{self, Config, ProbeResult, STATUS_DEGRADED, STATUS_ERROR, STATUS_OPERATIONAL};
 use crate::resilience::{
     failure_cooldown, failure_is_circuit_eligible, FailureClass, FailureInfo, CIRCUIT_CLOSED,
     CIRCUIT_OPEN,
@@ -93,10 +91,7 @@ impl ProbeRunner {
         if !self.acquire_channel(id) {
             return Err(RunnerError::Busy);
         }
-        let _guard = ChannelGuard {
-            runner: self,
-            id,
-        };
+        let _guard = ChannelGuard { runner: self, id };
 
         let channel = self.store.get(id).map_err(|err| match err {
             crate::store::StoreError::NotFound(id) => RunnerError::NotFound(id),
@@ -118,19 +113,19 @@ impl ProbeRunner {
         };
 
         let mut model_count: i64 = 1;
-        let persist_primary;
-        if !target_model.is_empty() {
+
+        let persist_primary = if !target_model.is_empty() {
             cfg.primary_model = target_model.to_string();
-            persist_primary = target_model == probed_primary;
+            target_model == probed_primary
         } else if all_models {
             cfg.primary_model = probed_primary.clone();
             cfg.extra_models = channel.extra_models.clone();
             model_count += channel.extra_models.len() as i64;
-            persist_primary = true;
+            true
         } else {
             cfg.primary_model = probed_primary.clone();
-            persist_primary = true;
-        }
+            true
+        };
 
         let budget = probe::run_budget_for(model_count);
         let results = match tokio::time::timeout(budget, probe::run(&cfg)).await {

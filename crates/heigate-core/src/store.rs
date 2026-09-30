@@ -325,7 +325,9 @@ impl Store {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn prune_all_model_health(&self) -> Result<()> {
@@ -334,7 +336,11 @@ impl Store {
             let mut stmt =
                 conn.prepare("SELECT id, primary_model, extra_models_json FROM desktop_channels")?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -573,13 +579,7 @@ impl Store {
     }
 
     /// Persists an injection-check result without racing a concurrent edit.
-    pub fn set_injection(
-        &self,
-        id: i64,
-        state: &str,
-        tokens: i64,
-        content: &str,
-    ) -> Result<()> {
+    pub fn set_injection(&self, id: i64, state: &str, tokens: i64, content: &str) -> Result<()> {
         let now = format_time(Utc::now());
         let conn = self.lock();
         conn.execute(
@@ -729,7 +729,11 @@ impl Store {
     }
 
     pub fn list_logs(&self, limit: i64) -> Result<Vec<RequestLog>> {
-        let limit = if limit <= 0 || limit > 500 { 100 } else { limit };
+        let limit = if limit <= 0 || limit > 500 {
+            100
+        } else {
+            limit
+        };
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT id, model, channel_name, status_code, latency_ms, ttft_ms,
@@ -836,7 +840,11 @@ impl Store {
             .get_setting("log_retention_days", "7")?
             .parse()
             .unwrap_or(7);
-        let retention_days = if retention_days < 0 { 7 } else { retention_days };
+        let retention_days = if retention_days < 0 {
+            7
+        } else {
+            retention_days
+        };
         let max_count: i64 = self
             .get_setting("log_max_count", "5000")?
             .parse()
@@ -855,9 +863,10 @@ impl Store {
 
     pub fn count_logs(&self) -> Result<i64> {
         let conn = self.lock();
-        let count: i64 = conn.query_row("SELECT COUNT(1) FROM desktop_request_logs", [], |row| {
-            row.get(0)
-        })?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(1) FROM desktop_request_logs", [], |row| {
+                row.get(0)
+            })?;
         Ok(count)
     }
 
@@ -952,7 +961,8 @@ impl Store {
         result.summary = summary;
         if result.summary.total_requests > 0 {
             result.summary.success_rate = round_analytics(
-                result.summary.success_requests as f64 / result.summary.total_requests as f64 * 100.0,
+                result.summary.success_requests as f64 / result.summary.total_requests as f64
+                    * 100.0,
             );
         }
 
@@ -1315,7 +1325,7 @@ mod tests {
         assert_eq!(got.primary_model, "gpt-4o-mini");
         assert!(got.enabled);
         assert_eq!(got.circuit_state, "closed");
-        assert_eq!(got.created_at.is_some(), true);
+        assert!(got.created_at.is_some());
     }
 
     #[test]
@@ -1395,7 +1405,10 @@ mod tests {
     #[test]
     fn settings_roundtrip_with_fallback() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.get_setting("missing", "fallback").unwrap(), "fallback");
+        assert_eq!(
+            store.get_setting("missing", "fallback").unwrap(),
+            "fallback"
+        );
         store.set_setting("log_max_count", "123").unwrap();
         assert_eq!(store.get_setting("log_max_count", "x").unwrap(), "123");
     }

@@ -295,7 +295,8 @@ pub fn select_canonical_display_name(models: &[String]) -> String {
 
     if !best.is_empty() {
         let cleaned = clean_model_name(&best);
-        if !cleaned.is_empty() && !cleaned.contains('/') && !cleaned.to_lowercase().contains("free") {
+        if !cleaned.is_empty() && !cleaned.contains('/') && !cleaned.to_lowercase().contains("free")
+        {
             return cleaned;
         }
         return best;
@@ -315,7 +316,10 @@ mod tests {
         assert_eq!(canonical_model_key("qwen3.8-flash"), "qwen38flash");
         assert_eq!(canonical_model_key("Qwen/Qwen3.8-Flash"), "qwen38flash");
         assert_eq!(canonical_model_key("glm-5.3-flash-free"), "glm53flash");
-        assert_eq!(canonical_model_key("deepseek-v4-flash-0731"), "deepseekv4flash");
+        assert_eq!(
+            canonical_model_key("deepseek-v4-flash-0731"),
+            "deepseekv4flash"
+        );
         assert_eq!(clean_model_name("z-ai/glm-5.3-free"), "glm-5.3");
         assert_eq!(clean_model_name("  spaced  "), "spaced");
     }

@@ -16,7 +16,10 @@ use super::{STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE};
 pub enum ConvertError {
     /// The request carried no conversation turns.
     NoMessages,
-    UnsupportedRole { index: usize, role: String },
+    UnsupportedRole {
+        index: usize,
+        role: String,
+    },
 }
 
 impl std::fmt::Display for ConvertError {

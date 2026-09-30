@@ -6,8 +6,8 @@ import { fileURLToPath, URL } from 'node:url'
 const appVersion = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').trim()
 
 // During `pnpm dev` the UI runs on Vite's port and proxies API calls to a
-// locally running gateway (`make run`). In production the Go binary serves
-// the built files itself, so everything is same-origin.
+// locally running gateway (`make run`). In production the Rust core serves the
+// built files itself, so everything is same-origin.
 const gateway = process.env.HEIGATE_DEV_TARGET ?? 'http://127.0.0.1:8080'
 const devGatewayURL = `${gateway.replace(/\/+$/, '')}/v1`
 
@@ -21,9 +21,9 @@ export default defineConfig({
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
   build: {
-    // The Go binary embeds this directory with -tags embed.
-    outDir: '../internal/web/dist',
-    emptyOutDir: false,
+    // Bundled into HeiGate.app as a Tauri resource and served by the Rust core.
+    outDir: 'dist',
+    emptyOutDir: true,
     target: 'es2022',
     chunkSizeWarningLimit: 900,
   },

@@ -44,7 +44,10 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     headers.insert("x-frame-options", "DENY".parse().unwrap());
     headers.insert("referrer-policy", "no-referrer".parse().unwrap());
     headers.insert("cross-origin-opener-policy", "same-origin".parse().unwrap());
-    headers.insert("cross-origin-resource-policy", "same-origin".parse().unwrap());
+    headers.insert(
+        "cross-origin-resource-policy",
+        "same-origin".parse().unwrap(),
+    );
     res
 }
 
@@ -103,7 +106,11 @@ pub struct GatewayKey(pub String);
 
 /// Accepts the gateway key via `Authorization: Bearer <key>` or
 /// `x-api-key: <key>`, matching what the Anthropic and OpenAI SDKs send.
-pub async fn bearer_auth(State(GatewayKey(key)): State<GatewayKey>, req: Request, next: Next) -> Response {
+pub async fn bearer_auth(
+    State(GatewayKey(key)): State<GatewayKey>,
+    req: Request,
+    next: Next,
+) -> Response {
     let key = key.trim().to_string();
     if key.is_empty() {
         return (
@@ -126,16 +133,12 @@ pub async fn bearer_auth(State(GatewayKey(key)): State<GatewayKey>, req: Request
         }
     }
 
-    let matches: bool =
-        subtle::ConstantTimeEq::ct_eq(provided.as_bytes(), key.as_bytes()).into();
+    let matches: bool = subtle::ConstantTimeEq::ct_eq(provided.as_bytes(), key.as_bytes()).into();
     let ok = !provided.is_empty() && matches;
     if !ok {
         return (
             StatusCode::UNAUTHORIZED,
-            [(
-                header::WWW_AUTHENTICATE,
-                "Bearer realm=\"HeiGate\"",
-            )],
+            [(header::WWW_AUTHENTICATE, "Bearer realm=\"HeiGate\"")],
             Json(json!({
                 "type": "error",
                 "error": {
@@ -163,7 +166,7 @@ fn reject_non_local(req: &Request) -> Option<Response> {
     }
 
     let host = header_str(req.headers(), header::HOST.as_str()).unwrap_or_default();
-    if !is_loopback_host(&host) {
+    if !is_loopback_host(host) {
         return Some(forbidden("unexpected Host header"));
     }
     None
@@ -195,11 +198,16 @@ pub fn is_loopback_host(hostport: &str) -> bool {
         return false;
     }
     let host = split_host(hostport);
-    let host = host.trim().trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    let host = host
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
-    host.parse::<IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Splits `host[:port]` into the host part. Handles IPv6 literals in brackets
@@ -271,12 +279,70 @@ mod tests {
     #[tokio::test]
     async fn loopback_only_rejects_non_local() {
         let r = loopback_router();
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:5000", Some("127.0.0.1:8080"), &[]).await, StatusCode::OK);
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "[::1]:5000", Some("localhost:8080"), &[]).await, StatusCode::OK);
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:5000", Some("[::1]:8080"), &[]).await, StatusCode::OK);
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "192.168.1.9:5000", Some("127.0.0.1:8080"), &[]).await, StatusCode::FORBIDDEN);
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:5000", Some("attacker.example:8080"), &[]).await, StatusCode::FORBIDDEN);
-        assert_eq!(call(r, Method::GET, "/ping", "127.0.0.1:5000", None, &[]).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:5000",
+                Some("127.0.0.1:8080"),
+                &[]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "[::1]:5000",
+                Some("localhost:8080"),
+                &[]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:5000",
+                Some("[::1]:8080"),
+                &[]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "192.168.1.9:5000",
+                Some("127.0.0.1:8080"),
+                &[]
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:5000",
+                Some("attacker.example:8080"),
+                &[]
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(r, Method::GET, "/ping", "127.0.0.1:5000", None, &[]).await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
@@ -284,33 +350,95 @@ mod tests {
         let r = same_origin_router();
         let local = Some("127.0.0.1:8080");
 
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[]).await, StatusCode::OK);
         assert_eq!(
-            call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[("origin", "http://127.0.0.1:8080"), ("sec-fetch-site", "same-origin")]).await,
+            call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[]).await,
             StatusCode::OK
         );
         assert_eq!(
-            call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[("origin", "http://localhost:5173")]).await,
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[
+                    ("origin", "http://127.0.0.1:8080"),
+                    ("sec-fetch-site", "same-origin")
+                ]
+            )
+            .await,
             StatusCode::OK
         );
         assert_eq!(
-            call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[("origin", "https://evil.example")]).await,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[("sec-fetch-site", "cross-site")]).await,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            call(r.clone(), Method::POST, "/write", "127.0.0.1:1", local, &[("content-type", "text/plain")]).await,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            call(r.clone(), Method::POST, "/write", "127.0.0.1:1", local, &[(REQUEST_HEADER, "1")]).await,
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("origin", "http://localhost:5173")]
+            )
+            .await,
             StatusCode::OK
         );
         assert_eq!(
-            call(r, Method::POST, "/write", "10.0.0.2:1", local, &[(REQUEST_HEADER, "1")]).await,
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("origin", "https://evil.example")]
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("sec-fetch-site", "cross-site")]
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::POST,
+                "/write",
+                "127.0.0.1:1",
+                local,
+                &[("content-type", "text/plain")]
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::POST,
+                "/write",
+                "127.0.0.1:1",
+                local,
+                &[(REQUEST_HEADER, "1")]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                r,
+                Method::POST,
+                "/write",
+                "10.0.0.2:1",
+                local,
+                &[(REQUEST_HEADER, "1")]
+            )
+            .await,
             StatusCode::FORBIDDEN
         );
     }
@@ -319,14 +447,72 @@ mod tests {
     async fn bearer_auth_checks_keys() {
         let r = bearer_router("hg_secret");
         let local = Some("127.0.0.1:8080");
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[]).await, StatusCode::UNAUTHORIZED);
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[("authorization", "Bearer wrong")]).await, StatusCode::UNAUTHORIZED);
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[("authorization", "Bearer hg_secret")]).await, StatusCode::OK);
-        assert_eq!(call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[("authorization", "bearer hg_secret")]).await, StatusCode::OK);
-        assert_eq!(call(r, Method::GET, "/ping", "127.0.0.1:1", local, &[("x-api-key", "hg_secret")]).await, StatusCode::OK);
+        assert_eq!(
+            call(r.clone(), Method::GET, "/ping", "127.0.0.1:1", local, &[]).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("authorization", "Bearer wrong")]
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("authorization", "Bearer hg_secret")]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("authorization", "bearer hg_secret")]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                r,
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("x-api-key", "hg_secret")]
+            )
+            .await,
+            StatusCode::OK
+        );
 
         let empty = bearer_router("");
-        assert_eq!(call(empty, Method::GET, "/ping", "127.0.0.1:1", local, &[("x-api-key", "x")]).await, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            call(
+                empty,
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("x-api-key", "x")]
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]

@@ -214,8 +214,8 @@ const newChannelUrl = ref('')
 const newChannelKey = ref('')
 const newChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const newChannelEnabled = ref(true)
-const newChannelPrimaryModel = ref('gpt-4o-mini')
-const newChannelModelNames = ref<string[]>(['gpt-4o-mini'])
+const newChannelPrimaryModel = ref('')
+const newChannelModelNames = ref<string[]>([])
 const isFetchingNewModels = ref(false)
 const showNewKey = ref(false)
 
@@ -2974,8 +2974,8 @@ async function addChannel() {
   newChannelUrl.value = ''
   newChannelKey.value = ''
   showNewKey.value = false
-  newChannelPrimaryModel.value = 'gpt-4o-mini'
-  newChannelModelNames.value = ['gpt-4o-mini']
+  newChannelPrimaryModel.value = ''
+  newChannelModelNames.value = []
   newChannelProtocol.value = 'openai-compatible'
   showAddChannel.value = false
   newChannelEnabled.value = true

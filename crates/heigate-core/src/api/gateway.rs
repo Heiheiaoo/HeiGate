@@ -82,7 +82,9 @@ impl GatewayError {
 impl std::fmt::Display for GatewayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GatewayError::UpstreamStatus { status, message, .. } => {
+            GatewayError::UpstreamStatus {
+                status, message, ..
+            } => {
                 if message.is_empty() {
                     write!(f, "upstream returned HTTP {status}")
                 } else {
@@ -177,25 +179,25 @@ impl Gateway {
         };
 
         let matcher = |ch: &Channel| gateway_candidate_matcher(proto, ch);
-        let mut candidates =
-            match self
-                .router
-                .candidates_matching(&candidate_model, &ctx.strategy, Some(&matcher))
-            {
-                Ok(candidates) => candidates,
-                Err(err) => {
-                    if proto == GatewayProtocol::Anthropic {
-                        return anthropic_error(
+        let mut candidates = match self.router.candidates_matching(
+            &candidate_model,
+            &ctx.strategy,
+            Some(&matcher),
+        ) {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                if proto == GatewayProtocol::Anthropic {
+                    return anthropic_error(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "api_error",
                             &format!(
                                 "No channel found for model {model:?} (resolved: {effective_model:?}): {err}"
                             ),
                         );
-                    }
-                    return json_error(StatusCode::SERVICE_UNAVAILABLE, &err);
                 }
-            };
+                return json_error(StatusCode::SERVICE_UNAVAILABLE, &err);
+            }
+        };
 
         if is_auto {
             candidates.sort_by(|a, b| {
@@ -243,6 +245,8 @@ impl Gateway {
         let mut last_error: Option<GatewayError> = None;
         let mut claimed: Vec<i64> = Vec::new();
 
+        // Indexed: the winning response is moved out and returned by position.
+        #[allow(clippy::needless_range_loop)]
         'candidates: for index in 0..candidates.len() {
             let is_half_open = candidates[index].circuit_state == CIRCUIT_HALF_OPEN;
             if is_half_open && !self.router.claim_half_open_public(candidates[index].id) {
@@ -344,11 +348,8 @@ impl Gateway {
                     Ok(mut upstream) => {
                         // Do not commit a 2xx response until the upstream has
                         // produced its first bytes.
-                        let is_upstream_sse = header_contains(
-                            &upstream.headers,
-                            "content-type",
-                            "text/event-stream",
-                        );
+                        let is_upstream_sse =
+                            header_contains(&upstream.headers, "content-type", "text/event-stream");
 
                         let (prefix, rest, read_err) =
                             read_initial_prefix(upstream.stream, is_upstream_sse).await;
@@ -364,8 +365,7 @@ impl Gateway {
                             if attempt == 0 && failure_is_retryable(&stream_err.failure_info()) {
                                 continue;
                             }
-                            failed_attempts
-                                .push(format!("{} (传输中断)", candidates[index].name));
+                            failed_attempts.push(format!("{} (传输中断)", candidates[index].name));
                             last_error = Some(stream_err);
                             break 'candidates;
                         }
@@ -377,8 +377,7 @@ impl Gateway {
                                 step.status_code = status as i64;
                                 step.error = message.clone();
                                 step.raw_error = message.clone();
-                                let up_err =
-                                    GatewayError::upstream_status(status, message.clone());
+                                let up_err = GatewayError::upstream_status(status, message.clone());
                                 let retryable = failure_is_retryable(&up_err.failure_info());
                                 trace_steps.push(step);
                                 if attempt == 0 && retryable {
@@ -429,16 +428,15 @@ impl Gateway {
         let total_latency = start_overall.elapsed().as_millis() as i64;
 
         let Some((upstream, winning, winning_ttft)) = chosen else {
-            return self
-                .finish_all_failed(
-                    proto,
-                    &effective_model,
-                    &failed_attempts,
-                    last_error,
-                    request_log,
-                    total_latency,
-                    &trace_steps,
-                );
+            return self.finish_all_failed(
+                proto,
+                &effective_model,
+                &failed_attempts,
+                last_error,
+                request_log,
+                total_latency,
+                &trace_steps,
+            );
         };
 
         self.deliver(
@@ -527,19 +525,20 @@ impl Gateway {
                     );
                     modified = true;
                 }
-                let streaming = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+                let streaming = payload
+                    .get("stream")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if streaming
                     && proto != GatewayProtocol::Anthropic
                     && !payload.contains_key("stream_options")
                 {
-                    payload.insert(
-                        "stream_options".to_string(),
-                        json!({"include_usage": true}),
-                    );
+                    payload.insert("stream_options".to_string(), json!({"include_usage": true}));
                     modified = true;
                 }
                 if modified {
-                    serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap_or_else(|_| body.to_vec())
+                    serde_json::to_vec(&serde_json::Value::Object(payload))
+                        .unwrap_or_else(|_| body.to_vec())
                 } else {
                     body.to_vec()
                 }
@@ -630,7 +629,7 @@ impl Gateway {
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
-                .map(|v| parse_retry_after(v))
+                .map(parse_retry_after)
                 .unwrap_or(Duration::ZERO);
             let body_text = response.text().await.unwrap_or_default();
             let mut message = parse_upstream_error_message(&body_text);
@@ -663,7 +662,9 @@ impl Gateway {
                 .bytes()
                 .await
                 .map_err(|err| GatewayError::Other(format!("read chat response: {err}")))?;
-            if let Some((message, err_status)) = upstream_error_payload(&String::from_utf8_lossy(&resp_bytes)) {
+            if let Some((message, err_status)) =
+                upstream_error_payload(&String::from_utf8_lossy(&resp_bytes))
+            {
                 return Err(GatewayError::upstream_status(err_status, message));
             }
             let chat_resp: crate::protocol::ChatResponse = serde_json::from_slice(&resp_bytes)
@@ -746,8 +747,7 @@ impl Gateway {
         ));
 
         let mut response = Response::new(body);
-        *response.status_mut() =
-            StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::OK);
+        *response.status_mut() = StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::OK);
         for (name, value) in upstream.headers.iter() {
             if is_hop_by_hop_header(name.as_str()) {
                 continue;
@@ -834,15 +834,15 @@ impl Gateway {
             .to_string();
             let mut response = Response::new(Body::from(body));
             *response.status_mut() = status;
-            response.headers_mut().insert(
-                "content-type",
-                HeaderValue::from_static("application/json"),
-            );
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
             response
         };
         let mut response = response;
         if failure_info.retry_after > Duration::ZERO {
-            if let Ok(value) = HeaderValue::from_str(&failure_info.retry_after.as_secs().to_string())
+            if let Ok(value) =
+                HeaderValue::from_str(&failure_info.retry_after.as_secs().to_string())
             {
                 response.headers_mut().insert("retry-after", value);
             }
@@ -971,16 +971,20 @@ fn translated_stream(
                             }
                             if upstream_error_payload(&payload).is_some() {
                                 st.finished = true;
-                                st.pending.push_back(Err(std::io::Error::other(
-                                    "upstream stream error",
-                                )));
+                                st.pending
+                                    .push_back(Err(std::io::Error::other("upstream stream error")));
                                 break;
                             }
                             let Ok(chunk) = serde_json::from_str::<ChatChunk>(&payload) else {
                                 continue;
                             };
                             for choice in &chunk.choices {
-                                if choice.finish_reason.as_deref().map(|f| !f.trim().is_empty()).unwrap_or(false) {
+                                if choice
+                                    .finish_reason
+                                    .as_deref()
+                                    .map(|f| !f.trim().is_empty())
+                                    .unwrap_or(false)
+                                {
                                     st.saw_finish = true;
                                 }
                             }
@@ -1007,11 +1011,10 @@ fn translated_stream(
                     None => {
                         st.finished = true;
                         if !st.saw_done && !st.saw_finish {
-                            st.pending
-                                .push_back(Err(std::io::Error::new(
-                                    std::io::ErrorKind::UnexpectedEof,
-                                    "stream truncated",
-                                )));
+                            st.pending.push_back(Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "stream truncated",
+                            )));
                         } else {
                             for event in st.state.finish() {
                                 if let Ok(frame) = encode_sse(&event) {
@@ -1030,10 +1033,9 @@ fn json_error(status: StatusCode, message: &str) -> Response {
     let body = json!({ "error": message }).to_string();
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
     response
 }
 
@@ -1045,10 +1047,9 @@ fn anthropic_error(status: StatusCode, kind: &str, message: &str) -> Response {
     .to_string();
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
     response
 }
 
@@ -1173,8 +1174,7 @@ impl Stream for LoggingStream {
                                     log.prompt_tokens = tracker.prompt_tokens;
                                 }
                                 log.total_tokens = log.prompt_tokens + log.completion_tokens;
-                                log.latency_ms =
-                                    this.start.elapsed().as_millis() as i64;
+                                log.latency_ms = this.start.elapsed().as_millis() as i64;
                                 if log.id > 0 {
                                     let _ = this.store.update_log(&log);
                                 }

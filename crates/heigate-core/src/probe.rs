@@ -195,7 +195,7 @@ pub fn validate_interval(seconds: i64) -> Result<(), ProbeError> {
     if seconds == 0 {
         return Ok(());
     }
-    if seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS {
+    if !(MIN_INTERVAL_SECONDS..=MAX_INTERVAL_SECONDS).contains(&seconds) {
         return Err(ProbeError::InvalidInterval);
     }
     Ok(())
@@ -313,16 +313,9 @@ pub async fn check_model_once(cfg: &Config, model: &str) -> ProbeResult {
     }
     res.latency_ms = Some(latency_ms);
 
-    if out.status >= 500 {
-        res.message = redact(
-            &format!(
-                "upstream HTTP {}: {}",
-                out.status,
-                truncate(&compact_whitespace(&out.body), MAX_ERROR_SNIPPET)
-            ),
-            &cfg.api_key,
-        );
-    } else if !(200..300).contains(&out.status) {
+    // Any non-2xx (5xx included) reports the upstream status and body. The
+    // caller decides when to take the next independent sample.
+    if !(200..300).contains(&out.status) {
         res.message = redact(
             &format!(
                 "upstream HTTP {}: {}",
@@ -414,10 +407,8 @@ async fn send(cfg: &Config, model: &str, prompt: &str) -> Result<SendResult, Str
             }
             request = request.header("anthropic-version", "2023-06-01");
         }
-        PROVIDER_OPENAI => {
-            if !cfg.api_key.is_empty() {
-                request = request.header("authorization", format!("Bearer {}", cfg.api_key));
-            }
+        PROVIDER_OPENAI if !cfg.api_key.is_empty() => {
+            request = request.header("authorization", format!("Bearer {}", cfg.api_key));
         }
         _ => {}
     }
@@ -495,7 +486,14 @@ async fn read_stream(
                 ));
             }
 
-            apply_delta(cfg, &payload, &mut text, &mut reasoning, &mut text_at, &mut reason_at);
+            apply_delta(
+                cfg,
+                &payload,
+                &mut text,
+                &mut reasoning,
+                &mut text_at,
+                &mut reason_at,
+            );
         }
     }
 
@@ -572,7 +570,10 @@ fn apply_delta(
                 }
             }
             Some("thinking_delta") => {
-                if let Some(part) = delta.and_then(|d| d.get("thinking")).and_then(Value::as_str) {
+                if let Some(part) = delta
+                    .and_then(|d| d.get("thinking"))
+                    .and_then(Value::as_str)
+                {
                     if !part.is_empty() {
                         reason_at.get_or_insert_with(Instant::now);
                         reasoning.push_str(part);
@@ -594,11 +595,9 @@ fn apply_delta(
                     text.push_str(delta);
                 }
             }
-            Some("response.reasoning_text.delta") => {
-                if !delta.is_empty() {
-                    reason_at.get_or_insert_with(Instant::now);
-                    reasoning.push_str(delta);
-                }
+            Some("response.reasoning_text.delta") if !delta.is_empty() => {
+                reason_at.get_or_insert_with(Instant::now);
+                reasoning.push_str(delta);
             }
             _ => {}
         }
@@ -698,7 +697,10 @@ mod tests {
             normalize_endpoint("https://api.example.com/v1/"),
             "https://api.example.com"
         );
-        assert_eq!(normalize_endpoint("api.example.com"), "https://api.example.com");
+        assert_eq!(
+            normalize_endpoint("api.example.com"),
+            "https://api.example.com"
+        );
         assert_eq!(normalize_endpoint("  https://a.b  "), "https://a.b");
         assert_eq!(normalize_endpoint(""), "");
     }
@@ -716,16 +718,25 @@ mod tests {
 
         let mut bad_provider = good.clone();
         bad_provider.provider = "gemini".to_string();
-        assert_eq!(validate_config(&bad_provider), Err(ProbeError::InvalidProvider));
+        assert_eq!(
+            validate_config(&bad_provider),
+            Err(ProbeError::InvalidProvider)
+        );
 
         let mut anthropic_responses = good.clone();
         anthropic_responses.provider = PROVIDER_ANTHROPIC.to_string();
         anthropic_responses.api_mode = API_MODE_RESPONSES.to_string();
-        assert_eq!(validate_config(&anthropic_responses), Err(ProbeError::InvalidApiMode));
+        assert_eq!(
+            validate_config(&anthropic_responses),
+            Err(ProbeError::InvalidApiMode)
+        );
 
         let mut no_model = good.clone();
         no_model.primary_model = "  ".to_string();
-        assert_eq!(validate_config(&no_model), Err(ProbeError::MissingPrimaryModel));
+        assert_eq!(
+            validate_config(&no_model),
+            Err(ProbeError::MissingPrimaryModel)
+        );
     }
 
     #[test]
@@ -760,7 +771,12 @@ mod tests {
     #[test]
     fn dedupe_and_helpers() {
         assert_eq!(
-            dedupe_models(&[" a ".to_string(), "a".to_string(), "b".to_string(), "".to_string()]),
+            dedupe_models(&[
+                " a ".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "".to_string()
+            ]),
             vec!["a".to_string(), "b".to_string()]
         );
         assert_eq!(compact_whitespace("a\n  b\tc"), "a b c");
@@ -783,7 +799,10 @@ mod tests {
             stream_error("{\"error\":{\"message\":\"quota\"}}"),
             Some("quota".to_string())
         );
-        assert_eq!(stream_error("{\"error\":\"boom\"}"), Some("boom".to_string()));
+        assert_eq!(
+            stream_error("{\"error\":\"boom\"}"),
+            Some("boom".to_string())
+        );
         assert!(stream_error("{\"error\":null}").is_none());
     }
 }

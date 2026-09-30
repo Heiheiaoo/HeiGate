@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 use crate::api::gateway::{Gateway, RequestContext};
 use crate::api::policy::AUTO_MODEL_NAME;
 use crate::canonical::{
-    get_canonical_group_key, get_custom_model_mappings, set_custom_model_mappings,
-    select_canonical_display_name,
+    get_canonical_group_key, get_custom_model_mappings, select_canonical_display_name,
+    set_custom_model_mappings,
 };
 use crate::probe::{
     self, check_injection_models, validate_config, validate_interval, ProbeError,
@@ -78,9 +78,10 @@ fn runner_error_response(err: &RunnerError) -> Response {
         RunnerError::NotFound(_) => {
             json_response(StatusCode::NOT_FOUND, json!({ "error": err.to_string() }))
         }
-        RunnerError::Store(_) => {
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": err.to_string() }))
-        }
+        RunnerError::Store(_) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": err.to_string() }),
+        ),
     }
 }
 
@@ -216,7 +217,10 @@ pub async fn create_channel(
         Err(err) => return probe_error_response(&err),
     };
     match state.store.save(&mut channel) {
-        Ok(()) => json_response(StatusCode::CREATED, json!({ "data": sanitize_channel(&channel) })),
+        Ok(()) => json_response(
+            StatusCode::CREATED,
+            json!({ "data": sanitize_channel(&channel) }),
+        ),
         Err(err) => store_error_response(&err),
     }
 }
@@ -284,7 +288,10 @@ pub async fn duplicate_channel(State(state): State<SharedState>, Path(id): Path<
     dup.created_at = None;
     dup.updated_at = None;
     match state.store.save(&mut dup) {
-        Ok(()) => json_response(StatusCode::CREATED, json!({ "data": sanitize_channel(&dup) })),
+        Ok(()) => json_response(
+            StatusCode::CREATED,
+            json!({ "data": sanitize_channel(&dup) }),
+        ),
         Err(err) => store_error_response(&err),
     }
 }
@@ -294,8 +301,14 @@ pub async fn probe_channel(
     Path(id): Path<i64>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let target_model = params.get("model").map(|m| m.trim().to_string()).unwrap_or_default();
-    let check_all = matches!(params.get("all").map(String::as_str), Some("1") | Some("true"));
+    let target_model = params
+        .get("model")
+        .map(|m| m.trim().to_string())
+        .unwrap_or_default();
+    let check_all = matches!(
+        params.get("all").map(String::as_str),
+        Some("1") | Some("true")
+    );
 
     let result = if !target_model.is_empty() {
         state.runner.probe_model_now(id, &target_model).await
@@ -331,8 +344,14 @@ pub async fn injection_check(
         id,
     };
 
-    let target_model = params.get("model").map(|m| m.trim().to_string()).unwrap_or_default();
-    let check_all = matches!(params.get("all").map(String::as_str), Some("1") | Some("true"));
+    let target_model = params
+        .get("model")
+        .map(|m| m.trim().to_string())
+        .unwrap_or_default();
+    let check_all = matches!(
+        params.get("all").map(String::as_str),
+        Some("1") | Some("true")
+    );
 
     let models: Vec<String> = if !target_model.is_empty() {
         vec![target_model]
@@ -359,12 +378,11 @@ pub async fn injection_check(
 
     // The channel column reflects the primary model.
     if let Some(report) = reports.iter().find(|r| r.model == channel.primary_model) {
-        if let Err(err) = state.store.set_injection(
-            id,
-            &report.state,
-            report.prompt_tokens,
-            &report.content,
-        ) {
+        if let Err(err) =
+            state
+                .store
+                .set_injection(id, &report.state, report.prompt_tokens, &report.content)
+        {
             return store_error_response(&err);
         }
     }
@@ -418,7 +436,10 @@ pub async fn list_models(State(state): State<SharedState>) -> Response {
         data.push(json!({ "name": name, "channels": channels }));
     }
     data.sort_by(|a, b| {
-        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
     });
 
     ok_data(json!(data))
@@ -443,14 +464,18 @@ pub async fn set_custom_mapping(
     let raw = input.raw_model.trim().to_string();
     let target = input.target_model.trim().to_string();
     if raw.is_empty() || target.is_empty() {
-        return json_response(StatusCode::BAD_REQUEST, json!({ "error": "模型名称不能为空" }));
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "模型名称不能为空" }),
+        );
     }
     let mut mappings = get_custom_model_mappings();
     mappings.insert(raw.to_lowercase(), target);
     set_custom_model_mappings(mappings.clone());
-    let _ = state
-        .store
-        .set_setting("custom_model_mappings", &serde_json::to_string(&mappings).unwrap_or_default());
+    let _ = state.store.set_setting(
+        "custom_model_mappings",
+        &serde_json::to_string(&mappings).unwrap_or_default(),
+    );
     json_response(StatusCode::OK, json!({ "status": "ok", "data": mappings }))
 }
 
@@ -458,16 +483,23 @@ pub async fn delete_custom_mapping(
     State(state): State<SharedState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let raw = params.get("raw_model").map(|m| m.trim().to_string()).unwrap_or_default();
+    let raw = params
+        .get("raw_model")
+        .map(|m| m.trim().to_string())
+        .unwrap_or_default();
     if raw.is_empty() {
-        return json_response(StatusCode::BAD_REQUEST, json!({ "error": "缺少 raw_model 参数" }));
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "缺少 raw_model 参数" }),
+        );
     }
     let mut mappings = get_custom_model_mappings();
     mappings.remove(&raw.to_lowercase());
     set_custom_model_mappings(mappings.clone());
-    let _ = state
-        .store
-        .set_setting("custom_model_mappings", &serde_json::to_string(&mappings).unwrap_or_default());
+    let _ = state.store.set_setting(
+        "custom_model_mappings",
+        &serde_json::to_string(&mappings).unwrap_or_default(),
+    );
     json_response(StatusCode::OK, json!({ "status": "ok", "data": mappings }))
 }
 
@@ -503,7 +535,10 @@ pub async fn get_logs(
 
 pub async fn clear_logs(State(state): State<SharedState>) -> Response {
     match state.store.clear_logs() {
-        Ok(()) => json_response(StatusCode::OK, json!({ "status": "ok", "message": "logs cleared" })),
+        Ok(()) => json_response(
+            StatusCode::OK,
+            json!({ "status": "ok", "message": "logs cleared" }),
+        ),
         Err(err) => store_error_response(&err),
     }
 }
@@ -543,12 +578,18 @@ pub async fn prune_logs(
 }
 
 pub async fn system_info(State(state): State<SharedState>) -> Response {
-    let retention_raw = state.store.get_setting("log_retention_days", "7").unwrap_or_else(|_| "7".into());
+    let retention_raw = state
+        .store
+        .get_setting("log_retention_days", "7")
+        .unwrap_or_else(|_| "7".into());
     let mut retention_days = retention_raw.parse::<i64>().unwrap_or(7);
     if retention_days <= 0 && retention_raw != "0" {
         retention_days = 7;
     }
-    let max_raw = state.store.get_setting("log_max_count", "5000").unwrap_or_else(|_| "5000".into());
+    let max_raw = state
+        .store
+        .get_setting("log_max_count", "5000")
+        .unwrap_or_else(|_| "5000".into());
     let mut max_count = max_raw.parse::<i64>().unwrap_or(5000);
     if max_count <= 0 && max_raw != "0" {
         max_count = 5000;
@@ -584,13 +625,19 @@ pub async fn update_settings(
 ) -> Response {
     let mut changed = false;
     if let Some(days) = input.log_retention_days {
-        if let Err(err) = state.store.set_setting("log_retention_days", &days.to_string()) {
+        if let Err(err) = state
+            .store
+            .set_setting("log_retention_days", &days.to_string())
+        {
             return store_error_response(&err);
         }
         changed = true;
     }
     if let Some(max_count) = input.log_max_count {
-        if let Err(err) = state.store.set_setting("log_max_count", &max_count.to_string()) {
+        if let Err(err) = state
+            .store
+            .set_setting("log_max_count", &max_count.to_string())
+        {
             return store_error_response(&err);
         }
         changed = true;
@@ -640,10 +687,16 @@ pub async fn candidates(
     State(state): State<SharedState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let model = params.get("model").map(|m| m.trim().to_string()).unwrap_or_default();
+    let model = params
+        .get("model")
+        .map(|m| m.trim().to_string())
+        .unwrap_or_default();
     let strategy = route_strategy(&state.store, &params);
     match state.router.candidates(&model, &strategy) {
-        Ok(channels) => ok_data(json!(channels.iter().map(sanitize_channel).collect::<Vec<_>>())),
+        Ok(channels) => ok_data(json!(channels
+            .iter()
+            .map(sanitize_channel)
+            .collect::<Vec<_>>())),
         Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": err })),
     }
 }
@@ -665,7 +718,10 @@ pub async fn fetch_upstream_models(
 ) -> Response {
     let mut endpoint = req.endpoint.trim().to_string();
     if endpoint.is_empty() {
-        return json_response(StatusCode::BAD_REQUEST, json!({ "error": "Base URL 不能为空" }));
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "Base URL 不能为空" }),
+        );
     }
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
         endpoint = format!("https://{endpoint}");
@@ -877,7 +933,10 @@ pub async fn gateway_models(
         Err(err) => return store_error_response(&err),
     };
 
-    let raw = matches!(params.get("raw").map(String::as_str), Some("true") | Some("1"));
+    let raw = matches!(
+        params.get("raw").map(String::as_str),
+        Some("true") | Some("1")
+    );
     if raw {
         let mut seen = std::collections::HashSet::new();
         let mut data: Vec<Value> = Vec::new();
@@ -969,7 +1028,10 @@ pub async fn gateway_models(
         }));
     }
     data.sort_by(|a, b| {
-        a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
+        a["id"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["id"].as_str().unwrap_or(""))
     });
     json_response(StatusCode::OK, json!({ "object": "list", "data": data }))
 }
@@ -1020,9 +1082,10 @@ pub async fn stream_logs(State(state): State<SharedState>) -> Response {
     );
 
     let mut response = Response::new(Body::from_stream(stream));
-    response
-        .headers_mut()
-        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("text/event-stream"),
+    );
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-cache"));

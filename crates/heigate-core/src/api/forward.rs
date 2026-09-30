@@ -120,10 +120,7 @@ impl StreamTokenTracker {
 
             // 2. Anthropic message_start usage.
             if event_type == "message_start" {
-                if let Some(usage) = generic
-                    .get("message")
-                    .and_then(|m| m.get("usage"))
-                {
+                if let Some(usage) = generic.get("message").and_then(|m| m.get("usage")) {
                     let p = get_int_field(usage, &["input_tokens", "prompt_tokens"]);
                     if p > 0 {
                         self.prompt_tokens = p;
@@ -235,18 +232,14 @@ fn parse_stream_flag(raw: Option<&Value>) -> Result<bool, String> {
 }
 
 /// Whether a channel can serve the given protocol.
-pub fn gateway_candidate_matcher(
-    proto: GatewayProtocol,
-    ch: &crate::store::Channel,
-) -> bool {
+pub fn gateway_candidate_matcher(proto: GatewayProtocol, ch: &crate::store::Channel) -> bool {
     use crate::probe::{PROVIDER_ANTHROPIC, PROVIDER_OPENAI};
     match proto {
         GatewayProtocol::Anthropic => {
             ch.provider == PROVIDER_ANTHROPIC || ch.provider == PROVIDER_OPENAI
         }
         GatewayProtocol::Chat => {
-            ch.provider == PROVIDER_OPENAI
-                && ch.api_mode == crate::probe::API_MODE_CHAT_COMPLETIONS
+            ch.provider == PROVIDER_OPENAI && ch.api_mode == crate::probe::API_MODE_CHAT_COMPLETIONS
         }
         GatewayProtocol::Responses => {
             ch.provider == PROVIDER_OPENAI && ch.api_mode == crate::probe::API_MODE_RESPONSES
@@ -435,8 +428,14 @@ mod tests {
 
     #[test]
     fn stream_flag_must_be_boolean() {
-        assert_eq!(request_model(br#"{"model":"m","stream":null}"#), Ok(("m".to_string(), false)));
-        assert_eq!(request_model(br#"{"model":"m","stream":false}"#), Ok(("m".to_string(), false)));
+        assert_eq!(
+            request_model(br#"{"model":"m","stream":null}"#),
+            Ok(("m".to_string(), false))
+        );
+        assert_eq!(
+            request_model(br#"{"model":"m","stream":false}"#),
+            Ok(("m".to_string(), false))
+        );
         // A stringly-typed value is rejected, not guessed at.
         let err = request_model(br#"{"model":"m","stream":"true"}"#).unwrap_err();
         assert!(err.contains("invalid `stream`"));
@@ -479,7 +478,9 @@ mod tests {
     #[test]
     fn tracker_recognises_anthropic_and_responses_markers() {
         let mut tracker = StreamTokenTracker::new(0);
-        tracker.feed(b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n");
+        tracker.feed(
+            b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n",
+        );
         assert_eq!(tracker.prompt_tokens, 5);
         tracker.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n");
         assert_eq!(tracker.completion_tokens, 9);

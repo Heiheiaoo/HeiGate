@@ -55,7 +55,11 @@ pub fn failure_cooldown(info: &FailureInfo, failures: i64) -> Duration {
     let failures = if failures < 1 { 1 } else { failures };
     let hour = Duration::from_secs(3600);
     if info.retry_after > Duration::ZERO {
-        return if info.retry_after > hour { hour } else { info.retry_after };
+        return if info.retry_after > hour {
+            hour
+        } else {
+            info.retry_after
+        };
     }
     match info.class {
         Some(FailureClass::Auth) => Duration::from_secs(600),

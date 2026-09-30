@@ -19,8 +19,8 @@ pub use anthropic::{
 pub use convert::{chat_to_messages, messages_to_chat, ConvertError};
 pub use openai::{
     chat_text, ChatChoice, ChatChunk, ChatContentPart, ChatMessage, ChatRequest, ChatResponse,
-    ChatTool, ChatUsage, ChunkChoice, FunctionCall, FunctionSpec, ImageURL, StreamOptions, ToolCall,
-    FINISH_CONTENT_FILTER, FINISH_LENGTH, FINISH_STOP, FINISH_TOOL_CALLS,
+    ChatTool, ChatUsage, ChunkChoice, FunctionCall, FunctionSpec, ImageURL, StreamOptions,
+    ToolCall, FINISH_CONTENT_FILTER, FINISH_LENGTH, FINISH_STOP, FINISH_TOOL_CALLS,
 };
 pub use stream::{encode_sse, estimate_tokens, parse_sse_line, Event, StreamState};
 

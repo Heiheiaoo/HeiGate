@@ -175,9 +175,7 @@ pub fn blocks(raw: Option<&Value>) -> Vec<ContentBlock> {
                 }]
             }
         }
-        Some(Value::Array(_)) => {
-            serde_json::from_value(raw.cloned().unwrap()).unwrap_or_default()
-        }
+        Some(Value::Array(_)) => serde_json::from_value(raw.cloned().unwrap()).unwrap_or_default(),
         Some(_) => Vec::new(),
     }
 }

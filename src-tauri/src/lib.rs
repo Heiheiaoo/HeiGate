@@ -13,7 +13,10 @@ fn static_dir(app: &tauri::AppHandle) -> PathBuf {
     if let Some(dir) = std::env::var_os("HEIGATE_STATIC_DIR") {
         return PathBuf::from(dir);
     }
-    if let Ok(dir) = app.path().resolve("dist", tauri::path::BaseDirectory::Resource) {
+    if let Ok(dir) = app
+        .path()
+        .resolve("dist", tauri::path::BaseDirectory::Resource)
+    {
         if dir.join("index.html").exists() {
             return dir;
         }
@@ -30,8 +33,7 @@ fn static_dir(app: &tauri::AppHandle) -> PathBuf {
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("internal")
-        .join("web")
+        .join("frontend")
         .join("dist")
 }
 

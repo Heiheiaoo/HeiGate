@@ -373,7 +373,10 @@ mod tests {
 
     #[test]
     fn parse_sse_line_handles_data_and_done() {
-        assert_eq!(parse_sse_line("data: {\"a\":1}"), ("{\"a\":1}".to_string(), false, true));
+        assert_eq!(
+            parse_sse_line("data: {\"a\":1}"),
+            ("{\"a\":1}".to_string(), false, true)
+        );
         assert_eq!(parse_sse_line("data: [DONE]"), (String::new(), true, true));
         assert_eq!(parse_sse_line("event: ping"), (String::new(), false, false));
         assert_eq!(parse_sse_line("data:"), (String::new(), false, false));

@@ -4,7 +4,7 @@
   "version": "1.0.5",
   "identifier": "com.heigate.desktop",
   "build": {
-    "frontendDist": "../internal/web/dist"
+    "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [],
@@ -16,7 +16,7 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../internal/web/dist/": "dist/"
+      "../frontend/dist/": "dist/"
     },
     "icon": [
       "icons/32x32.png",
