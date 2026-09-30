@@ -55,6 +55,13 @@ pub fn build_state() -> std::io::Result<SharedState> {
     let store = Store::open(dir.join("heigate.sqlite"))
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     let gateway_key = load_or_create_gateway_key(&datadir::gateway_key_path())?;
+
+    // Restore the persisted custom model mappings: the UI reads them from the
+    // in-memory table, which otherwise starts empty after every restart.
+    if let Ok(raw) = store.get_setting("custom_model_mappings", "{}") {
+        crate::canonical::load_custom_model_mappings(&raw);
+    }
+
     let router = Arc::new(ChannelRouter::new(store.clone()));
     let runner = Arc::new(ProbeRunner::new(store.clone()));
     let gateway = Arc::new(Gateway::new(store.clone(), router.clone()));

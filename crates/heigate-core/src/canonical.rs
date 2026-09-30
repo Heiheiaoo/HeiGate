@@ -48,6 +48,18 @@ pub fn set_custom_model_mappings(mappings: HashMap<String, String>) {
     *CUSTOM_MAPPINGS.write().unwrap() = normalized;
 }
 
+/// Installs the persisted `custom_model_mappings` setting (a JSON object of raw
+/// name -> target). An absent, empty or malformed value leaves the table empty,
+/// matching the Go loader, which simply skips a failed decode.
+pub fn load_custom_model_mappings(raw: &str) {
+    if raw.trim().is_empty() {
+        return;
+    }
+    if let Ok(mappings) = serde_json::from_str::<HashMap<String, String>>(raw) {
+        set_custom_model_mappings(mappings);
+    }
+}
+
 /// Returns a copy of the current custom model mappings.
 pub fn get_custom_model_mappings() -> HashMap<String, String> {
     CUSTOM_MAPPINGS.read().unwrap().clone()
@@ -440,6 +452,21 @@ mod tests {
         let best = select_canonical_display_name(&["deepseek-v4-flash-0731-free-3".to_string()]);
         assert_eq!(best, "deepseek-v4-flash");
 
+        // Restoring the persisted setting installs the same mappings. Kept in
+        // this test because the mapping table is process-global and tests run
+        // in parallel: only one test may own it.
         set_custom_model_mappings(HashMap::new());
+        load_custom_model_mappings(r#"{"deepseek-flash":"DeepSeek-V4-Flash"}"#);
+        assert_eq!(
+            get_custom_model_mappings().get("deepseek-flash"),
+            Some(&"DeepSeek-V4-Flash".to_string())
+        );
+
+        // A malformed or empty setting must leave the table empty rather than
+        // panic, matching the Go loader.
+        set_custom_model_mappings(HashMap::new());
+        load_custom_model_mappings("not json");
+        load_custom_model_mappings("");
+        assert!(get_custom_model_mappings().is_empty());
     }
 }
