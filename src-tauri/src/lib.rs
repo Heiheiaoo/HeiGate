@@ -181,12 +181,26 @@ pub fn run() {
                         api.prevent_close();
                         let _ = hide_target.hide();
                     }
-                    // Moving to another display changes what "too small" means.
+                    // Moving to another display changes what fits: a portrait
+                    // monitor is narrower than the window's ideal width, so the
+                    // minimum follows the display and an oversized window is
+                    // shrunk to fit rather than left hanging off the edge.
                     WindowEvent::Moved(_) => {
                         let limits =
                             size_limits(move_target.current_monitor().ok().flatten().as_ref());
                         let _ = move_target
                             .set_min_size(Some(tauri::LogicalSize::new(limits.0, limits.1)));
+
+                        let scale = move_target.scale_factor().unwrap_or(1.0);
+                        if let Ok(size) = move_target.inner_size() {
+                            let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
+                            if w > limits.0 || h > limits.1 {
+                                let _ = move_target.set_size(tauri::LogicalSize::new(
+                                    w.min(limits.0),
+                                    h.min(limits.1),
+                                ));
+                            }
+                        }
                     }
                     _ => {}
                 }
