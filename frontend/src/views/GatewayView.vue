@@ -5003,16 +5003,17 @@ function handleContextMenu(event: MouseEvent) {
     <div v-if="activeModelLatencyChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-5" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
       <div class="m26-modal-sheet m26-models-sheet">
         <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
-          <div>
-            <div class="flex items-center gap-2">
-              <h3 id="m26-modal-title-5" class="m26-modal-title">模型管理</h3>
-              <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
-                {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
-              </span>
-            </div>
-            <p class="m26-modal-subtitle" :title="activeModelLatencyChannel.url">
-            {{ activeModelLatencyChannel.name }} · {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
-            </p>
+          <div class="m26-modal-heading">
+            <h3 id="m26-modal-title-5" class="m26-modal-title">模型管理</h3>
+            <span class="m26-proto-pill" :class="activeModelLatencyChannel.protocol">
+              {{ protocolShortLabel(activeModelLatencyChannel.protocol) }}
+            </span>
+            <span class="m26-modal-channel" :title="activeModelLatencyChannel.url">
+              {{ activeModelLatencyChannel.name }}
+            </span>
+            <span class="m26-modal-count">
+              · {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
+            </span>
           </div>
           <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
         </div>
@@ -5045,8 +5046,10 @@ function handleContextMenu(event: MouseEvent) {
           </div>
 
           <div class="m26-model-batch-actions">
-            <span class="m26-model-batch-count">
-              {{ selectedModelNames.length ? `已选 ${selectedModelNames.length}/${activeModelLatencyChannel.modelNames?.length || 0}` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0}` }}
+            <!-- Only reports a selection; the total is in the header, and the
+                 buttons act on everything when nothing is selected. -->
+            <span v-if="selectedModelNames.length" class="m26-model-batch-count">
+              已选 {{ selectedModelNames.length }}/{{ activeModelLatencyChannel.modelNames?.length || 0 }}
             </span>
             <button
               class="m26-model-batch-btn probe"
@@ -9925,6 +9928,27 @@ input:checked + .m26-slider:before {
    carries less vertical padding than the default modal chrome. */
 .m26-models-sheet .m26-modal-header {
   padding: 10px 20px;
+}
+/* Title, protocol, channel and model count share one line; the channel name is
+   the key identifier, so it carries the weight. */
+.m26-modal-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.m26-modal-channel {
+  font-weight: 700;
+  color: var(--m26-text);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m26-modal-count {
+  font-size: 12px;
+  color: var(--m26-text-muted);
+  white-space: nowrap;
 }
 .m26-modal-subtitle {
   font-size: 12px;
