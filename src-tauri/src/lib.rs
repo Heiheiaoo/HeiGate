@@ -65,6 +65,25 @@ fn static_dir(app: &tauri::AppHandle) -> PathBuf {
         .join("dist")
 }
 
+/// Applies the platform window chrome the UI's layout expects. On macOS the
+/// content must extend under a transparent title bar, because the UI draws its
+/// own header where the traffic lights sit; the title bar style is macOS-only,
+/// so other platforms keep the native chrome.
+fn with_platform_chrome<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    #[cfg(target_os = "macos")]
+    {
+        builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder
+    }
+}
+
 /// Brings the main window back to the foreground.
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -96,23 +115,13 @@ pub fn run() {
                 .parse::<tauri::Url>()
                 .expect("valid local server url");
 
-            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("HeiGate")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(900.0, 600.0)
                 .initialization_script(DESKTOP_BRIDGE);
 
-            // The UI draws its own header where the traffic lights sit, so on
-            // macOS the content must extend under a transparent title bar. The
-            // title bar style is macOS-only; elsewhere the native chrome stays.
-            #[cfg(target_os = "macos")]
-            {
-                builder = builder
-                    .title_bar_style(tauri::TitleBarStyle::Overlay)
-                    .hidden_title(true);
-            }
-
-            let window = builder.build()?;
+            let window = with_platform_chrome(builder).build()?;
 
             // Closing the window hides it: the gateway keeps serving and the
             // tray icon is how the user brings it back. Quitting is explicit.
