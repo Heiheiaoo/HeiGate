@@ -3851,6 +3851,8 @@ function handleContextMenu(event: MouseEvent) {
           <!-- Toolbar: Search, Filter Pills, View Mode Switcher, Batch Probe, Add Channel -->
           <ChannelToolbar
             ref="channelToolbarRef"
+            @mousedown="onToolbarMouseDown"
+            @dblclick="onToolbarDoubleClick"
             :search="channelSearch"
             :filter-status="channelStatusFilter"
             :view-mode="channelViewMode"
