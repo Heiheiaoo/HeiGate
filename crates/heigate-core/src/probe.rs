@@ -418,6 +418,11 @@ async fn send(cfg: &Config, model: &str, prompt: &str) -> Result<SendResult, Str
         }
     }
 
+    // Measured from before the request goes out, as the Go probe does: the
+    // client-perceived wait is connect + upstream thinking time + first byte,
+    // not just the span between the response headers and the first delta (which
+    // is sub-millisecond, and rounds to a zero that reads as "not measured").
+    let started = Instant::now();
     let response = request.send().await.map_err(|err| err.to_string())?;
     let status = response.status().as_u16() as i32;
 
@@ -431,7 +436,6 @@ async fn send(cfg: &Config, model: &str, prompt: &str) -> Result<SendResult, Str
         });
     }
 
-    let started = Instant::now();
     read_stream(cfg, response, started).await
 }
 
