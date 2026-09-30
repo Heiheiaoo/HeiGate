@@ -3856,7 +3856,6 @@ function handleContextMenu(event: MouseEvent) {
             :search="channelSearch"
             :filter-status="channelStatusFilter"
             :view-mode="channelViewMode"
-            :is-probing-all="isProbingAllChannels"
             :total-count="channels.length"
             :healthy-count="healthyChannelsCount"
             :degraded-count="degradedChannelsCount"
@@ -3865,7 +3864,6 @@ function handleContextMenu(event: MouseEvent) {
             @update:search="channelSearch = $event"
             @update:filter-status="channelStatusFilter = $event"
             @update:view-mode="setChannelViewMode($event)"
-            @probe-all="probeAllChannels"
             @add-channel="openAddChannel"
           />
 
