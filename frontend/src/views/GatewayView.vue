@@ -2881,29 +2881,6 @@ async function copyApiKey() {
   }
 }
 
-function onToolbarMouseDown(event: MouseEvent) {
-  if (event.button !== 0) return
-  const target = event.target as HTMLElement | null
-  if (target?.closest('button, input, a, select, textarea, [data-no-drag]')) {
-    return
-  }
-  const webkit = (window as unknown as { webkit?: { messageHandlers?: { dragWindow?: { postMessage: (msg: string) => void } } } }).webkit
-  if (webkit?.messageHandlers?.dragWindow) {
-    webkit.messageHandlers.dragWindow.postMessage('drag')
-  }
-}
-
-function onToolbarDoubleClick(event: MouseEvent) {
-  const target = event.target as HTMLElement | null
-  if (target?.closest('button, input, a, select, textarea, [data-no-drag]')) {
-    return
-  }
-  const webkit = (window as unknown as { webkit?: { messageHandlers?: { zoomWindow?: { postMessage: (msg: string) => void } } } }).webkit
-  if (webkit?.messageHandlers?.zoomWindow) {
-    webkit.messageHandlers.zoomWindow.postMessage('zoom')
-  }
-}
-
 let backdropMouseDownPos = { x: 0, y: 0 }
 
 function onBackdropMouseDown(event: MouseEvent) {
@@ -2952,7 +2929,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- TOP FLOATING PILL CAPSULE NAVIGATION BAR (macOS 26 White) -->
-    <header ref="topNavbarRef" class="m26-top-navbar" @mousedown="onToolbarMouseDown" @dblclick="onToolbarDoubleClick">
+    <header ref="topNavbarRef" class="m26-top-navbar" data-tauri-drag-region="deep">
       <!-- Left: macOS window buttons spacer -->
       <div class="m26-nav-left" data-no-drag>
         <div class="m26-traffic-lights" v-if="!isDesktop" aria-hidden="true">
@@ -3588,8 +3565,7 @@ function handleContextMenu(event: MouseEvent) {
           <!-- Toolbar: Search, Filter Pills, View Mode Switcher, Batch Probe, Add Channel -->
           <ChannelToolbar
             ref="channelToolbarRef"
-            @mousedown="onToolbarMouseDown"
-            @dblclick="onToolbarDoubleClick"
+            data-tauri-drag-region="deep"
             :search="channelSearch"
             :filter-status="channelStatusFilter"
             :view-mode="channelViewMode"
@@ -4410,7 +4386,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: INJECTION CHECK (Redesigned) -->
     <div v-if="showInjectionModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-1" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
       <div class="m26-modal-sheet m26-inject-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="flex items-center gap-2.5">
             <h3 id="m26-modal-title-1" class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
             <span class="m26-inject-pill" :class="injectionChannel?.injectionState ?? 'unknown'">
@@ -4556,7 +4532,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: ADD CHANNEL -->
     <div v-if="showAddChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-2" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
       <div class="m26-modal-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <h3 id="m26-modal-title-2" class="m26-modal-title">添加供应商渠道</h3>
           <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showAddChannel = false">✕</button>
         </div>
@@ -4631,7 +4607,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: EDIT CHANNEL -->
     <div v-if="showEditChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-3" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showEditChannel = false)">
       <div class="m26-modal-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <h3 id="m26-modal-title-3" class="m26-modal-title">编辑渠道配置</h3>
           <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showEditChannel = false">✕</button>
         </div>
@@ -4706,7 +4682,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: CONFIRM ACTION -->
     <div v-if="confirmModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-4" class="m26-modal-backdrop m26-confirm-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => confirmModal = null)">
       <div class="m26-modal-sheet m26-confirm-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <h3 id="m26-modal-title-4" class="m26-modal-title">{{ confirmModal.title }}</h3>
           <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="confirmModal = null">✕</button>
         </div>
@@ -4739,7 +4715,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: MODEL LATENCY & SPEED TEST -->
     <div v-if="activeModelLatencyChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-5" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
       <div class="m26-modal-sheet m26-models-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="m26-modal-heading">
             <!-- The channel name is the title: it is what identifies this modal,
                  and a generic "模型管理" heading only repeats the button that
@@ -4964,7 +4940,7 @@ function handleContextMenu(event: MouseEvent) {
     >
       <div class="m26-modal-sheet m26-speedtest-modal-sheet" @click.stop>
         <!-- Header -->
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="flex items-center gap-3">
             <div
               class="m26-model-brand-badge shrink-0"
@@ -5135,7 +5111,7 @@ function handleContextMenu(event: MouseEvent) {
       @click="handleBackdropClick($event, closeAliasModal)"
     >
       <div class="m26-modal-sheet m26-aliases-modal-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="flex items-center gap-3">
             <span
               class="m26-model-family-badge"
@@ -5421,7 +5397,7 @@ function handleContextMenu(event: MouseEvent) {
       @click="handleBackdropClick($event, () => showClassifyModal = false)"
     >
       <div class="m26-modal-sheet" style="max-width: 460px;">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="flex items-center gap-2">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
@@ -5487,7 +5463,7 @@ function handleContextMenu(event: MouseEvent) {
       @click="handleBackdropClick($event, () => showCustomMappingsModal = false)"
     >
       <div class="m26-modal-sheet" style="max-width: 580px;">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="flex items-center gap-2">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
@@ -5592,7 +5568,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: CHANNEL PROBE & ERROR DIAGNOSIS -->
     <div v-if="activeDiagnosticChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-8" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeDiagnosticChannel = null)">
       <div class="m26-modal-sheet m26-diagnostic-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="flex items-center gap-2">
             <div class="m26-diag-icon-badge danger">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
@@ -5686,7 +5662,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: LOG DETAIL -->
     <div v-if="activeLogDetail" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-9" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeLogDetail = null)">
       <div class="m26-modal-sheet m26-log-detail-sheet">
-        <div class="m26-modal-header" @mousedown="onToolbarMouseDown">
+        <div class="m26-modal-header" data-tauri-drag-region="deep">
           <div class="flex items-center gap-2">
             <div
               class="m26-diag-icon-badge"
