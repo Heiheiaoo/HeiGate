@@ -134,7 +134,9 @@ pub fn run() {
             let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("HeiGate")
                 .inner_size(1200.0, 800.0)
-                .min_inner_size(900.0, 600.0)
+                // The layout is designed for this width; below it the nav pill
+                // and the bento grid start collapsing.
+                .min_inner_size(1200.0, 800.0)
                 .initialization_script(DESKTOP_BRIDGE);
 
             let window = with_platform_chrome(builder).build()?;
