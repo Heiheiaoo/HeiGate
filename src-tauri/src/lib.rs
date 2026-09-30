@@ -10,6 +10,31 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
+/// Bridges the message handlers the UI probes for desktop mode onto Tauri's
+/// window commands. The frontend renders its own window chrome unless
+/// `window.webkit.messageHandlers.dragWindow` exists, and drives window
+/// dragging / zooming through it — the previous Swift shell registered both on
+/// its WKWebView. Without this shim the UI would draw a second set of traffic
+/// lights under the native ones.
+const DESKTOP_BRIDGE: &str = r#"
+(function () {
+  function call(command) {
+    try {
+      var internals = window.__TAURI_INTERNALS__;
+      if (internals && internals.invoke) internals.invoke(command, {});
+    } catch (e) { /* the native title bar stays draggable regardless */ }
+  }
+  var webkit = window.webkit || (window.webkit = {});
+  var handlers = webkit.messageHandlers || (webkit.messageHandlers = {});
+  if (!handlers.dragWindow) {
+    handlers.dragWindow = { postMessage: function () { call('plugin:window|start_dragging'); } };
+  }
+  if (!handlers.zoomWindow) {
+    handlers.zoomWindow = { postMessage: function () { call('plugin:window|toggle_maximize'); } };
+  }
+})();
+"#;
+
 /// Resolves the directory holding the built frontend: an explicit override, the
 /// bundled resource, or the repository checkout during development.
 fn static_dir(app: &tauri::AppHandle) -> PathBuf {
@@ -75,6 +100,11 @@ pub fn run() {
                 .title("HeiGate")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(900.0, 600.0)
+                .initialization_script(DESKTOP_BRIDGE)
+                // The UI draws its own header where the traffic lights sit, so
+                // the content must extend under a transparent title bar.
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true)
                 .build()?;
 
             // Closing the window hides it: the gateway keeps serving and the
