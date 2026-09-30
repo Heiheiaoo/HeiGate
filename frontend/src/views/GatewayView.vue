@@ -5206,12 +5206,6 @@ function handleContextMenu(event: MouseEvent) {
             </div>
           </div>
         </div>
-
-        <div class="m26-modal-footer">
-          <span class="m26-modal-hint text-xs text-slate-400">
-            探活会发送真实请求；批量操作前会显示数量与额度提示。
-          </span>
-        </div>
       </div>
     </div>
 
@@ -9927,13 +9921,10 @@ input:checked + .m26-slider:before {
   max-width: 860px;
   max-height: 85vh;
 }
-.m26-models-sheet .m26-modal-footer {
-  justify-content: flex-start;
-  padding: 12px 20px;
-}
-.m26-models-sheet .m26-modal-hint {
-  line-height: 1.5;
-  color: var(--m26-text-muted);
+/* This modal is a list; the header only needs to identify the channel, so it
+   carries less vertical padding than the default modal chrome. */
+.m26-models-sheet .m26-modal-header {
+  padding: 10px 20px;
 }
 .m26-modal-subtitle {
   font-size: 12px;
