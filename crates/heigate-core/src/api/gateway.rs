@@ -14,9 +14,8 @@ use futures_util::stream::{self, Stream, StreamExt};
 use serde_json::json;
 
 use crate::api::forward::{
-    anthropic_error_type, estimate_prompt_tokens, extract_non_streaming_tokens,
-    gateway_candidate_matcher, is_client_closed_conn, is_hop_by_hop_header, parse_retry_after,
-    request_model, GatewayProtocol, StreamTokenTracker,
+    anthropic_error_type, estimate_prompt_tokens, gateway_candidate_matcher, is_client_closed_conn,
+    is_hop_by_hop_header, parse_retry_after, request_model, GatewayProtocol, StreamTokenTracker,
 };
 use crate::api::policy::{
     adapt_unsupported_reasoning_effort, best_auto_choice, best_auto_model, channel_serving_traffic,
@@ -24,7 +23,7 @@ use crate::api::policy::{
     upstream_stream_error, upstream_stream_has_output, TraceStep, AUTO_MODEL_NAME,
 };
 use crate::canonical::find_channel_model_for_request;
-use crate::probe::{normalize_endpoint, PROVIDER_ANTHROPIC, PROVIDER_OPENAI};
+use crate::probe::{normalize_endpoint, PROVIDER_OPENAI};
 use crate::protocol::{
     chat_to_messages, encode_sse, messages_to_chat, parse_sse_line, ChatChunk, MessagesRequest,
     StreamState,
@@ -1206,13 +1205,3 @@ impl Stream for LoggingStream {
         }
     }
 }
-
-/// Reserved: extracts usage from a buffered non-streaming body.
-#[allow(dead_code)]
-fn non_streaming_tokens(body: &[u8]) -> (i64, i64, i64) {
-    extract_non_streaming_tokens(body)
-}
-
-/// Reserved: provider prefix retained for the provider abstraction.
-#[allow(dead_code)]
-const _PROVIDERS: [&str; 2] = [PROVIDER_ANTHROPIC, PROVIDER_OPENAI];

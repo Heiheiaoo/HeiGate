@@ -49,7 +49,9 @@ export type { Channel }
 
 export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
 
-const isDesktop = ref(typeof window !== 'undefined' && Boolean((window as any).webkit?.messageHandlers?.dragWindow))
+// Tauri injects its IPC bridge into every page it loads; in a plain browser
+// (the Vite dev server) it is absent and the UI draws its own window chrome.
+const isDesktop = ref(typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__))
 const savedSection = typeof localStorage !== 'undefined' ? (localStorage.getItem('heigate_active_section') as any) : null
 const activeSection = ref<'analytics' | 'channels' | 'models' | 'logs' | 'settings'>(
   savedSection && ['analytics', 'channels', 'models', 'logs', 'settings'].includes(savedSection) ? savedSection : 'analytics'
@@ -2887,11 +2889,6 @@ function onBackdropMouseDown(event: MouseEvent) {
   if (event.button !== 0) return
   if (event.target !== event.currentTarget) return
   backdropMouseDownPos = { x: event.screenX, y: event.screenY }
-
-  const webkit = (window as unknown as { webkit?: { messageHandlers?: { dragWindow?: { postMessage: (msg: string) => void } } } }).webkit
-  if (webkit?.messageHandlers?.dragWindow) {
-    webkit.messageHandlers.dragWindow.postMessage('drag')
-  }
 }
 
 function handleBackdropClick(event: MouseEvent, closeCallback: () => void) {
@@ -2931,7 +2928,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- TOP FLOATING PILL CAPSULE NAVIGATION BAR (macOS 26 White) -->
     <header ref="topNavbarRef" class="m26-top-navbar" data-tauri-drag-region="deep">
       <!-- Left: macOS window buttons spacer -->
-      <div class="m26-nav-left" data-no-drag>
+      <div class="m26-nav-left">
         <div class="m26-traffic-lights" v-if="!isDesktop" aria-hidden="true">
           <span class="light red"></span>
           <span class="light yellow"></span>
@@ -2941,7 +2938,7 @@ function handleContextMenu(event: MouseEvent) {
       </div>
 
       <!-- Center: FLOATING PILL CAPSULE NAV (Flex centered & Auto collapse text when constrained) -->
-      <div class="m26-nav-center" ref="navCenterRef" data-no-drag>
+      <div class="m26-nav-center" ref="navCenterRef">
         <nav class="m26-floating-nav" :class="{ 'compact-tabs': isCompactTabs }">
           <!-- 1. 看板 -->
           <button
@@ -4393,7 +4390,7 @@ function handleContextMenu(event: MouseEvent) {
               {{ injectionStateLabel(injectionChannel!) }}
             </span>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showInjectionModal = false">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="showInjectionModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body m26-inject-body">
@@ -4534,7 +4531,7 @@ function handleContextMenu(event: MouseEvent) {
       <div class="m26-modal-sheet">
         <div class="m26-modal-header" data-tauri-drag-region="deep">
           <h3 id="m26-modal-title-2" class="m26-modal-title">添加供应商渠道</h3>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showAddChannel = false">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="showAddChannel = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -4609,7 +4606,7 @@ function handleContextMenu(event: MouseEvent) {
       <div class="m26-modal-sheet">
         <div class="m26-modal-header" data-tauri-drag-region="deep">
           <h3 id="m26-modal-title-3" class="m26-modal-title">编辑渠道配置</h3>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showEditChannel = false">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="showEditChannel = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -4684,7 +4681,7 @@ function handleContextMenu(event: MouseEvent) {
       <div class="m26-modal-sheet m26-confirm-sheet">
         <div class="m26-modal-header" data-tauri-drag-region="deep">
           <h3 id="m26-modal-title-4" class="m26-modal-title">{{ confirmModal.title }}</h3>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="confirmModal = null">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="confirmModal = null">✕</button>
         </div>
         <div class="m26-modal-body">
           <div class="m26-confirm-content">
@@ -4734,7 +4731,7 @@ function handleContextMenu(event: MouseEvent) {
               · {{ activeModelLatencyChannel.modelNames?.length || 1 }} 个模型
             </span>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
         </div>
 
         <div class="m26-modal-toolbar">
@@ -4979,7 +4976,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="closeModelSpeedTestModal">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="closeModelSpeedTestModal">✕</button>
         </div>
 
         <!-- Toolbar -->
@@ -5147,7 +5144,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="closeAliasModal">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="closeAliasModal">✕</button>
         </div>
 
         <div class="m26-modal-toolbar">
@@ -5404,7 +5401,7 @@ function handleContextMenu(event: MouseEvent) {
             </svg>
             <h3 id="m26-modal-title-6" class="m26-modal-title">手动模型归并</h3>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showClassifyModal = false">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="showClassifyModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5470,7 +5467,7 @@ function handleContextMenu(event: MouseEvent) {
             </svg>
             <h3 id="m26-modal-title-7" class="m26-modal-title">自定义模型归类设置</h3>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="showCustomMappingsModal = false">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="showCustomMappingsModal = false">✕</button>
         </div>
 
         <div class="m26-modal-body">
@@ -5582,7 +5579,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeDiagnosticChannel = null">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="activeDiagnosticChannel = null">✕</button>
         </div>
 
         <div class="m26-modal-body m26-diagnostic-body">
@@ -5690,7 +5687,7 @@ function handleContextMenu(event: MouseEvent) {
               </p>
             </div>
           </div>
-          <button class="m26-close-btn" data-no-drag aria-label="关闭" @click="activeLogDetail = null">✕</button>
+          <button class="m26-close-btn" aria-label="关闭" @click="activeLogDetail = null">✕</button>
         </div>
 
         <div class="m26-modal-body m26-diagnostic-body">
@@ -6293,11 +6290,6 @@ function handleContextMenu(event: MouseEvent) {
   color: var(--m26-text);
 }
 
-.m26-toolbar-search .m26-kbd {
-  position: absolute;
-  right: 7px;
-  pointer-events: none;
-}
 
 .m26-header-actions {
   display: flex;
@@ -6343,14 +6335,6 @@ function handleContextMenu(event: MouseEvent) {
   margin: 0 auto;
 }
 
-.m26-kbd {
-  font-size: 10px;
-  color: var(--m26-text-muted);
-  background: rgba(0, 0, 0, 0.06);
-  border-radius: 4px;
-  padding: 2px 4px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-}
 
 /* Buttons */
 .m26-action-btn {
@@ -10774,98 +10758,8 @@ input:checked + .m26-slider:before {
 }
 
 /* ==========================================================================
-   Keyboard Shortcuts Cheat Sheet & Card Selection Styles
+   Card Selection Styles
    ========================================================================== */
-.m26-shortcuts-sheet {
-  max-width: 580px;
-  width: 90%;
-}
-.m26-shortcuts-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: rgba(79, 70, 229, 0.1);
-  color: #4f46e5;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.m26-shortcuts-body {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 16px 20px;
-  max-height: 70vh;
-  overflow-y: auto;
-}
-.m26-shortcut-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.m26-shortcut-group-title {
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #64748b;
-  margin-bottom: 2px;
-}
-.m26-shortcut-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  background: #f8fafc;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  border-radius: 12px;
-  padding: 8px 12px;
-}
-.m26-shortcut-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 5px 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
-}
-.m26-shortcut-row:last-child {
-  border-bottom: none;
-}
-.m26-shortcut-desc {
-  font-size: 12.5px;
-  color: #334155;
-  font-weight: 500;
-}
-.m26-kbd-keys {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.m26-kbd-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
-  font-size: 11px;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-monospace, SFMono-Regular, monospace;
-  font-weight: 600;
-  color: #1e293b;
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-bottom-width: 2px;
-  border-radius: 5px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-}
-.m26-kbd-or {
-  font-size: 11px;
-  color: #94a3b8;
-  margin: 0 2px;
-}
-
 /* Card Selection state */
 .m26-hg-card.is-selected {
   border-color: #4f46e5;

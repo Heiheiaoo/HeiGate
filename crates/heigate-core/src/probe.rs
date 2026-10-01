@@ -340,13 +340,9 @@ pub async fn check_model_once(cfg: &Config, model: &str) -> ProbeResult {
 /// What a probe request learned. `body` is only meaningful for non-2xx.
 #[derive(Debug, Default)]
 struct SendResult {
-    #[allow(dead_code)]
-    reply: String,
     ttft: Option<Duration>,
     saw_content: bool,
     saw_reasoning: bool,
-    #[allow(dead_code)]
-    saw_any_delta: bool,
     status: i32,
     body: String,
 }
@@ -446,12 +442,10 @@ async fn read_stream(
     response: reqwest::Response,
     started: Instant,
 ) -> Result<SendResult, String> {
-    let mut out = SendResult {
+    let out = SendResult {
         status: 200,
         ..Default::default()
     };
-    let mut text = String::new();
-    let mut reasoning = String::new();
     let mut text_at: Option<Instant> = None;
     let mut reason_at: Option<Instant> = None;
 
@@ -478,9 +472,8 @@ async fn read_stream(
                 continue;
             }
             if done {
-                return finish_stream(out, text, reasoning, text_at, reason_at, started);
+                return finish_stream(out, text_at, reason_at, started);
             }
-            out.saw_any_delta = true;
 
             // An error object inside a 200 SSE stream is still an error.
             if let Some(message) = stream_error(&payload) {
@@ -490,35 +483,23 @@ async fn read_stream(
                 ));
             }
 
-            apply_delta(
-                cfg,
-                &payload,
-                &mut text,
-                &mut reasoning,
-                &mut text_at,
-                &mut reason_at,
-            );
+            apply_delta(cfg, &payload, &mut text_at, &mut reason_at);
         }
     }
 
-    finish_stream(out, text, reasoning, text_at, reason_at, started)
+    finish_stream(out, text_at, reason_at, started)
 }
 
+/// Records what the stream proved — that content arrived, and when — without
+/// keeping the answer: a probe only needs to show the path works.
 fn finish_stream(
     mut out: SendResult,
-    text: String,
-    reasoning: String,
     text_at: Option<Instant>,
     reason_at: Option<Instant>,
     started: Instant,
 ) -> Result<SendResult, String> {
     out.saw_content = text_at.is_some();
     out.saw_reasoning = reason_at.is_some();
-    out.reply = if !text.trim().is_empty() {
-        text.trim().to_string()
-    } else {
-        reasoning.trim().to_string()
-    };
     if let Some(at) = text_at {
         out.ttft = Some(at.duration_since(started));
     } else if let Some(at) = reason_at {
@@ -549,8 +530,6 @@ fn stream_error(payload: &str) -> Option<String> {
 fn apply_delta(
     cfg: &Config,
     payload: &str,
-    text: &mut String,
-    reasoning: &mut String,
     text_at: &mut Option<Instant>,
     reason_at: &mut Option<Instant>,
 ) {
@@ -569,7 +548,6 @@ fn apply_delta(
                 if let Some(part) = delta.and_then(|d| d.get("text")).and_then(Value::as_str) {
                     if !part.is_empty() {
                         text_at.get_or_insert_with(Instant::now);
-                        text.push_str(part);
                     }
                 }
             }
@@ -580,7 +558,6 @@ fn apply_delta(
                 {
                     if !part.is_empty() {
                         reason_at.get_or_insert_with(Instant::now);
-                        reasoning.push_str(part);
                     }
                 }
             }
@@ -596,12 +573,10 @@ fn apply_delta(
             Some("response.output_text.delta") => {
                 if !delta.is_empty() {
                     text_at.get_or_insert_with(Instant::now);
-                    text.push_str(delta);
                 }
             }
             Some("response.reasoning_text.delta") if !delta.is_empty() => {
                 reason_at.get_or_insert_with(Instant::now);
-                reasoning.push_str(delta);
             }
             _ => {}
         }
@@ -619,7 +594,6 @@ fn apply_delta(
         let part = content_to_text(delta.get("content"));
         if !part.is_empty() {
             text_at.get_or_insert_with(Instant::now);
-            text.push_str(&part);
         }
         let thinking = ["reasoning_content", "reasoning", "thinking", "thought"]
             .iter()
@@ -627,7 +601,6 @@ fn apply_delta(
             .unwrap_or("");
         if !thinking.is_empty() {
             reason_at.get_or_insert_with(Instant::now);
-            reasoning.push_str(thinking);
         }
     }
 }
