@@ -302,20 +302,34 @@ impl Gateway {
                         step.error = message.clone();
                         step.raw_error = message.clone();
                         trace_steps.push(step);
+                        // The client hung up (its request future was cancelled,
+                        // or the connection reset): there is no one left to
+                        // answer. Don't retry this channel or fail over to the
+                        // rest — that would spend real upstream calls on a dead
+                        // request. Client-closed is the request's fault, so the
+                        // channel is never penalized either.
+                        if is_client_closed_conn(&message) {
+                            last_error = Some(GatewayError::Transport {
+                                client_closed: true,
+                                message,
+                            });
+                            break 'candidates;
+                        }
                         if attempt == 0 {
                             continue;
                         }
                         let wrapped = GatewayError::Transport {
-                            client_closed: is_client_closed_conn(&message),
-                            message,
+                            client_closed: false,
+                            message: message.clone(),
                         };
                         failed_attempts.push(format!(
                             "{} 异常({})",
                             candidates[index].name,
                             crate::resilience::failure_label(&wrapped.failure_info())
                         ));
+                        self.penalize(&mut candidates[index], &wrapped, &message, attempt_latency);
                         last_error = Some(wrapped);
-                        break 'candidates;
+                        continue 'candidates;
                     }
                     Err(err @ GatewayError::UpstreamStatus { status, .. }) => {
                         let message = err.to_string();
@@ -334,17 +348,63 @@ impl Gateway {
                         }
                         failed_attempts
                             .push(format!("{} ({status}: {err})", candidates[index].name));
+                        self.penalize(&mut candidates[index], &err, &message, attempt_latency);
                         last_error = Some(err);
-                        break 'candidates;
+                        continue 'candidates;
                     }
                     Err(err) => {
-                        step.error = err.to_string();
+                        let message = err.to_string();
+                        step.error = message.clone();
                         trace_steps.push(step);
                         failed_attempts.push(format!("{} ({err})", candidates[index].name));
+                        self.penalize(&mut candidates[index], &err, &message, attempt_latency);
                         last_error = Some(err);
-                        break 'candidates;
+                        continue 'candidates;
                     }
                     Ok(mut upstream) => {
+                        // A non-2xx response is an upstream failure, not a reply:
+                        // read the body for a message and fail over, exactly as a
+                        // thrown error would. Without this the client would be
+                        // handed the upstream's 500/429 as if it were the answer.
+                        if !(200..300).contains(&(upstream.status as i32)) {
+                            let retry_after = retry_after_from(&upstream.headers);
+                            let (prefix, ..) = read_initial_prefix(upstream.stream, false).await;
+                            let body_text = String::from_utf8_lossy(&prefix);
+                            let mut message = parse_upstream_error_message(&body_text);
+                            if message.is_empty() {
+                                message = format!("HTTP {}", upstream.status);
+                            }
+                            let up_err = GatewayError::UpstreamStatus {
+                                status: upstream.status as i32,
+                                retry_after,
+                                message: message.clone(),
+                            };
+                            step.status_code = upstream.status as i64;
+                            step.error = message.clone();
+                            step.raw_error = body_text.chars().take(500).collect();
+                            trace_steps.push(step);
+                            if attempt == 0 && failure_is_retryable(&up_err.failure_info()) {
+                                if let Some(adapted) =
+                                    adapt_unsupported_reasoning_effort(&body, &message)
+                                {
+                                    retry_body = adapted;
+                                }
+                                continue;
+                            }
+                            failed_attempts.push(format!(
+                                "{} ({}: {message})",
+                                candidates[index].name, upstream.status
+                            ));
+                            self.penalize(
+                                &mut candidates[index],
+                                &up_err,
+                                &message,
+                                attempt_latency,
+                            );
+                            last_error = Some(up_err);
+                            continue 'candidates;
+                        }
+
                         // Do not commit a 2xx response until the upstream has
                         // produced its first bytes.
                         let is_upstream_sse =
@@ -360,13 +420,21 @@ impl Gateway {
                             step.error = format!("传输首字节中断: {message}");
                             step.raw_error = message.clone();
                             trace_steps.push(step);
-                            let stream_err = GatewayError::StreamStart { message };
+                            let stream_err = GatewayError::StreamStart {
+                                message: message.clone(),
+                            };
                             if attempt == 0 && failure_is_retryable(&stream_err.failure_info()) {
                                 continue;
                             }
                             failed_attempts.push(format!("{} (传输中断)", candidates[index].name));
+                            self.penalize(
+                                &mut candidates[index],
+                                &stream_err,
+                                &message,
+                                attempt_latency,
+                            );
                             last_error = Some(stream_err);
-                            break 'candidates;
+                            continue 'candidates;
                         }
 
                         if is_upstream_sse {
@@ -391,8 +459,14 @@ impl Gateway {
                                     "{} ({status}: {up_err})",
                                     candidates[index].name
                                 ));
+                                self.penalize(
+                                    &mut candidates[index],
+                                    &up_err,
+                                    &message,
+                                    attempt_latency,
+                                );
                                 last_error = Some(up_err);
-                                break 'candidates;
+                                continue 'candidates;
                             }
                         }
 
@@ -452,6 +526,18 @@ impl Gateway {
             total_latency,
         )
         .await
+    }
+
+    /// Records a channel-fault failure against the channel so the circuit
+    /// breaker and cooldown engage, mirroring what `router::route_candidates`
+    /// does for the probe path. Client-class failures are the request's fault
+    /// and never bench the channel.
+    fn penalize(&self, channel: &mut Channel, err: &GatewayError, message: &str, latency: i64) {
+        let info = err.failure_info();
+        if crate::resilience::failure_is_channel_fault(&info) {
+            self.router
+                .apply_channel_failure(channel, &info, message, latency);
+        }
     }
 
     fn resolve_model_alias(&self, requested: &str) -> String {
@@ -624,12 +710,7 @@ impl Gateway {
         let status = response.status().as_u16();
 
         if status >= 400 {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .map(parse_retry_after)
-                .unwrap_or(Duration::ZERO);
+            let retry_after = retry_after_from(response.headers());
             let body_text = response.text().await.unwrap_or_default();
             let mut message = parse_upstream_error_message(&body_text);
             if message.is_empty() {
@@ -848,6 +929,16 @@ impl Gateway {
         }
         response
     }
+}
+
+/// Reads a `Retry-After` header into a delay, defaulting to zero when it is
+/// absent or unparseable. Shared by the forward loop and the translated path.
+fn retry_after_from(headers: &HeaderMap) -> Duration {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(parse_retry_after)
+        .unwrap_or(Duration::ZERO)
 }
 
 fn header_contains(headers: &HeaderMap, name: &str, needle: &str) -> bool {

@@ -1,4 +1,10 @@
-import type { Directive } from 'vue'
+import { ref, type Directive } from 'vue'
+
+// How many dialogs are currently mounted. Every modal is wrapped with this
+// directive, so this is the one reliable "is any modal open" signal without
+// having to OR together each modal's own flag. The window chrome uses it to
+// re-expose a title-bar drag strip once a backdrop covers the normal one.
+export const openModalCount = ref(0)
 
 // Selector for elements that can hold keyboard focus inside a dialog. Anything
 // explicitly removed from the tab order (tabindex="-1") is excluded.
@@ -45,6 +51,7 @@ const restoreTo = new WeakMap<HTMLElement, HTMLElement | null>()
  */
 export const vFocusTrap: Directive<HTMLElement> = {
   mounted(el) {
+    openModalCount.value++
     restoreTo.set(el, document.activeElement as HTMLElement | null)
 
     const onKeydown = (event: KeyboardEvent) => {
@@ -79,6 +86,7 @@ export const vFocusTrap: Directive<HTMLElement> = {
   },
 
   unmounted(el) {
+    openModalCount.value = Math.max(0, openModalCount.value - 1)
     const onKeydown = handlers.get(el)
     if (onKeydown) {
       document.removeEventListener('keydown', onKeydown, true)

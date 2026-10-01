@@ -35,7 +35,7 @@ import {
   isModelEquivalent,
   selectCanonicalDisplayName,
 } from '@/services/modelNaming'
-import { vFocusTrap } from '@/directives/focusTrap'
+import { vFocusTrap, openModalCount } from '@/directives/focusTrap'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
@@ -2885,6 +2885,12 @@ async function copyApiKey() {
 
 let backdropMouseDownPos = { x: 0, y: 0 }
 
+// A modal backdrop (z-index ≥ 999) covers the top navigation bar, which is the
+// window's normal drag region. While one is open we expose a thin strip across
+// the very top of the window so the title bar stays a drag handle — matching
+// the native expectation that you can always move a window by its top edge.
+const hasOpenModal = computed(() => openModalCount.value > 0)
+
 function onBackdropMouseDown(event: MouseEvent) {
   if (event.button !== 0) return
   if (event.target !== event.currentTarget) return
@@ -2918,6 +2924,15 @@ function handleContextMenu(event: MouseEvent) {
 
 <template>
   <div class="m26-window" @contextmenu="handleContextMenu">
+    <!-- Title-bar drag strip: only interactive while a modal covers the nav
+         bar, so it never steals clicks from the bar itself. -->
+    <div
+      v-if="hasOpenModal"
+      class="m26-titlebar-drag"
+      data-tauri-drag-region="deep"
+      aria-hidden="true"
+    ></div>
+
     <!-- Background Ambient Glow Canvas -->
     <div class="m26-ambient-layer">
       <div class="m26-glow-orb orb-1"></div>
@@ -2926,7 +2941,7 @@ function handleContextMenu(event: MouseEvent) {
     </div>
 
     <!-- TOP FLOATING PILL CAPSULE NAVIGATION BAR (macOS 26 White) -->
-    <header ref="topNavbarRef" class="m26-top-navbar" data-tauri-drag-region="deep">
+    <header class="m26-top-navbar" data-tauri-drag-region="deep">
       <!-- Left: macOS window buttons spacer -->
       <div class="m26-nav-left">
         <div class="m26-traffic-lights" v-if="!isDesktop" aria-hidden="true">
@@ -4383,7 +4398,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: INJECTION CHECK (Redesigned) -->
     <div v-if="showInjectionModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-1" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
       <div class="m26-modal-sheet m26-inject-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="flex items-center gap-2.5">
             <h3 id="m26-modal-title-1" class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
             <span class="m26-inject-pill" :class="injectionChannel?.injectionState ?? 'unknown'">
@@ -4529,7 +4544,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: ADD CHANNEL -->
     <div v-if="showAddChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-2" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
       <div class="m26-modal-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <h3 id="m26-modal-title-2" class="m26-modal-title">添加供应商渠道</h3>
           <button class="m26-close-btn" aria-label="关闭" @click="showAddChannel = false">✕</button>
         </div>
@@ -4604,7 +4619,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: EDIT CHANNEL -->
     <div v-if="showEditChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-3" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showEditChannel = false)">
       <div class="m26-modal-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <h3 id="m26-modal-title-3" class="m26-modal-title">编辑渠道配置</h3>
           <button class="m26-close-btn" aria-label="关闭" @click="showEditChannel = false">✕</button>
         </div>
@@ -4679,7 +4694,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: CONFIRM ACTION -->
     <div v-if="confirmModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-4" class="m26-modal-backdrop m26-confirm-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => confirmModal = null)">
       <div class="m26-modal-sheet m26-confirm-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <h3 id="m26-modal-title-4" class="m26-modal-title">{{ confirmModal.title }}</h3>
           <button class="m26-close-btn" aria-label="关闭" @click="confirmModal = null">✕</button>
         </div>
@@ -4712,7 +4727,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: MODEL LATENCY & SPEED TEST -->
     <div v-if="activeModelLatencyChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-5" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => { activeModelLatencyChannel = null; selectedModelNames = [] })">
       <div class="m26-modal-sheet m26-models-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="m26-modal-heading">
             <!-- The channel name is the title: it is what identifies this modal,
                  and a generic "模型管理" heading only repeats the button that
@@ -4937,7 +4952,7 @@ function handleContextMenu(event: MouseEvent) {
     >
       <div class="m26-modal-sheet m26-speedtest-modal-sheet" @click.stop>
         <!-- Header -->
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="flex items-center gap-3">
             <div
               class="m26-model-brand-badge shrink-0"
@@ -5108,7 +5123,7 @@ function handleContextMenu(event: MouseEvent) {
       @click="handleBackdropClick($event, closeAliasModal)"
     >
       <div class="m26-modal-sheet m26-aliases-modal-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="flex items-center gap-3">
             <span
               class="m26-model-family-badge"
@@ -5394,7 +5409,7 @@ function handleContextMenu(event: MouseEvent) {
       @click="handleBackdropClick($event, () => showClassifyModal = false)"
     >
       <div class="m26-modal-sheet" style="max-width: 460px;">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="flex items-center gap-2">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
@@ -5460,7 +5475,7 @@ function handleContextMenu(event: MouseEvent) {
       @click="handleBackdropClick($event, () => showCustomMappingsModal = false)"
     >
       <div class="m26-modal-sheet" style="max-width: 580px;">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="flex items-center gap-2">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M4 6h16M4 12h10M4 18h14" />
@@ -5565,7 +5580,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: CHANNEL PROBE & ERROR DIAGNOSIS -->
     <div v-if="activeDiagnosticChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-8" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeDiagnosticChannel = null)">
       <div class="m26-modal-sheet m26-diagnostic-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="flex items-center gap-2">
             <div class="m26-diag-icon-badge danger">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
@@ -5659,7 +5674,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- MODAL: LOG DETAIL -->
     <div v-if="activeLogDetail" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-9" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => activeLogDetail = null)">
       <div class="m26-modal-sheet m26-log-detail-sheet">
-        <div class="m26-modal-header" data-tauri-drag-region="deep">
+        <div class="m26-modal-header">
           <div class="flex items-center gap-2">
             <div
               class="m26-diag-icon-badge"
@@ -5930,17 +5945,12 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 /* Keep interactive UI chrome non-selectable */
-.m26-app-titlebar,
-.m26-titlebar-drag-area,
-.m26-titlebar-nav,
-.m26-nav-tab,
 .m26-seg-btn,
 .m26-card-switch,
 .m26-card-btn,
 .m26-action-btn,
 .m26-glass-btn,
 .m26-close-btn,
-.m26-traffic-lights-spacer,
 .m26-modal-header {
   user-select: none;
   -webkit-user-select: none;
@@ -6199,45 +6209,6 @@ function handleContextMenu(event: MouseEvent) {
   z-index: 20;
 }
 
-.m26-gateway-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  background: rgba(5, 150, 105, 0.08);
-  border: 1px solid rgba(5, 150, 105, 0.2);
-  border-radius: 20px;
-  font-size: 11.5px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  color: #047857;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.m26-gateway-chip:hover {
-  background: rgba(5, 150, 105, 0.15);
-  border-color: rgba(5, 150, 105, 0.35);
-}
-
-.m26-gateway-chip.offline {
-  background: rgba(225, 29, 72, 0.08);
-  border-color: rgba(225, 29, 72, 0.2);
-  color: var(--m26-rose);
-}
-
-.m26-chip-pulse {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--m26-emerald);
-  box-shadow: 0 0 6px rgba(5, 150, 105, 0.6);
-}
-
-.m26-gateway-chip.offline .m26-chip-pulse {
-  background: var(--m26-rose);
-  box-shadow: 0 0 6px rgba(225, 29, 72, 0.6);
-}
-
 /* --------------------------------------------------------------------------
    Toolbar Search Component (in Section Toolbars)
    -------------------------------------------------------------------------- */
@@ -6290,13 +6261,6 @@ function handleContextMenu(event: MouseEvent) {
   color: var(--m26-text);
 }
 
-
-.m26-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .m26-live-indicator {
   width: 7px;
   height: 7px;
@@ -6334,7 +6298,6 @@ function handleContextMenu(event: MouseEvent) {
   max-width: 1440px;
   margin: 0 auto;
 }
-
 
 /* Buttons */
 .m26-action-btn {
@@ -6490,11 +6453,6 @@ function handleContextMenu(event: MouseEvent) {
   font-size: 14px;
   color: var(--m26-text-muted);
 }
-.m26-bento-unit {
-  font-size: 16px;
-  color: var(--m26-text-secondary);
-  font-weight: 600;
-}
 .m26-bento-text {
   font-size: 20px;
   font-weight: 700;
@@ -6510,532 +6468,32 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 /* Quick Bar */
-.m26-quick-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid var(--m26-border);
-  border-radius: 12px;
-  padding: 10px 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-}
-.m26-bar-left {
-  display: flex;
-  gap: 10px;
-}
 
 /* Mini Grid in Overview */
-.m26-card-section {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.m26-section-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--m26-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.m26-mini-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
-}
-.m26-mini-card {
-  background: var(--m26-card-bg);
-  border: 1px solid var(--m26-border);
-  border-radius: 12px;
-  padding: 12px 14px;
-  cursor: pointer;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.02);
-  transition: all 0.16s ease;
-}
-.m26-mini-card:hover {
-  background: var(--m26-card-hover);
-  border-color: var(--m26-border-bright);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-  transform: translateY(-1px);
-}
-.m26-mini-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.m26-mini-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--m26-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.m26-mini-meta {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--m26-text-muted);
-}
-.m26-mini-lat {
-  font-family: ui-monospace, SFMono-Regular, monospace;
-}
 
 /* ==========================================================================
    Section 2: Channels Management
    ========================================================================== */
-.m26-control-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.m26-segmented {
-  display: inline-flex;
-  background: rgba(0, 0, 0, 0.05);
-  border: 1px solid var(--m26-border);
-  border-radius: 9px;
-  padding: 3px;
-  gap: 2px;
-}
-.m26-seg-btn {
-  background: transparent;
-  border: none;
-  border-radius: 7px;
-  padding: 5px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--m26-text-secondary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.m26-seg-btn:hover {
-  color: var(--m26-text);
-}
-.m26-seg-btn.active {
-  background: #ffffff;
-  color: var(--m26-text);
-  font-weight: 600;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-}
-.m26-seg-btn.icon-only {
-  padding: 6px 9px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.m26-tools-group,
-.m26-tools-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.m26-tools-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
 
 /* Channel Card Grid */
-.m26-channels-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 18px;
-  align-items: stretch;
-}
 
 /* Modern macOS 26 White Channel Card */
-.m26-hg-card {
-  background: #ffffff;
-  border-radius: 18px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  box-shadow: 0 4px 18px -2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.02);
-  padding: 16px 18px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  position: relative;
-  overflow: hidden;
-  height: 100%;
-}
-.m26-hg-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 28px -4px rgba(0, 0, 0, 0.07), 0 2px 8px rgba(0, 0, 0, 0.03);
-  border-color: rgba(79, 70, 229, 0.25);
-}
-.m26-hg-card.disabled {
-  opacity: 0.65;
-  filter: grayscale(0.2);
-}
 
 /* Card Header */
-.m26-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.m26-card-title-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.m26-card-name {
-  font-size: 15px;
-  font-weight: 700;
-  color: #0f172a;
-  letter-spacing: -0.01em;
-  margin: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.m26-card-badges-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-}
-.m26-card-status-pill {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 6px;
-  line-height: 1.4;
-}
-.m26-card-status-pill.healthy {
-  background: #10b981;
-  color: #ffffff;
-}
-.m26-card-status-pill.degraded {
-  background: #f59e0b;
-  color: #ffffff;
-}
-.m26-card-status-pill.offline {
-  background: #f43f5e;
-  color: #ffffff;
-}
-.m26-card-proto-pill {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 6px;
-  line-height: 1.4;
-  background: #e0f2fe;
-  color: #0284c7;
-}
-.m26-card-proto-pill.anthropic {
-  background: #fef3c7;
-  color: #b45309;
-}
-.m26-card-proto-pill.openai-responses {
-  background: #e0e7ff;
-  color: #4338ca;
-}
 
 /* Card Switch */
-.m26-card-switch {
-  position: relative;
-  display: inline-block;
-  width: 32px;
-  height: 18px;
-  cursor: pointer;
-  margin-left: 2px;
-}
-.m26-card-switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-.m26-card-switch .slider {
-  position: absolute;
-  cursor: pointer;
-  inset: 0;
-  background-color: rgba(0, 0, 0, 0.12);
-  transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  border-radius: 20px;
-}
-.m26-card-switch .slider:before {
-  position: absolute;
-  content: "";
-  height: 14px;
-  width: 14px;
-  left: 2px;
-  bottom: 2px;
-  background-color: white;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  border-radius: 50%;
-}
-.m26-card-switch input:checked + .slider {
-  background-color: #10b981;
-}
-.m26-card-switch input:checked + .slider:before {
-  transform: translateX(14px);
-}
 
 /* Service / Channel Tag Row */
-.m26-card-tag-row {
-  display: flex;
-  align-items: center;
-}
-.m26-service-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 9px;
-  border-radius: 6px;
-  background: #eef2ff;
-  color: #4338ca;
-  font-size: 11px;
-  font-weight: 600;
-  width: fit-content;
-}
-.m26-service-tag.warning {
-  background: #fff1f2;
-  color: #e11d48;
-}
 
 /* Card Models List - 1 row per model, left name, right latency / error */
-.m26-card-models-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  background: #f8fafc;
-  border-radius: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  flex: 1;
-}
-.m26-models-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.m26-models-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: #64748b;
-  letter-spacing: 0.02em;
-}
-.m26-model-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  flex: 1;
-}
-.m26-model-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  min-height: 28px;
-  transition: all 0.15s ease;
-}
-.m26-model-row:hover {
-  border-color: rgba(79, 70, 229, 0.25);
-  background: #fafafa;
-}
-.m26-model-row.has-error {
-  border-color: rgba(239, 68, 68, 0.25);
-  background: rgba(254, 242, 242, 0.5);
-}
-.m26-model-row-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex: 1;
-}
-.m26-model-bullet {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #10b981;
-  flex-shrink: 0;
-}
-.m26-model-bullet.error {
-  background: #ef4444;
-}
-.m26-model-name-text {
-  font-size: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-weight: 600;
-  color: #1e293b;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.m26-model-row-latency {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-}
 
 /* Latency Badge */
-.m26-model-lat-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: 6px;
-  cursor: pointer;
-  background: #f1f5f9;
-  color: #475569;
-  border: 1px solid rgba(0, 0, 0, 0.04);
-  transition: all 0.15s ease;
-}
-.m26-model-lat-tag:hover {
-  opacity: 0.85;
-}
-.m26-model-lat-tag.fast {
-  background: #ecfdf5;
-  color: #059669;
-  border-color: rgba(16, 185, 129, 0.2);
-}
-.m26-model-lat-tag.normal {
-  background: #eff6ff;
-  color: #2563eb;
-  border-color: rgba(37, 99, 235, 0.2);
-}
-.m26-model-lat-tag.slow {
-  background: #fffbeb;
-  color: #d97706;
-  border-color: rgba(217, 119, 6, 0.2);
-}
-.m26-model-lat-tag.probing {
-  background: #f5f3ff;
-  color: #7c3aed;
-  border-color: rgba(124, 58, 237, 0.2);
-}
-.m26-model-lat-tag.timeout,
-.m26-model-lat-tag.offline {
-  background: #fef2f2;
-  color: #dc2626;
-  border-color: rgba(239, 68, 68, 0.2);
-}
 
 /* Error Badge */
-.m26-model-err-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  font-weight: 700;
-  background: #fee2e2;
-  color: #dc2626;
-  border: 1px solid rgba(220, 38, 38, 0.3);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.m26-model-err-badge:hover {
-  background: #fecaca;
-  transform: scale(1.02);
-}
-.m26-err-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #dc2626;
-}
-.m26-err-arrow {
-  font-size: 9px;
-  opacity: 0.8;
-  margin-left: 2px;
-}
 
 /* More / Expand Button */
-.m26-model-more-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  padding: 6px 10px;
-  margin-top: auto;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #4f46e5;
-  background: rgba(79, 70, 229, 0.06);
-  border: 1px dashed rgba(79, 70, 229, 0.25);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.m26-model-more-btn:hover {
-  background: rgba(79, 70, 229, 0.12);
-  border-color: rgba(79, 70, 229, 0.45);
-  color: #4338ca;
-}
 
 /* Card Action Buttons (探活, 编辑, 复制, 删除) - pinned to bottom */
-.m26-card-actions {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
-  margin-top: auto;
-}
-.m26-card-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 4px;
-  border-radius: 7px;
-  font-size: 11.5px;
-  font-weight: 500;
-  color: #475569;
-  background: #f8fafc;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  white-space: nowrap;
-}
-.m26-card-btn:hover {
-  color: #0f172a;
-  background: #f1f5f9;
-  border-color: rgba(0, 0, 0, 0.15);
-}
-.m26-card-btn.danger {
-  color: #64748b;
-}
-.m26-card-btn.danger:hover {
-  color: #e11d48;
-  background: #fff1f2;
-  border-color: rgba(225, 29, 72, 0.3);
-}
-.m26-card-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.m26-card-btn svg {
-  flex-shrink: 0;
-}
-.m26-ch-tag-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .m26-proto-pill {
   font-size: 10px;
   font-weight: 600;
@@ -7054,17 +6512,6 @@ function handleContextMenu(event: MouseEvent) {
 .m26-proto-pill.openai-responses {
   background: rgba(37, 99, 235, 0.12);
   color: #2563eb;
-}
-.m26-status-note-tag {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 5px;
-  background: rgba(217, 119, 6, 0.12);
-  color: #b45309;
-  cursor: pointer;
-  white-space: nowrap;
-  margin-left: 6px;
 }
 .m26-inject-pill {
   font-size: 10px;
@@ -7363,108 +6810,6 @@ function handleContextMenu(event: MouseEvent) {
   cursor: not-allowed;
   transform: none;
 }
-.m26-interval-pill {
-  font-size: 10px;
-  font-weight: 500;
-  padding: 2px 6px;
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.04);
-  color: var(--m26-text-muted);
-}
-.m26-circuit-pill {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 5px;
-}
-.m26-circuit-pill.open {
-  background: rgba(225, 29, 72, 0.12);
-  color: var(--m26-rose);
-}
-.m26-circuit-pill.half_open {
-  background: rgba(217, 119, 6, 0.12);
-  color: var(--m26-amber);
-}
-
-.m26-ch-name {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--m26-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.m26-ch-url {
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  color: var(--m26-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: 2px;
-}
-
-.m26-ch-telemetry {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  background: #f8fafc;
-  border: 1px solid rgba(0, 0, 0, 0.04);
-  border-radius: 8px;
-}
-.m26-ch-status-box {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: help;
-  white-space: nowrap;
-}
-.m26-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--m26-rose);
-}
-.m26-status-dot.healthy { background: var(--m26-emerald); box-shadow: 0 0 6px rgba(5, 150, 105, 0.4); }
-.m26-status-dot.degraded { background: var(--m26-amber); box-shadow: 0 0 6px rgba(217, 119, 6, 0.4); }
-.m26-status-dot.offline { background: var(--m26-rose); }
-.m26-status-dot.unknown { background: #94a3b8; }
-
-.m26-ch-latency-box {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  font-size: 12px;
-  color: var(--m26-text-secondary);
-}
-.m26-signal-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 10px;
-}
-.m26-signal-bars span {
-  width: 2.5px;
-  background: rgba(0, 0, 0, 0.12);
-  border-radius: 1px;
-}
-.m26-signal-bars span:nth-child(1) { height: 4px; }
-.m26-signal-bars span:nth-child(2) { height: 7px; }
-.m26-signal-bars span:nth-child(3) { height: 10px; }
-.m26-signal-bars.sig-3 span { background: var(--m26-emerald); }
-.m26-signal-bars.sig-2 span:nth-child(1), .m26-signal-bars.sig-2 span:nth-child(2) { background: var(--m26-amber); }
-.m26-signal-bars.sig-1 span:nth-child(1) { background: var(--m26-rose); }
-
-.m26-ch-models-strip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
-}
 .m26-model-badge {
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, monospace;
@@ -7480,14 +6825,6 @@ function handleContextMenu(event: MouseEvent) {
   background: rgba(79, 70, 229, 0.1);
   color: var(--m26-accent);
   font-weight: 600;
-}
-
-.m26-ch-card-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 8px;
-  border-top: 1px solid var(--m26-border);
 }
 .m26-btn-micro {
   display: inline-flex;
@@ -7512,11 +6849,6 @@ function handleContextMenu(event: MouseEvent) {
   background: #f8fafc;
   border-color: rgba(0, 0, 0, 0.18);
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
-}
-.m26-btn-group {
-  display: flex;
-  align-items: center;
-  gap: 3px;
 }
 .m26-btn-icon {
   width: 26px;
@@ -7544,43 +6876,6 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 /* Switch */
-.m26-switch {
-  position: relative;
-  display: inline-block;
-  width: 34px;
-  height: 20px;
-}
-.m26-switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-.m26-slider {
-  position: absolute;
-  cursor: pointer;
-  inset: 0;
-  background-color: rgba(0, 0, 0, 0.12);
-  transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  border-radius: 20px;
-}
-.m26-slider:before {
-  position: absolute;
-  content: "";
-  height: 16px;
-  width: 16px;
-  left: 2px;
-  bottom: 2px;
-  background-color: white;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  border-radius: 50%;
-}
-input:checked + .m26-slider {
-  background-color: var(--m26-emerald);
-}
-input:checked + .m26-slider:before {
-  transform: translateX(14px);
-}
 
 /* Table Style */
 .m26-table-wrap {
@@ -7620,21 +6915,6 @@ input:checked + .m26-slider:before {
 .m26-table tr:hover td {
   background: #f1f5f9;
   color: var(--m26-text);
-}
-.m26-td-url {
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.m26-table-actions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 5px;
-  white-space: nowrap;
-  flex-shrink: 0;
 }
 
 /* ==========================================================================
@@ -9120,6 +8400,20 @@ input:checked + .m26-slider:before {
   padding: 24px;
   user-select: none;
 }
+/* Transparent drag handle pinned to the window's top edge; mounted only while a
+   modal is open (see hasOpenModal). Sits above every backdrop — base 999, the
+   injection backdrop 1100, the confirm backdrop 1200 — so the title bar is
+   draggable whichever dialog is showing. The height matches the macOS title
+   bar; native traffic lights render on their own layer above it and keep
+   working. */
+.m26-titlebar-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 1300;
+}
 .m26-modal-sheet {
   width: 100%;
   max-width: 520px;
@@ -9229,13 +8523,6 @@ input:checked + .m26-slider:before {
   background: #ffffff;
   color: var(--m26-text);
 }
-.m26-textarea {
-  height: auto;
-  min-height: 84px;
-  padding: 8px 12px;
-  line-height: 1.5;
-  resize: vertical;
-}
 .m26-text-btn {
   background: transparent;
   border: none;
@@ -9309,18 +8596,6 @@ input:checked + .m26-slider:before {
   height: 16px;
   width: 100%;
 }
-
-.m26-ch-models-strip.clickable {
-  cursor: pointer;
-  padding: 3px 6px;
-  margin: -3px -6px;
-  border-radius: 6px;
-  transition: all 0.15s ease;
-  user-select: none;
-}
-.m26-ch-models-strip.clickable:hover {
-  background: rgba(79, 70, 229, 0.08);
-}
 .m26-ch-models-strip.clickable:hover .m26-model-badge.count {
   background: var(--m26-accent);
   color: #ffffff;
@@ -9346,14 +8621,6 @@ input:checked + .m26-slider:before {
 }
 
 /* Live polling indicator & active button */
-.m26-btn-active-green {
-  background: rgba(16, 185, 129, 0.12) !important;
-  color: #059669 !important;
-  border-color: rgba(16, 185, 129, 0.35) !important;
-}
-.m26-btn-active-green:hover {
-  background: rgba(16, 185, 129, 0.18) !important;
-}
 .m26-live-indicator {
   display: inline-block;
   width: 7px;
@@ -9374,12 +8641,6 @@ input:checked + .m26-slider:before {
   100% {
     box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
   }
-}
-.m26-pause-indicator {
-  display: inline-block;
-  font-size: 10px;
-  opacity: 0.7;
-  margin-right: 2px;
 }
 
 /* ==========================================================================
@@ -9781,15 +9042,6 @@ input:checked + .m26-slider:before {
   -webkit-user-select: text !important;
   cursor: text;
 }
-.m26-tag-primary {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(79, 70, 229, 0.1);
-  color: var(--m26-accent);
-  font-weight: 600;
-  white-space: nowrap;
-}
 .m26-model-ch-url {
   font-size: 11px;
   color: var(--m26-text-muted);
@@ -9938,67 +9190,8 @@ input:checked + .m26-slider:before {
 /* ==========================================================================
    Error Banner & Diagnostic Modal Sheet
    ========================================================================== */
-.m26-ch-error-strip {
-  margin-top: 8px;
-  padding: 6px 10px;
-  background: rgba(225, 29, 72, 0.06);
-  border: 1px solid rgba(225, 29, 72, 0.18);
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.m26-ch-error-strip:hover {
-  background: rgba(225, 29, 72, 0.1);
-  border-color: rgba(225, 29, 72, 0.32);
-}
-.m26-ch-error-strip-left {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex: 1;
-  color: var(--m26-rose);
-}
 .error-strip-icon {
   flex-shrink: 0;
-}
-.m26-ch-error-strip-msg {
-  font-size: 11px;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.m26-ch-error-strip-link {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--m26-rose);
-  flex-shrink: 0;
-}
-.m26-status-err-tag {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: rgba(225, 29, 72, 0.12);
-  color: var(--m26-rose);
-  font-weight: 600;
-  margin-left: 4px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.m26-ch-status-box.has-error {
-  cursor: pointer;
-  padding: 2px 6px;
-  margin: -2px -6px;
-  border-radius: 6px;
-  transition: all 0.15s ease;
-}
-.m26-ch-status-box.has-error:hover {
-  background: rgba(225, 29, 72, 0.08);
 }
 .m26-btn-micro.danger-soft {
   background: rgba(225, 29, 72, 0.08);
@@ -10189,125 +9382,6 @@ input:checked + .m26-slider:before {
 }
 
 /* Gateway self test card */
-.m26-gateway-self-test-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px 18px;
-  background: #ffffff;
-  border: 1px solid var(--m26-border);
-  border-radius: 12px;
-  margin-bottom: 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-}
-
-.m26-gateway-status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.m26-gateway-status-badge {
-  font-size: 11.5px;
-  color: var(--m26-emerald);
-  background: rgba(5, 150, 105, 0.08);
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-weight: 500;
-}
-
-.m26-gateway-status-badge.offline {
-  color: var(--m26-rose);
-  background: rgba(225, 29, 72, 0.08);
-}
-
-.m26-gateway-creds-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.05);
-}
-
-.m26-gateway-cred-item {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: rgba(248, 250, 252, 0.9);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 8px;
-  transition: all 0.15s ease;
-}
-
-.m26-gateway-cred-item:hover {
-  background: #ffffff;
-  border-color: rgba(0, 0, 0, 0.12);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03);
-}
-
-.m26-gateway-cred-label {
-  font-size: 10.5px;
-  font-weight: 700;
-  color: var(--m26-text-muted);
-  background: rgba(0, 0, 0, 0.05);
-  padding: 2px 6px;
-  border-radius: 4px;
-  letter-spacing: 0.5px;
-  flex-shrink: 0;
-  user-select: none;
-}
-
-.m26-gateway-cred-value {
-  flex: 1;
-  min-width: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  color: var(--m26-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-  user-select: text;
-  -webkit-user-select: text;
-  transition: color 0.15s ease;
-}
-
-.m26-gateway-cred-value:hover {
-  color: var(--m26-accent);
-}
-
-.m26-cred-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.m26-cred-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 8px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--m26-text-secondary);
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.09);
-  border-radius: 5px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  flex-shrink: 0;
-}
-
-.m26-cred-copy-btn:hover {
-  background: #f1f5f9;
-  color: var(--m26-text);
-  border-color: rgba(0, 0, 0, 0.18);
-}
 
 .m26-cred-icon-btn {
   display: inline-flex;
@@ -10328,25 +9402,6 @@ input:checked + .m26-slider:before {
   background: #f1f5f9;
   color: var(--m26-text);
   border-color: rgba(0, 0, 0, 0.18);
-}
-
-.m26-gateway-self-test-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.m26-test-pulse {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--m26-emerald);
-  box-shadow: 0 0 8px rgba(5, 150, 105, 0.5);
-  display: inline-block;
-  flex-shrink: 0;
-}
-.m26-test-pulse.offline {
-  background: var(--m26-rose);
-  box-shadow: 0 0 8px rgba(225, 29, 72, 0.5);
 }
 
 /* Search bar clear button */
@@ -10405,10 +9460,6 @@ input:checked + .m26-slider:before {
 }
 
 /* Custom interval wrapper */
-.m26-custom-interval-wrap {
-  width: 100%;
-}
-
 
 /* Provider pills & status indicators */
 .prov-dot {
@@ -10422,13 +9473,6 @@ input:checked + .m26-slider:before {
 .prov-dot.healthy { background: var(--m26-emerald); }
 .prov-dot.degraded { background: var(--m26-amber); }
 .prov-dot.offline { background: var(--m26-rose); }
-.m26-prov-status-indicator {
-  font-size: 11px;
-  font-weight: 600;
-}
-.m26-prov-status-indicator.healthy { color: var(--m26-emerald); }
-.m26-prov-status-indicator.degraded { color: var(--m26-amber); }
-.m26-prov-status-indicator.offline { color: var(--m26-rose); }
 
 /* Log detail sheet */
 .m26-log-detail-sheet {
@@ -10761,17 +9805,9 @@ input:checked + .m26-slider:before {
    Card Selection Styles
    ========================================================================== */
 /* Card Selection state */
-.m26-hg-card.is-selected {
-  border-color: #4f46e5;
-  box-shadow: 0 0 0 2.5px rgba(79, 70, 229, 0.25), 0 8px 24px -4px rgba(79, 70, 229, 0.12);
-}
 .m26-table tr.is-selected {
   background-color: rgba(79, 70, 229, 0.06);
 }
-
-
-
-
 
 .m26-stream-status-pill {
   display: inline-flex;
