@@ -19,6 +19,7 @@ pub const ERR_CHANNEL_NOT_FOUND: &str = "desktop channel not found";
 /// Errors surfaced by the store.
 #[derive(Debug)]
 pub enum StoreError {
+    Invalid(String),
     NotFound(i64),
     Db(rusqlite::Error),
     Json(serde_json::Error),
@@ -28,6 +29,7 @@ pub enum StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StoreError::Invalid(message) => write!(f, "{message}"),
             StoreError::NotFound(id) => write!(f, "desktop channel {id}: {ERR_CHANNEL_NOT_FOUND}"),
             StoreError::Db(err) => write!(f, "{err}"),
             StoreError::Json(err) => write!(f, "{err}"),
@@ -255,7 +257,7 @@ created_at, updated_at";
 
 pub struct Store {
     conn: Mutex<Connection>,
-    runtime_mu: Mutex<()>,
+    pub(crate) runtime_mu: Mutex<()>,
     subscribers: RwLock<Vec<(u64, mpsc::Sender<LogEvent>)>>,
     next_sub_id: Mutex<u64>,
 }
@@ -263,9 +265,11 @@ pub struct Store {
 impl Store {
     /// Opens or creates a local SQLite database at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>> {
+        let path = path.as_ref();
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        crate::store_keys::backup_before_migration(&conn, path)?;
         Self::from_connection(conn)
     }
 
@@ -321,10 +325,11 @@ impl Store {
         );
         drop(conn);
         self.prune_all_model_health()?;
+        self.initialize_keys()?;
         Ok(())
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -447,7 +452,8 @@ impl Store {
         let updated_at = format_time(channel.updated_at.unwrap_or(now));
 
         {
-            let conn = self.lock();
+            let mut conn = self.lock();
+            let conn = conn.transaction()?;
             if channel.id == 0 {
                 conn.execute(
                     "INSERT INTO desktop_channels
@@ -525,6 +531,8 @@ impl Store {
                     ],
                 )?;
             }
+            crate::store_keys::sync_legacy_key(&conn, channel.id, &channel.api_key)?;
+            conn.commit()?;
         }
 
         let mut models = vec![channel.primary_model.clone()];

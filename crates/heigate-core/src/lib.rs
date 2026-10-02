@@ -14,4 +14,5 @@ pub mod router;
 pub mod runner;
 pub mod server;
 pub mod store;
+pub mod store_keys;
 pub mod version;
