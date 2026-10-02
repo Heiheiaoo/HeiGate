@@ -23,7 +23,11 @@ async fn setup(mode: &'static str) -> (Gateway, i64, Calls, Server) {
             return response;
         }
         if mode=="stream_error" {
-            let mut response=Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: {\"error\":{\"message\":\"limited\",\"code\":429}}\n\n"));
+            let chunks=stream::once(async {Ok::<_,std::io::Error>(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))}).chain(stream::once(async {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                Ok::<_,std::io::Error>(Bytes::from_static(b"data: {\"error\":{\"message\":\"limited\",\"code\":429}}\n\n"))
+            }));
+            let mut response=Response::new(Body::from_stream(chunks));
             response.headers_mut().insert("content-type",HeaderValue::from_static("text/event-stream"));
             return response;
         }
@@ -62,6 +66,72 @@ fn request() -> Vec<u8> {
 }
 
 use axum::response::IntoResponse;
+
+#[tokio::test]
+async fn stream_error_after_output_never_replays() {
+    let (gateway, id, calls, _server) = setup("stream_error").await;
+    let response = gateway
+        .forward(
+            GatewayProtocol::Chat,
+            &HeaderMap::new(),
+            request(),
+            &RequestContext::default(),
+        )
+        .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("hello"));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(gateway.store.list_keys(id).unwrap()[0]
+        .cooldown_until
+        .is_some());
+    assert_eq!(gateway.store.list_logs(10).unwrap()[0].status_code, 502);
+}
+
+#[tokio::test]
+async fn global_attempt_budget_and_supplier_failover() {
+    let (gateway, id, calls, _server) = setup("all429").await;
+    let mut other = gateway.store.get(id).unwrap();
+    other.id = 0;
+    other.name = "Supplier B".into();
+    other.api_key = "key-c".into();
+    gateway.store.save(&mut other).unwrap();
+    let response = gateway
+        .forward(
+            GatewayProtocol::Chat,
+            &HeaderMap::new(),
+            request(),
+            &RequestContext::default(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(calls.lock().unwrap().len(), 3);
+    assert!(gateway.store.list_keys(other.id).unwrap()[0]
+        .cooldown_until
+        .is_some());
+}
+
+#[tokio::test]
+async fn disabled_keys_cannot_be_probed() {
+    let (gateway, id, calls, _server) = setup("ok").await;
+    let key = gateway.store.list_keys(id).unwrap().remove(0);
+    gateway
+        .store
+        .patch_key(
+            id,
+            key.id,
+            &crate::store_keys::KeyPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let runner =
+        crate::runner::ProbeRunner::with_key_pool(gateway.store.clone(), gateway.key_pool.clone());
+    assert!(runner.probe_key_now(id, key.id).await.is_err());
+    assert!(calls.lock().unwrap().is_empty());
+}
 
 #[tokio::test]
 async fn auto_retries_other_key_and_preserves_history() {
