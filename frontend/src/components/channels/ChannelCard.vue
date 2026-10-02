@@ -100,6 +100,7 @@ function onModelHighlightClick() {
     <div class="m26-card-header">
       <div class="m26-card-title-box">
         <h4 class="m26-card-title" :title="`${c.name}\n协议: ${c.protocol}\n${c.url}`">{{ c.name }}</h4>
+        <span v-if="c.keyCount" class="text-xs text-muted">{{ c.keyCount }} Key · {{ c.keyAvailableCount }} 可用<span v-if="c.keyCoolingCount"> · {{ c.keyCoolingCount }} 冷却</span></span>
       </div>
 
       <div class="m26-card-ctrl-box" @click.stop>

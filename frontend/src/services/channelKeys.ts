@@ -15,6 +15,13 @@ export type ChannelKey = {
   completion_tokens: number
 }
 
+export async function probeKey(channelId: number, keyId: number) {
+  const response = await fetch(`/api/channels/${channelId}/keys/${keyId}/probe`, { method: 'POST', headers: { 'X-HeiGate-Request': '1' }, signal: AbortSignal.timeout(60000) })
+  const result = await response.json()
+  if (!response.ok) throw new Error(result.error || '测试失败')
+  return result.data as Array<{ status: string; message: string; key_id: number; key_name: string }>
+}
+
 export async function keyRequest(channelId: number, method = 'GET', body?: unknown, keyId?: number): Promise<ChannelKey[]> {
   const response = await fetch(`/api/channels/${channelId}/keys${keyId === undefined ? '' : '/' + keyId}`, {
     method,

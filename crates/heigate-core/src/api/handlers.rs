@@ -118,7 +118,28 @@ pub async fn list_channels(
             } else {
                 channels.iter().map(sanitize_channel).collect()
             };
-            ok_data(json!(channels))
+            let data: Vec<Value> = channels
+                .iter()
+                .map(|channel| {
+                    let mut value = json!(channel);
+                    if let Ok(keys) = state.store.list_keys(channel.id) {
+                        let now = chrono::Utc::now();
+                        value["key_count"] = json!(keys.len());
+                        value["key_available_count"] = json!(keys
+                            .iter()
+                            .filter(|k| k.enabled
+                                && !k.auth_invalid
+                                && !k.cooldown_until.is_some_and(|t| t > now))
+                            .count());
+                        value["key_cooling_count"] = json!(keys
+                            .iter()
+                            .filter(|k| k.enabled && k.cooldown_until.is_some_and(|t| t > now))
+                            .count());
+                    }
+                    value
+                })
+                .collect();
+            ok_data(json!(data))
         }
         Err(err) => store_error_response(&err),
     }
@@ -363,18 +384,50 @@ pub async fn injection_check(
         vec![channel.primary_model.clone()]
     };
 
-    let reports = check_injection_models(
-        &probe::Config {
-            provider: channel.provider.clone(),
-            api_mode: channel.api_mode.clone(),
-            endpoint: channel.endpoint.clone(),
-            api_key: channel.api_key.clone(),
-            primary_model: channel.primary_model.clone(),
-            ..Default::default()
-        },
-        &models,
-    )
-    .await;
+    if !channel.enabled {
+        return json_response(StatusCode::CONFLICT, json!({"error":"渠道已停用"}));
+    }
+    let mut reports = Vec::new();
+    let mut key_origins = Vec::new();
+    for model in &models {
+        let lease =
+            match state
+                .gateway
+                .key_pool
+                .acquire(id, model, &std::collections::HashSet::new(), None)
+            {
+                Ok(Some(lease)) => lease,
+                _ => {
+                    return json_response(
+                        StatusCode::CONFLICT,
+                        json!({"error":"没有可用于检测的 Key（冷却、禁用或权限限制）"}),
+                    )
+                }
+            };
+        let mut result = check_injection_models(
+            &probe::Config {
+                provider: channel.provider.clone(),
+                api_mode: channel.api_mode.clone(),
+                endpoint: channel.endpoint.clone(),
+                api_key: lease.key.secret.clone(),
+                primary_model: model.clone(),
+                ..Default::default()
+            },
+            std::slice::from_ref(model),
+        )
+        .await;
+        for report in &mut result {
+            if !lease.key.secret.is_empty() {
+                report.message = report.message.replace(&lease.key.secret, "[REDACTED]");
+                report.content = report.content.replace(&lease.key.secret, "[REDACTED]");
+            }
+            if report.message.contains("429") {
+                let _ = lease.failure(&crate::resilience::classify_status(429), model);
+            }
+            key_origins.push((lease.key.id, lease.key.name.clone()));
+        }
+        reports.extend(result);
+    }
 
     // The channel column reflects the primary model.
     if let Some(report) = reports.iter().find(|r| r.model == channel.primary_model) {
@@ -387,6 +440,16 @@ pub async fn injection_check(
         }
     }
 
+    let reports: Vec<_> = reports
+        .iter()
+        .zip(key_origins)
+        .map(|(report, (id, name))| {
+            let mut value = json!(report);
+            value["key_id"] = json!(id);
+            value["key_name"] = json!(name);
+            value
+        })
+        .collect();
     ok_data(json!({ "results": reports }))
 }
 
@@ -704,6 +767,8 @@ pub async fn candidates(
 #[derive(Debug, Deserialize, Default)]
 pub struct UpstreamModelsRequest {
     #[serde(default)]
+    channel_id: Option<i64>,
+    #[serde(default)]
     endpoint: String,
     #[serde(default)]
     api_key: String,
@@ -713,9 +778,35 @@ pub struct UpstreamModelsRequest {
 
 /// Probes candidate `/models` URLs and returns the discovered model ids.
 pub async fn fetch_upstream_models(
-    State(_state): State<SharedState>,
-    Json(req): Json<UpstreamModelsRequest>,
+    State(state): State<SharedState>,
+    Json(mut req): Json<UpstreamModelsRequest>,
 ) -> Response {
+    let lease = if let Some(id) = req.channel_id {
+        let channel = match state.store.get(id) {
+            Ok(c) if c.enabled => c,
+            _ => return json_response(StatusCode::CONFLICT, json!({"error":"渠道不可用"})),
+        };
+        let lease =
+            match state
+                .gateway
+                .key_pool
+                .acquire(id, "", &std::collections::HashSet::new(), None)
+            {
+                Ok(Some(lease)) => lease,
+                _ => {
+                    return json_response(
+                        StatusCode::CONFLICT,
+                        json!({"error":"没有可用于获取模型的 Key"}),
+                    )
+                }
+            };
+        req.endpoint = channel.endpoint;
+        req.provider = channel.provider;
+        req.api_key = lease.key.secret.clone();
+        Some(lease)
+    } else {
+        None
+    };
     let mut endpoint = req.endpoint.trim().to_string();
     if endpoint.is_empty() {
         return json_response(
@@ -774,9 +865,26 @@ pub async fn fetch_upstream_models(
             }
         };
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(crate::api::forward::parse_retry_after)
+            .unwrap_or_default();
         let body = response.bytes().await.unwrap_or_default();
 
         if status != 200 {
+            if let Some(lease) = &lease {
+                if status == 429 || status == 401 {
+                    let mut info = crate::resilience::classify_status(status as i32);
+                    info.retry_after = retry_after;
+                    let _ = lease.failure(&info, "");
+                    return json_response(
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        json!({"error":format!("模型列表请求失败：HTTP {status}，Key 已暂避")}),
+                    );
+                }
+            }
             let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let message = value
                 .get("error")

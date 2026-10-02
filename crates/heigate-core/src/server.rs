@@ -63,8 +63,11 @@ pub fn build_state() -> std::io::Result<SharedState> {
     }
 
     let router = Arc::new(ChannelRouter::new(store.clone()));
-    let runner = Arc::new(ProbeRunner::new(store.clone()));
     let gateway = Arc::new(Gateway::new(store.clone(), router.clone()));
+    let runner = Arc::new(ProbeRunner::with_key_pool(
+        store.clone(),
+        gateway.key_pool.clone(),
+    ));
     Ok(Arc::new(AppState {
         store,
         runner,
@@ -97,6 +100,10 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
                 .delete(handlers::delete_channel),
         )
         .route("/channels/{id}/probe", post(handlers::probe_channel))
+        .route(
+            "/channels/{id}/keys/{key_id}/probe",
+            post(crate::api::keys::probe),
+        )
         .route(
             "/channels/{id}/keys",
             get(crate::api::keys::list).post(crate::api::keys::add),

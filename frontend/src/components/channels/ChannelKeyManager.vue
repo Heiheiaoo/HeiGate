@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { keyRequest, type ChannelKey } from '@/services/channelKeys'
+import { keyRequest, probeKey, type ChannelKey } from '@/services/channelKeys'
 
 const props = defineProps<{ channels: Array<{ gatewayId?: number; name: string }> }>()
 defineEmits<{ close: []; changed: [] }>()
@@ -13,6 +13,7 @@ const editId = ref<number | null>(null)
 const editName = ref('')
 const editSecret = ref('')
 const deleteId = ref<number | null>(null)
+const testIds = ref<number[]>([])
 const now = ref(Date.now())
 const timer = setInterval(() => { now.value = Date.now() }, 1000)
 onBeforeUnmount(() => clearInterval(timer))
@@ -75,6 +76,25 @@ async function remove() {
   if (deleteId.value === null) return
   if (await run('DELETE', undefined, deleteId.value)) deleteId.value = null
 }
+
+async function testKeys() {
+  if (channelId.value === undefined || busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    for (const id of testIds.value) {
+      const results = await probeKey(channelId.value, id)
+      const failed = results.find(r => !['operational', 'degraded'].includes(r.status))
+      if (failed) error.value = `${failed.key_name}：${failed.message}`
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '测试失败'
+  } finally {
+    testIds.value = []
+    busy.value = false
+    try { keys.value = await keyRequest(channelId.value) } catch { /* retain current results */ }
+  }
+}
 </script>
 
 <template>
@@ -91,6 +111,12 @@ async function remove() {
       <p class="key-note">{{ keys.length }} 把 Key · {{ readyCount }} 可用 · 顺序轮询。429 冷却 5 / 10 / 20 / 30 分钟；上游要求更久时遵守上游。</p>
       <p v-if="error" role="alert" class="key-error">{{ error }}</p>
       <button class="m26-glass-btn" :disabled="busy" @click="run()">刷新状态</button>
+      <button class="m26-glass-btn" :disabled="busy || !readyCount" @click="testIds = keys.filter(k => status(k) === '可用').map(k => k.id)">测试全部可用 Key</button>
+      <div v-if="testIds.length" class="key-form" role="alert">
+        <p>将向上游发送 {{ testIds.length }} 次主模型测试请求，可能消耗额度。冷却 Key 不会参与。</p>
+        <button class="m26-glass-btn" :disabled="busy" @click="testKeys">确认测试</button>
+        <button class="m26-glass-btn" :disabled="busy" @click="testIds = []">取消</button>
+      </div>
       <div v-for="key in keys" :key="key.id" class="key-row">
         <div>
 <strong>{{ key.name }}</strong> <code>{{ key.masked_secret }}</code><p>{{ status(key) }}</p>
@@ -98,6 +124,7 @@ async function remove() {
           <p v-if="key.last_error" class="key-error">{{ key.last_error }}</p>
         </div>
         <div class="key-actions">
+          <button class="m26-glass-btn" :disabled="busy || status(key) !== '可用'" @click="testIds = [key.id]">测试</button>
           <button class="m26-glass-btn" :disabled="busy" @click="run('PUT', { enabled: !key.enabled }, key.id)">{{ key.enabled ? '停用' : '启用' }}</button>
           <button class="m26-glass-btn" :disabled="busy" @click="edit(key)">编辑</button>
           <button class="m26-glass-btn" :disabled="busy" @click="run('PUT', { position: Math.min(...keys.map(k => k.position)) - 1 }, key.id)">置顶</button>

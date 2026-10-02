@@ -64,6 +64,9 @@ export type AggregateModelView = {
 }
 
 export type Channel = {
+  keyCount?: number
+  keyAvailableCount?: number
+  keyCoolingCount?: number
   name: string
   url: string
   protocol: ChannelProtocol

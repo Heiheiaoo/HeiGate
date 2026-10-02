@@ -830,6 +830,9 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     injectionContent: item.injectionContent ?? '',
     injectionCheckedAt: item.injectionCheckedAt ?? null,
     modelHealth: item.modelHealth ?? [],
+    keyCount: item.keyCount,
+    keyAvailableCount: item.keyAvailableCount,
+    keyCoolingCount: item.keyCoolingCount,
   }
 }
 
@@ -2418,7 +2421,11 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
   setLoading(true)
   try {
     // 优先通过本地网关后端代理请求，避免浏览器 CORS 拦截
-    const proxyRes = await apiFetchUpstreamModels(url.trim(), apiKey.trim(), protocol)
+    const proxyRes = await apiFetchUpstreamModels(url.trim(), apiKey.trim(), protocol, mode === 'edit' ? editingChannel.value?.gatewayId : undefined)
+    if (!proxyRes.ok && gatewayApiActive.value) {
+      showToast(proxyRes.error || '获取模型失败')
+      return
+    }
     if (proxyRes.ok && proxyRes.models && proxyRes.models.length > 0) {
       if (mode === 'new') {
         newChannelModelNames.value = proxyRes.models
@@ -3566,7 +3573,7 @@ function handleContextMenu(event: MouseEvent) {
 
     <!-- Hidden Input for Import -->
     <div v-if="showKeyManager" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="key-manager-title" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showKeyManager = false)">
-      <ChannelKeyManager :channels="channels" @close="showKeyManager = false" />
+      <ChannelKeyManager :channels="channels" @close="showKeyManager = false; refreshChannels()" />
     </div>
 
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />

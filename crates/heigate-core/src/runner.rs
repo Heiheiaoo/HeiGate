@@ -45,13 +45,19 @@ impl std::error::Error for RunnerError {}
 /// Runs on-demand health probes for local channels.
 pub struct ProbeRunner {
     store: Arc<Store>,
+    key_pool: Arc<crate::key_pool::KeyPool>,
     in_flight: Mutex<HashSet<i64>>,
 }
 
 impl ProbeRunner {
     pub fn new(store: Arc<Store>) -> Self {
+        Self::with_key_pool(store.clone(), crate::key_pool::KeyPool::new(store))
+    }
+
+    pub fn with_key_pool(store: Arc<Store>, key_pool: Arc<crate::key_pool::KeyPool>) -> Self {
         ProbeRunner {
             store,
+            key_pool,
             in_flight: Mutex::new(HashSet::new()),
         }
     }
@@ -60,7 +66,7 @@ impl ProbeRunner {
     /// called, because it drives the channel headline status, routing priority,
     /// circuit breaker, and adaptive schedule.
     pub async fn probe_now(&self, id: i64) -> Result<Vec<ProbeResult>, RunnerError> {
-        self.probe(id, "", false).await
+        self.probe(id, "", false, None).await
     }
 
     /// Checks one explicitly selected model. When it is the channel's current
@@ -74,12 +80,20 @@ impl ProbeRunner {
         if model.is_empty() {
             return self.probe_now(id).await;
         }
-        self.probe(id, model, false).await
+        self.probe(id, model, false, None).await
     }
 
     /// Performs an explicit deep scan of every configured model, sequentially.
     pub async fn probe_all_models_now(&self, id: i64) -> Result<Vec<ProbeResult>, RunnerError> {
-        self.probe(id, "", true).await
+        self.probe(id, "", true, None).await
+    }
+
+    pub async fn probe_key_now(
+        &self,
+        id: i64,
+        key_id: i64,
+    ) -> Result<Vec<ProbeResult>, RunnerError> {
+        self.probe(id, "", false, Some(key_id)).await
     }
 
     async fn probe(
@@ -87,6 +101,7 @@ impl ProbeRunner {
         id: i64,
         target_model: &str,
         all_models: bool,
+        key_id: Option<i64>,
     ) -> Result<Vec<ProbeResult>, RunnerError> {
         if !self.acquire_channel(id) {
             return Err(RunnerError::Busy);
@@ -102,89 +117,63 @@ impl ProbeRunner {
         }
 
         let probed_primary = channel.primary_model.clone();
-        let mut cfg = Config {
-            provider: channel.provider.clone(),
-            api_mode: channel.api_mode.clone(),
-            endpoint: channel.endpoint.clone(),
-            api_key: channel.api_key.clone(),
-            primary_model: String::new(),
-            extra_models: Vec::new(),
-            extra_headers: Default::default(),
-        };
-
-        let mut model_count: i64 = 1;
-
-        let persist_primary = if !target_model.is_empty() {
-            cfg.primary_model = target_model.to_string();
-            target_model == probed_primary
+        let models = if !target_model.is_empty() {
+            vec![target_model.to_string()]
         } else if all_models {
-            cfg.primary_model = probed_primary.clone();
-            cfg.extra_models = channel.extra_models.clone();
-            model_count += channel.extra_models.len() as i64;
-            true
+            let mut models = vec![probed_primary.clone()];
+            models.extend(channel.extra_models.clone());
+            models
         } else {
-            cfg.primary_model = probed_primary.clone();
-            true
+            vec![probed_primary.clone()]
         };
-
-        let budget = probe::run_budget_for(model_count);
-        let results = match tokio::time::timeout(budget, probe::run(&cfg)).await {
-            Ok(Ok(results)) => results,
-            Ok(Err(err)) => {
-                if persist_primary {
-                    self.persist_probe_error(id, &probed_primary, &err.to_string());
+        let mut results = Vec::new();
+        for model in models {
+            let lease = self
+                .key_pool
+                .acquire(id, &model, &HashSet::new(), key_id)
+                .map_err(|e| RunnerError::Store(e.to_string()))?
+                .ok_or_else(|| {
+                    RunnerError::Store("没有可用于探活的 Key（冷却、停用或权限限制）".into())
+                })?;
+            let cfg = Config {
+                provider: channel.provider.clone(),
+                api_mode: channel.api_mode.clone(),
+                endpoint: probe::normalize_endpoint(&channel.endpoint),
+                api_key: lease.key.secret.clone(),
+                primary_model: model.clone(),
+                extra_models: Vec::new(),
+                extra_headers: Default::default(),
+            };
+            let mut result = probe::check_model_once(&cfg, &model).await;
+            result.key_id = lease.key.id;
+            result.key_name = lease.key.name.clone();
+            if !lease.key.secret.is_empty() {
+                result.message = result.message.replace(&lease.key.secret, "[REDACTED]");
+            }
+            let success = matches!(result.status.as_str(), STATUS_OPERATIONAL | STATUS_DEGRADED);
+            let info = probe_failure_info(&result);
+            if success {
+                let _ = lease.success(0, 0);
+            } else {
+                let _ = lease.failure(&info, &model);
+            }
+            let key_fault = !success
+                && matches!(
+                    info.class,
+                    Some(FailureClass::RateLimit | FailureClass::Auth | FailureClass::Model)
+                );
+            // A credential failure must not bench the other keys or label their model unavailable.
+            if !key_fault {
+                let _ = self
+                    .store
+                    .set_model_health(id, &model_health_from_probe(&result));
+                if model == probed_primary {
+                    self.persist_probe_results(id, &probed_primary, std::slice::from_ref(&result));
                 }
-                return Err(RunnerError::Store(err.to_string()));
             }
-            Err(_) => {
-                if persist_primary {
-                    self.persist_probe_error(id, &probed_primary, "probe timed out");
-                }
-                return Err(RunnerError::Store("probe timed out".to_string()));
-            }
-        };
-
-        if results.is_empty() {
-            return Ok(results);
-        }
-
-        for result in &results {
-            let health = model_health_from_probe(result);
-            if let Err(err) = self.store.set_model_health(id, &health) {
-                eprintln!("heigate: probe result save failed: {err}");
-            }
-        }
-        if persist_primary {
-            self.persist_probe_results(id, &probed_primary, &results);
+            results.push(result);
         }
         Ok(results)
-    }
-
-    fn persist_probe_error(&self, id: i64, expected_primary: &str, message: &str) {
-        let expected = expected_primary.to_string();
-        let message = message.to_string();
-        let _ = self.store.update_runtime(id, move |fresh| {
-            // A user may change the primary model while a slow probe is in
-            // flight; a result for the old model must never become the new
-            // model's status.
-            if fresh.primary_model != expected {
-                return;
-            }
-            fresh.failure_count += 1;
-            fresh.last_status = STATUS_ERROR.to_string();
-            fresh.last_error = message;
-            let info = FailureInfo::new(FailureClass::Network);
-            let until = Utc::now() + failure_cooldown(&info, fresh.failure_count);
-            fresh.cooldown_until = Some(until);
-            if fresh.failure_count >= 3 {
-                fresh.circuit_state = CIRCUIT_OPEN.to_string();
-            }
-            fresh.last_latency_ms = None;
-            fresh.last_ttft_ms = None;
-            fresh.last_ping_latency_ms = None;
-            fresh.probe_streak = 0;
-            fresh.last_checked_at = Some(Utc::now());
-        });
     }
 
     fn persist_probe_results(&self, id: i64, expected_primary: &str, results: &[ProbeResult]) {
@@ -293,6 +282,11 @@ impl Drop for ChannelGuard<'_> {
 
 /// Maps an upstream failure message to a failure class, detecting rate limits.
 fn probe_failure_info(result: &ProbeResult) -> FailureInfo {
+    if result.http_status >= 400 {
+        let mut info = crate::resilience::classify_status(result.http_status);
+        info.retry_after = std::time::Duration::from_secs(result.retry_after_secs);
+        return info;
+    }
     let message = result.message.to_lowercase();
     for marker in [
         "429",
@@ -359,6 +353,10 @@ mod tests {
     #[test]
     fn rate_limit_messages_are_classified() {
         let mut result = ProbeResult {
+            http_status: 0,
+            retry_after_secs: 0,
+            key_id: 0,
+            key_name: String::new(),
             model: "gpt".to_string(),
             status: STATUS_ERROR.to_string(),
             message: "upstream HTTP 429: too many requests".to_string(),

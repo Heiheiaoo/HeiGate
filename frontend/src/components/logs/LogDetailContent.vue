@@ -122,6 +122,7 @@ function calculateTokenSpeed(log: RequestLog): string {
             <div class="m26-trace-header">
               <div class="flex items-center gap-2">
                 <span class="m26-trace-channel-name">{{ step.channel_name || '未知渠道' }}</span>
+                <span v-if="step.key_id" class="m26-trace-id-badge">{{ step.key_name || 'Key' }} #{{ step.key_id }}</span>
                 <span v-if="step.channel_id" class="m26-trace-id-badge">ID: {{ step.channel_id }}</span>
                 <span v-if="step.attempt > 1" class="m26-trace-retry-badge">重试 #{{ step.attempt }}</span>
               </div>

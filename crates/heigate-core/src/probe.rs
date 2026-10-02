@@ -108,6 +108,14 @@ pub struct Config {
 /// The outcome of probing a single model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeResult {
+    #[serde(default)]
+    pub http_status: i32,
+    #[serde(default)]
+    pub retry_after_secs: u64,
+    #[serde(default)]
+    pub key_id: i64,
+    #[serde(default)]
+    pub key_name: String,
     pub model: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,6 +132,10 @@ pub struct ProbeResult {
 impl ProbeResult {
     fn new(model: &str) -> Self {
         ProbeResult {
+            http_status: 0,
+            retry_after_secs: 0,
+            key_id: 0,
+            key_name: String::new(),
             model: model.to_string(),
             status: STATUS_ERROR.to_string(),
             latency_ms: None,
@@ -304,6 +316,8 @@ pub async fn check_model_once(cfg: &Config, model: &str) -> ProbeResult {
         }
     };
 
+    res.http_status = out.status;
+    res.retry_after_secs = out.retry_after_secs;
     if let Some(ttft) = out.ttft {
         let ttft_ms = ttft.as_millis() as i64;
         res.ttft_ms = Some(ttft_ms);
@@ -340,6 +354,7 @@ pub async fn check_model_once(cfg: &Config, model: &str) -> ProbeResult {
 /// What a probe request learned. `body` is only meaningful for non-2xx.
 #[derive(Debug, Default)]
 struct SendResult {
+    retry_after_secs: u64,
     ttft: Option<Duration>,
     saw_content: bool,
     saw_reasoning: bool,
@@ -423,9 +438,17 @@ async fn send(cfg: &Config, model: &str, prompt: &str) -> Result<SendResult, Str
     let status = response.status().as_u16() as i32;
 
     if !(200..300).contains(&status) {
+        let retry_after_secs = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(crate::api::forward::parse_retry_after)
+            .unwrap_or_default()
+            .as_secs();
         let body = response.text().await.unwrap_or_default();
         let body: String = body.chars().take(MAX_ERROR_BODY_READ).collect();
         return Ok(SendResult {
+            retry_after_secs,
             status,
             body,
             ..Default::default()

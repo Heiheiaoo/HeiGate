@@ -94,3 +94,17 @@ pub async fn delete(
         Err(err) => error(err),
     }
 }
+
+pub async fn probe(
+    State(state): State<SharedState>,
+    Path((channel, id)): Path<(i64, i64)>,
+) -> Response {
+    match state.runner.probe_key_now(channel, id).await {
+        Ok(results) => Json(json!({"data":results})).into_response(),
+        Err(_) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"Key 不可用于测试：冷却、禁用、权限限制或已有测试运行中"})),
+        )
+            .into_response(),
+    }
+}
