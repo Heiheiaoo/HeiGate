@@ -138,6 +138,10 @@ pub fn best_auto_model(ch: Option<&Channel>) -> String {
 /// One attempt in the routing and failover process.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TraceStep {
+    #[serde(default)]
+    pub key_id: i64,
+    #[serde(default)]
+    pub key_name: String,
     pub index: i64,
     pub channel_name: String,
     pub channel_id: i64,

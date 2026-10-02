@@ -14,8 +14,8 @@ use futures_util::stream::{self, Stream, StreamExt};
 use serde_json::json;
 
 use crate::api::forward::{
-    anthropic_error_type, estimate_prompt_tokens, gateway_candidate_matcher, is_client_closed_conn,
-    is_hop_by_hop_header, parse_retry_after, request_model, GatewayProtocol, StreamTokenTracker,
+    anthropic_error_type, estimate_prompt_tokens, gateway_candidate_matcher, is_hop_by_hop_header,
+    parse_retry_after, request_model, GatewayProtocol, StreamTokenTracker,
 };
 use crate::api::policy::{
     adapt_unsupported_reasoning_effort, best_auto_choice, best_auto_model, channel_serving_traffic,
@@ -23,14 +23,14 @@ use crate::api::policy::{
     upstream_stream_error, upstream_stream_has_output, TraceStep, AUTO_MODEL_NAME,
 };
 use crate::canonical::find_channel_model_for_request;
+use crate::key_pool::{KeyLease, KeyPool};
 use crate::probe::{normalize_endpoint, PROVIDER_OPENAI};
 use crate::protocol::{
     chat_to_messages, encode_sse, messages_to_chat, parse_sse_line, ChatChunk, MessagesRequest,
     StreamState,
 };
 use crate::resilience::{
-    classify_status, failure_is_retryable, FailureClass, FailureInfo, FailureInfoProvider,
-    CIRCUIT_HALF_OPEN,
+    classify_status, FailureClass, FailureInfo, FailureInfoProvider, CIRCUIT_HALF_OPEN,
 };
 use crate::router::Router;
 use crate::store::{Channel, RequestLog, Store};
@@ -39,6 +39,10 @@ use crate::store::{Channel, RequestLog, Store};
 pub const MAX_REQUEST_BODY: usize = 16 << 20;
 const MAX_STREAM_PREFIX_BYTES: usize = 64 << 10;
 const LOG_UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+
+#[cfg(test)]
+#[path = "gateway_key_tests.rs"]
+mod key_tests;
 
 /// A streaming byte source for an upstream response (or a synthesized body).
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
@@ -69,6 +73,18 @@ pub enum GatewayError {
 }
 
 impl GatewayError {
+    fn redact(&mut self, secret: &str) {
+        if secret.is_empty() {
+            return;
+        }
+        let message = match self {
+            Self::UpstreamStatus { message, .. }
+            | Self::Transport { message, .. }
+            | Self::StreamStart { message }
+            | Self::Other(message) => message,
+        };
+        *message = message.replace(secret, "[REDACTED]");
+    }
     fn upstream_status(status: i32, message: String) -> Self {
         GatewayError::UpstreamStatus {
             status,
@@ -138,12 +154,26 @@ pub struct RequestContext {
 pub struct Gateway {
     pub store: Arc<Store>,
     pub router: Arc<Router>,
+    pub key_pool: Arc<KeyPool>,
     client: reqwest::Client,
+}
+
+struct RecoveryClaims {
+    router: Arc<Router>,
+    ids: Vec<i64>,
+}
+impl Drop for RecoveryClaims {
+    fn drop(&mut self) {
+        for id in &self.ids {
+            self.router.release_half_open_public(*id);
+        }
+    }
 }
 
 impl Gateway {
     pub fn new(store: Arc<Store>, router: Arc<Router>) -> Self {
         Gateway {
+            key_pool: KeyPool::new(store.clone()),
             store,
             router,
             client: reqwest::Client::builder()
@@ -240,267 +270,192 @@ impl Gateway {
         };
         let _ = self.store.record_log(&mut request_log);
 
-        let mut chosen: Option<(UpstreamRaw, Channel, i64)> = None;
+        let mut chosen: Option<(UpstreamRaw, Channel, i64, KeyLease)> = None;
         let mut last_error: Option<GatewayError> = None;
-        let mut claimed: Vec<i64> = Vec::new();
+        let mut claimed = RecoveryClaims {
+            router: self.router.clone(),
+            ids: Vec::new(),
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+        let mut attempts = 0;
+        let mut blocked_retry = Duration::ZERO;
 
-        // Indexed: the winning response is moved out and returned by position.
-        #[allow(clippy::needless_range_loop)]
-        'candidates: for index in 0..candidates.len() {
-            let is_half_open = candidates[index].circuit_state == CIRCUIT_HALF_OPEN;
-            if is_half_open && !self.router.claim_half_open_public(candidates[index].id) {
-                continue;
+        'candidates: for channel in &mut candidates {
+            if attempts >= 3 {
+                break;
             }
-            if is_half_open {
-                claimed.push(candidates[index].id);
-            }
-
-            let upstream_model = if is_auto {
-                best_auto_model(Some(&candidates[index]))
-            } else {
-                match find_channel_model_for_request(&candidates[index], &effective_model) {
-                    Some((actual, _)) if !actual.is_empty() => actual,
-                    _ => effective_model.clone(),
+            if channel.circuit_state == CIRCUIT_HALF_OPEN {
+                if !self.router.claim_half_open_public(channel.id) {
+                    continue;
                 }
+                claimed.ids.push(channel.id);
+            }
+            let upstream_model = if is_auto {
+                best_auto_model(Some(channel))
+            } else {
+                find_channel_model_for_request(channel, &effective_model)
+                    .map(|(actual, _)| actual)
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| effective_model.clone())
             };
             if upstream_model.is_empty() {
                 continue;
             }
-
-            let mut retry_body = body.clone();
-            for attempt in 0..=1u32 {
-                if attempt > 0 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut excluded = std::collections::HashSet::new();
+            for _ in 0..2 {
+                if attempts >= 3 {
+                    break 'candidates;
                 }
+                let lease =
+                    match self
+                        .key_pool
+                        .acquire(channel.id, &upstream_model, &excluded, None)
+                    {
+                        Ok(Some(lease)) => lease,
+                        Ok(None) => {
+                            let wait = self.key_pool.retry_after(channel.id);
+                            if wait > Duration::ZERO
+                                && (blocked_retry == Duration::ZERO || wait < blocked_retry)
+                            {
+                                blocked_retry = wait;
+                            }
+                            break;
+                        }
+                        Err(_) => {
+                            last_error =
+                                Some(GatewayError::Other("credential selection failed".into()));
+                            break;
+                        }
+                    };
+                excluded.insert(lease.key.id);
+                // A per-attempt snapshot carries the selected credential. The stored channel is never mutated.
+                let mut selected = channel.clone();
+                selected.api_key = lease.key.secret.clone();
                 let attempt_start = Instant::now();
-
-                let outcome = self
-                    .forward_upstream(
-                        inbound,
-                        &retry_body,
-                        &candidates[index],
-                        proto,
-                        &effective_model,
-                        &upstream_model,
+                let mut retry_body = body.clone();
+                let mut adapted = false;
+                loop {
+                    attempts += 1;
+                    let outcome = tokio::time::timeout_at(
+                        deadline,
+                        self.prepare_upstream(
+                            inbound,
+                            &retry_body,
+                            &selected,
+                            proto,
+                            &effective_model,
+                            &upstream_model,
+                        ),
                     )
-                    .await;
-                let attempt_latency = attempt_start.elapsed().as_millis() as i64;
-
-                let mut step = TraceStep {
-                    index: trace_steps.len() as i64 + 1,
-                    channel_name: candidates[index].name.clone(),
-                    channel_id: candidates[index].id,
-                    endpoint: candidates[index].endpoint.clone(),
-                    model: upstream_model.clone(),
-                    attempt: attempt as i64 + 1,
-                    latency_ms: attempt_latency,
-                    ..Default::default()
-                };
-
-                match outcome {
-                    Err(GatewayError::Transport { message, .. }) => {
-                        step.error = message.clone();
-                        step.raw_error = message.clone();
-                        trace_steps.push(step);
-                        // The client hung up (its request future was cancelled,
-                        // or the connection reset): there is no one left to
-                        // answer. Don't retry this channel or fail over to the
-                        // rest — that would spend real upstream calls on a dead
-                        // request. Client-closed is the request's fault, so the
-                        // channel is never penalized either.
-                        if is_client_closed_conn(&message) {
-                            last_error = Some(GatewayError::Transport {
-                                client_closed: true,
-                                message,
-                            });
+                    .await
+                    .unwrap_or_else(|_| Err(GatewayError::Other("total upstream timeout".into())));
+                    let latency = attempt_start.elapsed().as_millis() as i64;
+                    let mut step = TraceStep {
+                        index: trace_steps.len() as i64 + 1,
+                        channel_id: channel.id,
+                        channel_name: channel.name.clone(),
+                        key_id: lease.key.id,
+                        key_name: lease.key.name.clone(),
+                        endpoint: channel.endpoint.clone(),
+                        model: upstream_model.clone(),
+                        attempt: attempts,
+                        latency_ms: latency,
+                        ..Default::default()
+                    };
+                    match outcome {
+                        Ok(upstream) => {
+                            step.status_code = upstream.status as i64;
+                            step.ttft_ms = latency;
+                            step.succeeded = true;
+                            trace_steps.push(step);
+                            self.router.apply_channel_success(channel, latency);
+                            chosen = Some((
+                                upstream,
+                                selected,
+                                start_overall.elapsed().as_millis() as i64,
+                                lease,
+                            ));
                             break 'candidates;
                         }
-                        if attempt == 0 {
-                            continue;
-                        }
-                        let wrapped = GatewayError::Transport {
-                            client_closed: false,
-                            message: message.clone(),
-                        };
-                        failed_attempts.push(format!(
-                            "{} 异常({})",
-                            candidates[index].name,
-                            crate::resilience::failure_label(&wrapped.failure_info())
-                        ));
-                        self.penalize(&mut candidates[index], &wrapped, &message, attempt_latency);
-                        last_error = Some(wrapped);
-                        continue 'candidates;
-                    }
-                    Err(err @ GatewayError::UpstreamStatus { status, .. }) => {
-                        let message = err.to_string();
-                        step.status_code = status as i64;
-                        step.error = message.clone();
-                        step.raw_error = message.clone();
-                        trace_steps.push(step);
-                        if attempt == 0 && failure_is_retryable(&err.failure_info()) {
-                            if let Some(adapted) = adapt_unsupported_reasoning_effort(
-                                &body,
-                                &parse_upstream_error_message(&message),
-                            ) {
-                                retry_body = adapted;
-                            }
-                            continue;
-                        }
-                        failed_attempts
-                            .push(format!("{} ({status}: {err})", candidates[index].name));
-                        self.penalize(&mut candidates[index], &err, &message, attempt_latency);
-                        last_error = Some(err);
-                        continue 'candidates;
-                    }
-                    Err(err) => {
-                        let message = err.to_string();
-                        step.error = message.clone();
-                        trace_steps.push(step);
-                        failed_attempts.push(format!("{} ({err})", candidates[index].name));
-                        self.penalize(&mut candidates[index], &err, &message, attempt_latency);
-                        last_error = Some(err);
-                        continue 'candidates;
-                    }
-                    Ok(mut upstream) => {
-                        // A non-2xx response is an upstream failure, not a reply:
-                        // read the body for a message and fail over, exactly as a
-                        // thrown error would. Without this the client would be
-                        // handed the upstream's 500/429 as if it were the answer.
-                        if !(200..300).contains(&(upstream.status as i32)) {
-                            let retry_after = retry_after_from(&upstream.headers);
-                            let (prefix, ..) = read_initial_prefix(upstream.stream, false).await;
-                            let body_text = String::from_utf8_lossy(&prefix);
-                            let mut message = parse_upstream_error_message(&body_text);
-                            if message.is_empty() {
-                                message = format!("HTTP {}", upstream.status);
-                            }
-                            let up_err = GatewayError::UpstreamStatus {
-                                status: upstream.status as i32,
-                                retry_after,
-                                message: message.clone(),
-                            };
-                            step.status_code = upstream.status as i64;
+                        Err(mut err) => {
+                            err.redact(&lease.key.secret);
+                            let info = err.failure_info();
+                            let message = err.to_string();
+                            step.status_code = info.status_code as i64;
                             step.error = message.clone();
-                            step.raw_error = body_text.chars().take(500).collect();
                             trace_steps.push(step);
-                            if attempt == 0 && failure_is_retryable(&up_err.failure_info()) {
-                                if let Some(adapted) =
+                            if !adapted
+                                && attempts < 3
+                                && info.class != Some(FailureClass::RateLimit)
+                            {
+                                if let Some(updated) =
                                     adapt_unsupported_reasoning_effort(&body, &message)
                                 {
-                                    retry_body = adapted;
-                                }
-                                continue;
-                            }
-                            failed_attempts.push(format!(
-                                "{} ({}: {message})",
-                                candidates[index].name, upstream.status
-                            ));
-                            self.penalize(
-                                &mut candidates[index],
-                                &up_err,
-                                &message,
-                                attempt_latency,
-                            );
-                            last_error = Some(up_err);
-                            continue 'candidates;
-                        }
-
-                        // Do not commit a 2xx response until the upstream has
-                        // produced its first bytes.
-                        let is_upstream_sse =
-                            header_contains(&upstream.headers, "content-type", "text/event-stream");
-
-                        let (prefix, rest, read_err) =
-                            read_initial_prefix(upstream.stream, is_upstream_sse).await;
-                        if prefix.is_empty() {
-                            let message = read_err
-                                .map(|e| e.to_string())
-                                .unwrap_or_else(|| "unknown read error".to_string());
-                            step.status_code = upstream.status as i64;
-                            step.error = format!("传输首字节中断: {message}");
-                            step.raw_error = message.clone();
-                            trace_steps.push(step);
-                            let stream_err = GatewayError::StreamStart {
-                                message: message.clone(),
-                            };
-                            if attempt == 0 && failure_is_retryable(&stream_err.failure_info()) {
-                                continue;
-                            }
-                            failed_attempts.push(format!("{} (传输中断)", candidates[index].name));
-                            self.penalize(
-                                &mut candidates[index],
-                                &stream_err,
-                                &message,
-                                attempt_latency,
-                            );
-                            last_error = Some(stream_err);
-                            continue 'candidates;
-                        }
-
-                        if is_upstream_sse {
-                            if let Some((message, status)) =
-                                upstream_stream_error(&String::from_utf8_lossy(&prefix))
-                            {
-                                step.status_code = status as i64;
-                                step.error = message.clone();
-                                step.raw_error = message.clone();
-                                let up_err = GatewayError::upstream_status(status, message.clone());
-                                let retryable = failure_is_retryable(&up_err.failure_info());
-                                trace_steps.push(step);
-                                if attempt == 0 && retryable {
-                                    if let Some(adapted) =
-                                        adapt_unsupported_reasoning_effort(&body, &message)
-                                    {
-                                        retry_body = adapted;
-                                    }
+                                    adapted = true;
+                                    retry_body = updated;
                                     continue;
                                 }
-                                failed_attempts.push(format!(
-                                    "{} ({status}: {up_err})",
-                                    candidates[index].name
-                                ));
-                                self.penalize(
-                                    &mut candidates[index],
-                                    &up_err,
-                                    &message,
-                                    attempt_latency,
-                                );
-                                last_error = Some(up_err);
+                            }
+                            failed_attempts.push(format!(
+                                "{} / {} ({})",
+                                channel.name, lease.key.name, info.status_code
+                            ));
+                            let _ = lease.failure(&info, &upstream_model);
+                            let key_fault = matches!(
+                                info.class,
+                                Some(
+                                    FailureClass::RateLimit
+                                        | FailureClass::Auth
+                                        | FailureClass::Model
+                                )
+                            );
+                            if !key_fault {
+                                self.penalize(channel, &err, &message, latency);
+                            }
+                            let client_fault = info.class == Some(FailureClass::Client);
+                            last_error = Some(err);
+                            if client_fault {
+                                break 'candidates;
+                            }
+                            if !key_fault {
                                 continue 'candidates;
                             }
+                            break;
                         }
-
-                        let winning_ttft = start_overall.elapsed().as_millis() as i64;
-                        let ttft = is_stream_request.then_some(attempt_latency);
-                        step.status_code = upstream.status as i64;
-                        step.ttft_ms = attempt_latency;
-                        step.succeeded = true;
-                        trace_steps.push(step);
-
-                        // Prepend the already-read prefix back onto the stream.
-                        upstream.stream = Box::pin(
-                            stream::once(async move { Ok(Bytes::from(prefix)) }).chain(rest),
-                        );
-
-                        self.router
-                            .apply_channel_success(&mut candidates[index], attempt_latency);
-                        if let Some(ttft) = ttft {
-                            candidates[index].last_ttft_ms = Some(ttft);
-                        }
-                        chosen = Some((upstream, candidates[index].clone(), winning_ttft));
-                        break 'candidates;
                     }
                 }
             }
         }
-
-        for id in &claimed {
-            self.router.release_half_open_public(*id);
+        if chosen.is_none() {
+            // Include leases which just entered cooldown, not only channels initially exhausted.
+            for channel in &candidates {
+                let wait = self.key_pool.retry_after(channel.id);
+                if wait > Duration::ZERO
+                    && (blocked_retry == Duration::ZERO || wait < blocked_retry)
+                {
+                    blocked_retry = wait;
+                }
+            }
+            if blocked_retry > Duration::ZERO
+                && (last_error.is_none()
+                    || last_error
+                        .as_ref()
+                        .is_some_and(|e| e.failure_info().status_code == 429))
+            {
+                last_error = Some(GatewayError::UpstreamStatus {
+                    status: 429,
+                    retry_after: blocked_retry,
+                    message: "可用 Key 正在冷却".into(),
+                });
+            } else if last_error.is_none() {
+                last_error = Some(GatewayError::upstream_status(503, "没有可用 Key".into()));
+            }
         }
+        drop(claimed);
 
         let total_latency = start_overall.elapsed().as_millis() as i64;
 
-        let Some((upstream, winning, winning_ttft)) = chosen else {
+        let Some((upstream, winning, winning_ttft, key_lease)) = chosen else {
             return self.finish_all_failed(
                 proto,
                 &effective_model,
@@ -524,11 +479,60 @@ impl Gateway {
             start_overall,
             ctx,
             total_latency,
+            key_lease,
         )
         .await
     }
 
     /// Records a channel-fault failure against the channel so the circuit
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_upstream(
+        &self,
+        inbound: &HeaderMap,
+        body: &[u8],
+        channel: &Channel,
+        proto: GatewayProtocol,
+        client_model: &str,
+        upstream_model: &str,
+    ) -> Result<UpstreamRaw, GatewayError> {
+        let mut upstream = self
+            .forward_upstream(inbound, body, channel, proto, client_model, upstream_model)
+            .await?;
+        let is_sse = header_contains(&upstream.headers, "content-type", "text/event-stream");
+        let (prefix, rest, read_err) = read_initial_prefix(
+            upstream.stream,
+            is_sse && (200..300).contains(&upstream.status),
+        )
+        .await;
+        if !(200..300).contains(&upstream.status) {
+            return Err(GatewayError::UpstreamStatus {
+                status: upstream.status as i32,
+                retry_after: retry_after_from(&upstream.headers),
+                message: parse_upstream_error_message(&String::from_utf8_lossy(&prefix)),
+            });
+        }
+        if prefix.is_empty() {
+            return Err(GatewayError::StreamStart {
+                message: read_err
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "empty response".into()),
+            });
+        }
+        let text = String::from_utf8_lossy(&prefix);
+        if is_sse {
+            if let Some((message, status)) = upstream_stream_error(&text) {
+                return Err(GatewayError::UpstreamStatus {
+                    status,
+                    retry_after: retry_after_from(&upstream.headers),
+                    message,
+                });
+            }
+        }
+        upstream.stream =
+            Box::pin(stream::once(async move { Ok(Bytes::from(prefix)) }).chain(rest));
+        Ok(upstream)
+    }
+
     /// breaker and cooldown engage, mirroring what `router::route_candidates`
     /// does for the probe path. Client-class failures are the request's fault
     /// and never bench the channel.
@@ -794,6 +798,7 @@ impl Gateway {
         start: Instant,
         ctx: &RequestContext,
         total_latency: i64,
+        key_lease: KeyLease,
     ) -> Response {
         let is_stream = is_stream_request
             || header_contains(&upstream.headers, "content-type", "text/event-stream");
@@ -816,7 +821,7 @@ impl Gateway {
             request_log.prompt_tokens,
         )));
         let log = Arc::new(Mutex::new(request_log));
-        let body = Body::from_stream(LoggingStream::new(
+        let mut logging = LoggingStream::new(
             upstream.stream,
             tracker,
             log,
@@ -824,7 +829,9 @@ impl Gateway {
             Some(winning.clone()),
             start,
             is_stream,
-        ));
+        );
+        logging.key_lease = Some(key_lease);
+        let body = Body::from_stream(logging);
 
         let mut response = Response::new(body);
         *response.status_mut() = StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::OK);
@@ -874,6 +881,10 @@ impl Gateway {
         let mut status = StatusCode::BAD_GATEWAY;
         if failure_info.status_code == 429 {
             status = StatusCode::TOO_MANY_REQUESTS;
+        } else if (400..500).contains(&failure_info.status_code) || failure_info.status_code == 503
+        {
+            status = StatusCode::from_u16(failure_info.status_code as u16)
+                .unwrap_or(StatusCode::BAD_GATEWAY);
         }
 
         let failover_desc = failed_attempts.join(" → ");
@@ -1146,6 +1157,8 @@ fn anthropic_error(status: StatusCode, kind: &str, message: &str) -> Response {
 /// A stream that updates the request log and token tracker as it flows, then
 /// finalizes the log when the upstream ends.
 pub struct LoggingStream {
+    key_lease: Option<KeyLease>,
+    non_stream_body: Vec<u8>,
     inner: ByteStream,
     tracker: Arc<Mutex<StreamTokenTracker>>,
     log: Arc<Mutex<RequestLog>>,
@@ -1171,6 +1184,8 @@ impl LoggingStream {
         is_stream: bool,
     ) -> Self {
         LoggingStream {
+            key_lease: None,
+            non_stream_body: Vec::new(),
             inner,
             tracker,
             log,
@@ -1197,13 +1212,32 @@ impl LoggingStream {
                 tracker.total_tokens,
                 tracker.saw_done,
                 tracker.finish_reason.clone(),
+                tracker.stream_error.clone(),
+                tracker.stream_error_status,
             ),
             Err(_) => return,
         };
         let Ok(mut log) = self.log.try_lock() else {
             return;
         };
-        let (prompt_tokens, completion_tokens, total_tokens, saw_done, finish_reason) = snapshot;
+        let (
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            saw_done,
+            finish_reason,
+            stream_error,
+            stream_error_status,
+        ) = snapshot;
+        if !stream_error.is_empty() {
+            self.saw_error = true;
+            self.error_message = stream_error;
+        }
+        if let Some(lease) = &self.key_lease {
+            if !lease.key.secret.is_empty() {
+                self.error_message = self.error_message.replace(&lease.key.secret, "[REDACTED]");
+            }
+        }
         log.latency_ms = self.start.elapsed().as_millis() as i64;
         if self.is_stream {
             if prompt_tokens > 0 {
@@ -1233,8 +1267,22 @@ impl LoggingStream {
                 log.error_message = "流式传输中断: truncated stream".to_string();
             }
         } else {
-            log.status_code = 200;
-            log.finish_reason = "stop".to_string();
+            log.status_code = if self.saw_error { 502 } else { 200 };
+            log.finish_reason = if self.saw_error { "error" } else { "stop" }.to_string();
+            let (prompt, completion, total) =
+                crate::api::forward::extract_non_streaming_tokens(&self.non_stream_body);
+            if prompt > 0 || completion > 0 {
+                log.prompt_tokens = prompt;
+                log.completion_tokens = completion;
+                log.total_tokens = total;
+            }
+        }
+        if let Some(lease) = self.key_lease.take() {
+            if log.status_code == 200 {
+                let _ = lease.success(log.prompt_tokens, log.completion_tokens);
+            } else if stream_error_status > 0 {
+                let _ = lease.failure(&classify_status(stream_error_status), &log.model);
+            }
         }
         if log.id > 0 {
             let _ = self.store.update_log(&log);
@@ -1273,10 +1321,8 @@ impl Stream for LoggingStream {
                             this.last_reported = tracker.completion_tokens;
                         }
                     }
-                } else if let Ok(tracker) = this.tracker.try_lock() {
-                    // Non-streaming responses carry their usage in the body, which
-                    // the caller extracts once the stream ends.
-                    let _ = tracker.completion_tokens;
+                } else if this.non_stream_body.len() + chunk.len() <= MAX_REQUEST_BODY {
+                    this.non_stream_body.extend_from_slice(&chunk);
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }

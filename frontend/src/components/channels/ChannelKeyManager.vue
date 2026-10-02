@@ -88,7 +88,7 @@ async function remove() {
       <select id="key-channel" v-model="channelId" class="m26-select" :disabled="busy">
         <option v-for="channel in channels.filter(c => c.gatewayId)" :key="channel.gatewayId" :value="channel.gatewayId">{{ channel.name }}</option>
       </select>
-      <p class="key-note">{{ keys.length }} 把 Key · {{ readyCount }} 可用。轮询接入中；当前转发仍使用原渠道 Key。</p>
+      <p class="key-note">{{ keys.length }} 把 Key · {{ readyCount }} 可用 · 顺序轮询。429 冷却 5 / 10 / 20 / 30 分钟；上游要求更久时遵守上游。</p>
       <p v-if="error" role="alert" class="key-error">{{ error }}</p>
       <button class="m26-glass-btn" :disabled="busy" @click="run()">刷新状态</button>
       <div v-for="key in keys" :key="key.id" class="key-row">

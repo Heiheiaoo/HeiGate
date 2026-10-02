@@ -121,9 +121,7 @@ impl Router {
         if healthy.is_empty() {
             healthy = failed;
         }
-        if healthy.is_empty() {
-            healthy = cooldown;
-        }
+        // A cooling channel is never a last-resort candidate.
         if healthy.is_empty() {
             return Err(format!("no enabled channel supports model {model:?}"));
         }

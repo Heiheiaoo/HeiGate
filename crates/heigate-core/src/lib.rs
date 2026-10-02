@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod canonical;
 pub mod datadir;
+pub mod key_pool;
 pub mod middleware;
 pub mod probe;
 pub mod protocol;
