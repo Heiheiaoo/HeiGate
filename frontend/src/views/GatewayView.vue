@@ -45,6 +45,7 @@ import ChannelProviderSpeedTestContent from '@/components/channels/ChannelProvid
 import ChannelInjectionContent from '@/components/channels/ChannelInjectionContent.vue'
 import ChannelModelAliasContent from '@/components/channels/ChannelModelAliasContent.vue'
 import ModelMappingContent from '@/components/channels/ModelMappingContent.vue'
+import AnalyticsOverviewMetrics from '@/components/analytics/AnalyticsOverviewMetrics.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
@@ -2931,82 +2932,15 @@ function handleContextMenu(event: MouseEvent) {
       <div class="m26-viewport">
         <!-- SECTION: DATA DASHBOARD (KANBAN) -->
         <section v-if="activeSection === 'analytics'" class="m26-section-view">
-          <!-- Bento Grid Metrics (At Top) -->
-          <div class="m26-bento-grid">
-            <div class="m26-bento-card">
-              <div class="m26-bento-head">
-                <span class="m26-bento-label">可用渠道比率</span>
-                <span class="m26-pill-icon emerald">
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
-                    <circle cx="8" cy="8" r="4" />
-                  </svg>
-                </span>
-              </div>
-              <div class="m26-bento-stat">
-                <span class="m26-bento-num">{{ healthyChannels }}</span>
-                <span class="m26-bento-sub">/ {{ channels.length }}</span>
-              </div>
-              <div class="m26-bento-foot">
-                <span class="m26-tag-subtle">{{ enabledChannels.length }} 个启用调度中</span>
-              </div>
-            </div>
-
-            <div class="m26-bento-card">
-              <div class="m26-bento-head">
-                <span class="m26-bento-label">综合响应延迟</span>
-                <span class="m26-pill-icon indigo">
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="2 8 5 11 9 4 14 10" />
-                  </svg>
-                </span>
-              </div>
-              <div class="m26-bento-stat">
-                <span class="m26-bento-num">{{ formatLatencySec(averageLatency) }}</span>
-              </div>
-              <div class="m26-bento-foot">
-                <span class="m26-tag-subtle">{{ averageLatency && averageLatency < 500 ? '极速响应' : '正常负载' }}</span>
-              </div>
-            </div>
-
-            <div class="m26-bento-card">
-              <div class="m26-bento-head">
-                <span class="m26-bento-label">分发策略</span>
-                <span class="m26-pill-icon amber">
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="8" cy="8" r="6" />
-                    <line x1="8" y1="4" x2="8" y2="8" />
-                    <line x1="8" y1="8" x2="11" y2="11" />
-                  </svg>
-                </span>
-              </div>
-              <div class="m26-bento-stat">
-                <span class="m26-bento-text">
-                  {{ routingStrategy === 'smart_quality' ? '智能综合质量' : routingStrategy === 'latency' ? '最低延迟' : '轮询均衡' }}
-                </span>
-              </div>
-              <div class="m26-bento-foot">
-                <span class="m26-tag-subtle">自动故障熔断隔离</span>
-              </div>
-            </div>
-
-            <div class="m26-bento-card">
-              <div class="m26-bento-head">
-                <span class="m26-bento-label">大模型总数</span>
-                <span class="m26-pill-icon cyan">
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                    <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
-                  </svg>
-                </span>
-              </div>
-              <div class="m26-bento-stat">
-                <span class="m26-bento-num">{{ models.length }}</span>
-                <span class="m26-bento-sub">个聚合模型</span>
-              </div>
-              <div class="m26-bento-foot">
-                <span class="m26-tag-subtle">{{ availableModels }} 家上游提供</span>
-              </div>
-            </div>
-          </div>
+          <AnalyticsOverviewMetrics
+            :healthy-channels="healthyChannels"
+            :channel-count="channels.length"
+            :enabled-channels-count="enabledChannels.length"
+            :average-latency="averageLatency"
+            :routing-strategy="routingStrategy"
+            :model-count="models.length"
+            :available-models="availableModels"
+          />
 
           <!-- Top Control Header: Title & Time Range Filter -->
           <div class="m26-analytics-header-bar">
