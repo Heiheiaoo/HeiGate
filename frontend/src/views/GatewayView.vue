@@ -44,6 +44,7 @@ import ChannelModelLatencyContent from '@/components/channels/ChannelModelLatenc
 import ChannelProviderSpeedTestContent from '@/components/channels/ChannelProviderSpeedTestContent.vue'
 import ChannelInjectionContent from '@/components/channels/ChannelInjectionContent.vue'
 import ChannelModelAliasContent from '@/components/channels/ChannelModelAliasContent.vue'
+import ModelMappingContent from '@/components/channels/ModelMappingContent.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
@@ -546,21 +547,14 @@ const existingCanonicalModelNames = computed(() => {
 const showClassifyModal = ref(false)
 const classifySourceModel = ref('')
 const classifyTargetModel = ref('')
-const classifyCustomTarget = ref('')
 
 function openClassifyDialog(sourceModelName: string, defaultTarget = '') {
   classifySourceModel.value = sourceModelName
   classifyTargetModel.value = defaultTarget || (existingCanonicalModelNames.value[0] || '')
-  classifyCustomTarget.value = ''
   showClassifyModal.value = true
 }
 
-async function submitClassify() {
-  const source = classifySourceModel.value.trim()
-  const target = (classifyTargetModel.value === '__custom__'
-    ? classifyCustomTarget.value
-    : classifyTargetModel.value
-  ).trim()
+async function submitClassify({ source, target }: { source: string; target: string }) {
   if (!source || !target) {
     showToast('请选择或输入要归入的目标模型')
     return
@@ -577,23 +571,12 @@ async function submitClassify() {
 
 // Custom Mappings Manager Modal state
 const showCustomMappingsModal = ref(false)
-const managerSourceModel = ref('')
-const managerTargetModel = ref('')
-const managerCustomTarget = ref('')
 
 function openCustomMappingsModal() {
-  managerSourceModel.value = ''
-  managerTargetModel.value = existingCanonicalModelNames.value[0] || ''
-  managerCustomTarget.value = ''
   showCustomMappingsModal.value = true
 }
 
-async function handleAddManagerMapping() {
-  const source = managerSourceModel.value.trim()
-  const target = (managerTargetModel.value === '__custom__'
-    ? managerCustomTarget.value
-    : managerTargetModel.value
-  ).trim()
+async function handleAddManagerMapping({ source, target }: { source: string; target: string }) {
   if (!source || !target) {
     showToast('请填写原始模型与目标模型')
     return
@@ -604,8 +587,6 @@ async function handleAddManagerMapping() {
   } else {
     await loadCustomModelMappings()
   }
-  managerSourceModel.value = ''
-  managerCustomTarget.value = ''
   showToast(`已添加模型归类映射：${source} ➔ ${target}`)
 }
 
@@ -4601,63 +4582,16 @@ function handleContextMenu(event: MouseEvent) {
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, () => showClassifyModal = false)"
     >
-      <div class="m26-modal-sheet" style="max-width: 460px;">
-        <div class="m26-modal-header">
-          <div class="flex items-center gap-2">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 6h16M4 12h10M4 18h14" />
-            </svg>
-            <h3 id="m26-modal-title-6" class="m26-modal-title">手动模型归并</h3>
-          </div>
-          <button class="m26-close-btn" aria-label="关闭" @click="showClassifyModal = false">✕</button>
-        </div>
-
-        <div class="m26-modal-body">
-          <p class="text-xs text-slate-500 mb-3">
-            将指定的原始模型（或特殊命名别名）归并到标准模型中。归入后，该渠道将与目标模型在同一卡片中聚合，并享受同一模型的最低延迟调度与多渠道故障轮转。
-          </p>
-
-          <div class="m26-form-group">
-            <label class="m26-label">待归并原始模型</label>
-            <input
-              v-model="classifySourceModel"
-              type="text"
-              class="m26-input font-mono"
-              placeholder="例如: deepseek-v4-flash-0731-free-3"
-              list="classify-source-suggestions"
-            />
-            <datalist id="classify-source-suggestions">
-              <option v-for="m in allDetectedChannelModels" :key="m" :value="m" />
-            </datalist>
-          </div>
-
-          <div class="m26-form-group">
-            <label class="m26-label">归入目标聚合模型</label>
-            <select v-model="classifyTargetModel" class="m26-select font-mono mb-2">
-              <option
-                v-for="name in existingCanonicalModelNames"
-                :key="name"
-                :value="name"
-              >
-                {{ name }}
-              </option>
-              <option value="__custom__">+ 输入新目标模型名称...</option>
-            </select>
-            <input
-              v-if="classifyTargetModel === '__custom__'"
-              v-model="classifyCustomTarget"
-              type="text"
-              class="m26-input font-mono"
-              placeholder="输入目标模型规范名称，例如 deepseek-v4-flash"
-            />
-          </div>
-        </div>
-
-        <div class="m26-modal-footer">
-          <button class="m26-glass-btn" @click="showClassifyModal = false">取消</button>
-          <button class="m26-action-btn primary" @click="submitClassify">确认归并</button>
-        </div>
-      </div>
+      <ModelMappingContent
+        v-if="showClassifyModal"
+        mode="classify"
+        :source-suggestions="allDetectedChannelModels"
+        :target-options="existingCanonicalModelNames"
+        :initial-source="classifySourceModel"
+        :initial-target="classifyTargetModel"
+        @submit="submitClassify"
+        @close="showClassifyModal = false"
+      />
     </div>
 
     <!-- MODAL: CUSTOM MODEL MAPPINGS MANAGER -->
@@ -4667,107 +4601,16 @@ function handleContextMenu(event: MouseEvent) {
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, () => showCustomMappingsModal = false)"
     >
-      <div class="m26-modal-sheet" style="max-width: 580px;">
-        <div class="m26-modal-header">
-          <div class="flex items-center gap-2">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 6h16M4 12h10M4 18h14" />
-            </svg>
-            <h3 id="m26-modal-title-7" class="m26-modal-title">自定义模型归类设置</h3>
-          </div>
-          <button class="m26-close-btn" aria-label="关闭" @click="showCustomMappingsModal = false">✕</button>
-        </div>
-
-        <div class="m26-modal-body">
-          <p class="text-xs text-slate-500 mb-3">
-            在此管理手动归类映射。将上游非标准或私有模型名称重定向至标准模型，解决算法无法自动合并的问题。
-          </p>
-
-          <!-- Add Form -->
-          <div class="m26-pref-card p-3 mb-3 bg-slate-50">
-            <span class="text-xs font-semibold text-slate-700 block mb-2">添加新归类映射</span>
-            <div class="flex items-center gap-2 flex-wrap">
-              <input
-                v-model="managerSourceModel"
-                type="text"
-                class="m26-input font-mono !h-[30px] !w-[210px] !text-xs"
-                placeholder="原始模型 (如 deepseek-v4-flash-0731-free-3)"
-                list="manager-source-suggestions"
-              />
-              <datalist id="manager-source-suggestions">
-                <option v-for="m in allDetectedChannelModels" :key="m" :value="m" />
-              </datalist>
-              <span class="text-xs text-slate-400">➔</span>
-              <select v-model="managerTargetModel" class="m26-select font-mono !h-[30px] !w-[160px] !text-xs">
-                <option
-                  v-for="name in existingCanonicalModelNames"
-                  :key="name"
-                  :value="name"
-                >
-                  {{ name }}
-                </option>
-                <option value="__custom__">+ 新目标模型...</option>
-              </select>
-              <input
-                v-if="managerTargetModel === '__custom__'"
-                v-model="managerCustomTarget"
-                type="text"
-                class="m26-input font-mono !h-[30px] !w-[150px] !text-xs"
-                placeholder="目标模型名称"
-              />
-              <button
-                class="m26-action-btn primary !h-[30px] !text-xs"
-                :disabled="!managerSourceModel.trim()"
-                @click="handleAddManagerMapping"
-              >
-                添加
-              </button>
-            </div>
-          </div>
-
-          <!-- Existing Mappings List -->
-          <div v-if="Object.keys(customModelMappings).length > 0">
-            <span class="text-xs font-semibold text-slate-700 block mb-1.5">
-              已生效规则 ({{ Object.keys(customModelMappings).length }})
-            </span>
-            <div class="m26-custom-mappings-table">
-              <div class="m26-mapping-row header">
-                <span class="col-source">原始上游模型名</span>
-                <span class="col-arrow"></span>
-                <span class="col-target">归入标准模型</span>
-                <span class="col-action">操作</span>
-              </div>
-              <div
-                v-for="(target, raw) in customModelMappings"
-                :key="raw"
-                class="m26-mapping-row"
-              >
-                <span class="col-source font-mono">{{ raw }}</span>
-                <span class="col-arrow">➔</span>
-                <span class="col-target font-mono font-semibold text-indigo-600">{{ target }}</span>
-                <span class="col-action">
-                  <button
-                    class="m26-btn-icon danger"
-                    @click="handleRemoveCustomMapping(String(raw))"
-                    title="解除此归类映射"
-                  >
-                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor">
-                      <path d="M3 4h10M6 4V2h4v2M5 6v7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V6" />
-                    </svg>
-                  </button>
-                </span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="text-center py-6 text-xs text-slate-400">
-            暂无自定义归类规则。在上方添加后，卡片将即时合并。
-          </div>
-        </div>
-
-        <div class="m26-modal-footer">
-          <button class="m26-action-btn primary" @click="showCustomMappingsModal = false">完成</button>
-        </div>
-      </div>
+      <ModelMappingContent
+        v-if="showCustomMappingsModal"
+        mode="manage"
+        :source-suggestions="allDetectedChannelModels"
+        :target-options="existingCanonicalModelNames"
+        :mappings="customModelMappings"
+        @submit="handleAddManagerMapping"
+        @remove="handleRemoveCustomMapping"
+        @close="showCustomMappingsModal = false"
+      />
     </div>
 
     <!-- MODAL: CHANNEL PROBE & ERROR DIAGNOSIS -->
@@ -4869,7 +4712,7 @@ function handleContextMenu(event: MouseEvent) {
   </div>
 </template>
 
-<style scoped>
+<style>
 /* ==========================================================================
    macOS 26 Pure Light / White Theme System
    ========================================================================== */
