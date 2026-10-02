@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { keyRequest, probeKey, type ChannelKey } from '@/services/channelKeys'
+import { configRequest } from '@/services/configTransfer'
 
-const props = defineProps<{ channels: Array<{ gatewayId?: number; name: string }> }>()
-defineEmits<{ close: []; changed: [] }>()
-const channelId = ref<number | undefined>(props.channels.find(c => c.gatewayId)?.gatewayId)
+const props = defineProps<{ channels: Array<{ gatewayId?: number; name: string; enabled?: boolean }> }>()
+const emit = defineEmits<{ close: []; changed: [] }>()
+const channelId = ref<number | undefined>((props.channels.find(c => c.gatewayId && c.enabled !== false) ?? props.channels.find(c => c.gatewayId))?.gatewayId)
+const channelDisabled = computed(() => props.channels.find(c => c.gatewayId === channelId.value)?.enabled === false)
 const keys = ref<ChannelKey[]>([])
 const busy = ref(false)
 const error = ref('')
@@ -14,6 +16,8 @@ const editName = ref('')
 const editSecret = ref('')
 const deleteId = ref<number | null>(null)
 const testIds = ref<number[]>([])
+const mergeSource = ref<number | undefined>()
+const mergePreview = ref<{ target: string; sources: string[]; added_keys: number; revision: string } | null>(null)
 const now = ref(Date.now())
 const timer = setInterval(() => { now.value = Date.now() }, 1000)
 onBeforeUnmount(() => clearInterval(timer))
@@ -49,6 +53,8 @@ watch(channelId, () => {
   batch.value = ''
   editId.value = null
   deleteId.value = null
+  mergeSource.value = undefined
+  mergePreview.value = null
   void run()
 }, { immediate: true })
 
@@ -95,6 +101,26 @@ async function testKeys() {
     try { keys.value = await keyRequest(channelId.value) } catch { /* retain current results */ }
   }
 }
+
+async function merge(commit = false) {
+  if (channelId.value === undefined || mergeSource.value === undefined || busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    const result = await configRequest(commit ? 'channels/merge' : 'channels/merge/preview', {
+      target_id: channelId.value, source_ids: [mergeSource.value], revision: commit ? mergePreview.value?.revision : undefined,
+    })
+    if (commit) {
+      mergePreview.value = null
+      mergeSource.value = undefined
+      keys.value = await keyRequest(channelId.value)
+      emit('changed')
+    } else mergePreview.value = result
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '合并失败'
+    mergePreview.value = null
+  } finally { busy.value = false }
+}
 </script>
 
 <template>
@@ -110,8 +136,11 @@ async function testKeys() {
       </select>
       <p class="key-note">{{ keys.length }} 把 Key · {{ readyCount }} 可用 · 顺序轮询。429 冷却 5 / 10 / 20 / 30 分钟；上游要求更久时遵守上游。</p>
       <p v-if="error" role="alert" class="key-error">{{ error }}</p>
+      <p v-if="channelDisabled" class="key-error">当前渠道已停用，Key 不会参与转发或测试。</p>
+      <div class="key-actions">
       <button class="m26-glass-btn" :disabled="busy" @click="run()">刷新状态</button>
-      <button class="m26-glass-btn" :disabled="busy || !readyCount" @click="testIds = keys.filter(k => status(k) === '可用').map(k => k.id)">测试全部可用 Key</button>
+      <button class="m26-glass-btn" :disabled="busy || channelDisabled || !readyCount" @click="testIds = keys.filter(k => status(k) === '可用').map(k => k.id)">测试全部可用 Key</button>
+      </div>
       <div v-if="testIds.length" class="key-form" role="alert">
         <p>将向上游发送 {{ testIds.length }} 次主模型测试请求，可能消耗额度。冷却 Key 不会参与。</p>
         <button class="m26-glass-btn" :disabled="busy" @click="testKeys">确认测试</button>
@@ -120,11 +149,11 @@ async function testKeys() {
       <div v-for="key in keys" :key="key.id" class="key-row">
         <div>
 <strong>{{ key.name }}</strong> <code>{{ key.masked_secret }}</code><p>{{ status(key) }}</p>
-          <small>尝试 {{ key.attempts }} · 成功 {{ key.successes }} · 429 {{ key.rate_limits }} · Token {{ key.prompt_tokens + key.completion_tokens }}</small>
+          <small>选用 {{ key.attempts }} · 成功 {{ key.successes }} · 限流轮次 {{ key.rate_limits }} · Token {{ key.prompt_tokens + key.completion_tokens }}</small>
           <p v-if="key.last_error" class="key-error">{{ key.last_error }}</p>
         </div>
         <div class="key-actions">
-          <button class="m26-glass-btn" :disabled="busy || status(key) !== '可用'" @click="testIds = [key.id]">测试</button>
+          <button class="m26-glass-btn" :disabled="busy || channelDisabled || status(key) !== '可用'" @click="testIds = [key.id]">测试</button>
           <button class="m26-glass-btn" :disabled="busy" @click="run('PUT', { enabled: !key.enabled }, key.id)">{{ key.enabled ? '停用' : '启用' }}</button>
           <button class="m26-glass-btn" :disabled="busy" @click="edit(key)">编辑</button>
           <button class="m26-glass-btn" :disabled="busy" @click="run('PUT', { position: Math.min(...keys.map(k => k.position)) - 1 }, key.id)">置顶</button>
@@ -147,12 +176,28 @@ async function testKeys() {
         <textarea id="key-batch" v-model="batch" class="m26-input" rows="4" autocomplete="off" spellcheck="false" />
         <button class="m26-glass-btn" :disabled="busy || !batch.trim() || channelId === undefined">添加 Key</button>
       </form>
+      <div class="key-form">
+        <label for="merge-source">合并重复供应商到当前渠道（地址、协议及模型配置必须一致）</label>
+        <select id="merge-source" v-model="mergeSource" class="m26-select" :disabled="busy" @change="mergePreview = null">
+          <option :value="undefined">选择源渠道</option>
+          <option v-for="channel in channels.filter(c => c.gatewayId && c.gatewayId !== channelId)" :key="channel.gatewayId" :value="channel.gatewayId">{{ channel.name }}</option>
+        </select>
+        <button class="m26-glass-btn" :disabled="busy || mergeSource === undefined" @click="merge(false)">预览合并</button>
+        <div v-if="mergePreview" role="alert">
+          <p>将 {{ mergePreview.sources.join('、') }} 的 {{ mergePreview.added_keys }} 把非重复 Key 加入 {{ mergePreview.target }}。源渠道将停用保留，历史日志不变。</p>
+          <button class="m26-glass-btn" :disabled="busy" @click="merge(true)">确认合并并停用源渠道</button>
+          <button class="m26-glass-btn" :disabled="busy" @click="mergePreview = null">取消</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .key-manager { max-width: 850px; width: min(850px, 95vw); }
+.key-manager .m26-modal-body { display: block; }
+.key-manager .m26-glass-btn { width: auto; min-height: 32px; }
+.key-form > button { justify-self: start; }
 .key-note { margin: 12px 0; font-size: 12px; opacity: .7; }
 .key-row { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 0; border-bottom: 1px solid #8883; overflow-wrap: anywhere; }
 .key-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

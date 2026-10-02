@@ -298,20 +298,14 @@ pub async fn delete_channel(State(state): State<SharedState>, Path(id): Path<i64
 }
 
 pub async fn duplicate_channel(State(state): State<SharedState>, Path(id): Path<i64>) -> Response {
-    let existing = match state.store.get(id) {
-        Ok(existing) => existing,
-        Err(err) => return store_error_response(&err),
-    };
-    let mut dup = existing.clone();
-    dup.id = 0;
-    dup.name = format!("{} (副本)", existing.name);
-    dup.model_health = Vec::new();
-    dup.created_at = None;
-    dup.updated_at = None;
-    match state.store.save(&mut dup) {
-        Ok(()) => json_response(
+    match state
+        .store
+        .duplicate_with_keys(id)
+        .and_then(|new_id| state.store.get(new_id))
+    {
+        Ok(channel) => json_response(
             StatusCode::CREATED,
-            json!({ "data": sanitize_channel(&dup) }),
+            json!({"data":sanitize_channel(&channel)}),
         ),
         Err(err) => store_error_response(&err),
     }

@@ -15,6 +15,7 @@ const emit = defineEmits<{
   'set-retention': [days: number]
   'set-max-count': [count: number]
   'export-config': []
+  'export-secrets': []
   'import-config': []
   'clear-workspace': []
 }>()
@@ -119,17 +120,17 @@ function formatBytes(bytes: number): string {
       <div class="m26-pref-row">
         <div class="m26-pref-meta">
           <span class="label">配置备份与工作区重置</span>
-          <span class="desc">以 JSON 格式完整导出本机通道与偏好设置供备份迁移，或一键重置当前工作区</span>
+          <span class="desc">导出渠道与 Key 配置；脱敏文件仅供查看，含密钥备份可恢复。导入先预览，追加渠道，不覆盖现有数据。</span>
         </div>
         <div class="m26-pref-ctrl">
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 flex-wrap">
             <button class="m26-glass-btn" @click="emit('export-config')" title="导出当前所有渠道与配置">
               <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <polyline points="7 10 12 15 17 10" />
                 <line x1="12" y1="15" x2="12" y2="3" />
               </svg>
-              <span>导出配置</span>
+              <span>导出脱敏配置</span>
             </button>
             <button class="m26-glass-btn" @click="emit('import-config')" title="导入已有配置文件">
               <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
@@ -139,6 +140,7 @@ function formatBytes(bytes: number): string {
               </svg>
               <span>导入配置</span>
             </button>
+            <button class="m26-glass-btn" @click="emit('export-secrets')" title="导出含完整密钥的备份">含 Key 备份</button>
             <div class="m26-btn-separator"></div>
             <button class="m26-glass-btn danger" @click="emit('clear-workspace')" title="清空本机保存的所有通道配置">
               <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
@@ -153,4 +155,3 @@ function formatBytes(bytes: number): string {
     </div>
   </div>
 </template>
-

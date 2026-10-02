@@ -71,8 +71,15 @@ impl KeyPool {
             if recovery && !state.recovery.insert((key.id, key.generation)) {
                 continue;
             }
+            let updated = self.store.lock().execute("UPDATE channel_keys SET attempts=attempts+1,last_used_at=? WHERE id=? AND generation=? AND enabled=1 AND auth_invalid=0",params![now.to_rfc3339(),key.id,key.generation]);
+            if !matches!(updated, Ok(1)) {
+                if recovery {
+                    state.recovery.remove(&(key.id, key.generation));
+                }
+                updated?;
+                continue;
+            }
             state.last.insert(channel, key.id);
-            self.store.lock().execute("UPDATE channel_keys SET attempts=attempts+1,last_used_at=? WHERE id=? AND generation=?",params![now.to_rfc3339(),key.id,key.generation])?;
             return Ok(Some(KeyLease {
                 key: key.clone(),
                 pool: self.clone(),
@@ -113,8 +120,10 @@ impl KeyLease {
         match info.class {
             Some(FailureClass::RateLimit) => {
                 let delay = rate_limit_cooldown(self.key.rate_limit_count + 1, info.retry_after);
-                let until =
-                    now + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::days(365));
+                let until = chrono::Duration::from_std(delay)
+                    .ok()
+                    .and_then(|duration| now.checked_add_signed(duration))
+                    .unwrap_or(chrono::DateTime::<Utc>::MAX_UTC);
                 tx.execute("UPDATE channel_keys SET cooldown_until=?,rate_limit_count=rate_limit_count+1,rate_limits=rate_limits+1,last_error='429：限流冷却',generation=generation+1 WHERE id=? AND generation=?",params![until.to_rfc3339(),self.key.id,self.key.generation])?;
             }
             Some(FailureClass::Auth) if info.status_code == 401 => {
@@ -259,5 +268,28 @@ mod tests {
             rate_limit_cooldown(1, Duration::from_secs(7200)).as_secs(),
             7200
         );
+    }
+
+    #[test]
+    fn extreme_retry_after_does_not_overflow_or_reenable_key() {
+        let (pool, id) = setup();
+        let lease = pool
+            .acquire(id, "m", &HashSet::new(), None)
+            .unwrap()
+            .unwrap();
+        lease
+            .failure(
+                &FailureInfo {
+                    class: Some(FailureClass::RateLimit),
+                    status_code: 429,
+                    retry_after: Duration::MAX,
+                },
+                "m",
+            )
+            .unwrap();
+        assert!(pool
+            .acquire(id, "m", &HashSet::new(), Some(lease.key.id))
+            .unwrap()
+            .is_none());
     }
 }

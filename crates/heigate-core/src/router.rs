@@ -115,18 +115,16 @@ impl Router {
             }
         }
 
-        if healthy.is_empty() {
-            healthy = degraded;
-        }
-        if healthy.is_empty() {
-            healthy = failed;
-        }
+        self.sort_candidates(&mut healthy, model, strategy);
+        self.sort_candidates(&mut degraded, model, strategy);
+        self.sort_candidates(&mut failed, model, strategy);
+        healthy.extend(degraded);
+        healthy.extend(failed);
         // A cooling channel is never a last-resort candidate.
         if healthy.is_empty() {
             return Err(format!("no enabled channel supports model {model:?}"));
         }
 
-        self.sort_candidates(&mut healthy, model, strategy);
         Ok(healthy)
     }
 

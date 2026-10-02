@@ -83,6 +83,14 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
     let key = state.gateway_key.clone();
 
     let api = Router::new()
+        .route("/config/export", get(crate::api::config::export))
+        .route("/config/preview", post(crate::api::config::preview))
+        .route("/config/import", post(crate::api::config::import))
+        .route(
+            "/channels/merge/preview",
+            post(crate::api::config::merge_preview),
+        )
+        .route("/channels/merge", post(crate::api::config::merge))
         .route("/session", get(handlers::session))
         .route(
             "/channels",

@@ -2,6 +2,7 @@
 //! failover loop, protocol translation, and the client-facing stream with
 //! request-log bookkeeping. Ported from `internal/api/gateway.go`.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -480,6 +481,7 @@ impl Gateway {
             ctx,
             total_latency,
             key_lease,
+            deadline,
         )
         .await
     }
@@ -527,6 +529,12 @@ impl Gateway {
                     message,
                 });
             }
+        } else if let Some((message, status)) = upstream_error_payload(&text) {
+            return Err(GatewayError::UpstreamStatus {
+                status,
+                retry_after: retry_after_from(&upstream.headers),
+                message,
+            });
         }
         upstream.stream =
             Box::pin(stream::once(async move { Ok(Bytes::from(prefix)) }).chain(rest));
@@ -799,6 +807,7 @@ impl Gateway {
         ctx: &RequestContext,
         total_latency: i64,
         key_lease: KeyLease,
+        deadline: tokio::time::Instant,
     ) -> Response {
         let is_stream = is_stream_request
             || header_contains(&upstream.headers, "content-type", "text/event-stream");
@@ -806,6 +815,10 @@ impl Gateway {
 
         if request_log.id > 0 {
             request_log.channel_name = winning.name.clone();
+            request_log.upstream_model = trace_steps
+                .last()
+                .map(|step| step.model.clone())
+                .unwrap_or_default();
             request_log.endpoint = winning.endpoint.clone();
             request_log.is_stream = is_stream;
             request_log.is_failover = !failed_attempts.is_empty();
@@ -831,6 +844,7 @@ impl Gateway {
             is_stream,
         );
         logging.key_lease = Some(key_lease);
+        logging.deadline = Some(Box::pin(tokio::time::sleep_until(deadline)));
         let body = Body::from_stream(logging);
 
         let mut response = Response::new(body);
@@ -1157,6 +1171,7 @@ fn anthropic_error(status: StatusCode, kind: &str, message: &str) -> Response {
 /// A stream that updates the request log and token tracker as it flows, then
 /// finalizes the log when the upstream ends.
 pub struct LoggingStream {
+    deadline: Option<Pin<Box<tokio::time::Sleep>>>,
     key_lease: Option<KeyLease>,
     non_stream_body: Vec<u8>,
     inner: ByteStream,
@@ -1184,6 +1199,7 @@ impl LoggingStream {
         is_stream: bool,
     ) -> Self {
         LoggingStream {
+            deadline: None,
             key_lease: None,
             non_stream_body: Vec::new(),
             inner,
@@ -1268,6 +1284,7 @@ impl LoggingStream {
             }
         } else {
             log.status_code = if self.saw_error { 502 } else { 200 };
+            log.error_message = self.error_message.clone();
             log.finish_reason = if self.saw_error { "error" } else { "stop" }.to_string();
             let (prompt, completion, total) =
                 crate::api::forward::extract_non_streaming_tokens(&self.non_stream_body);
@@ -1281,7 +1298,7 @@ impl LoggingStream {
             if log.status_code == 200 {
                 let _ = lease.success(log.prompt_tokens, log.completion_tokens);
             } else if stream_error_status > 0 {
-                let _ = lease.failure(&classify_status(stream_error_status), &log.model);
+                let _ = lease.failure(&classify_status(stream_error_status), &log.upstream_model);
             }
         }
         if log.id > 0 {
@@ -1298,6 +1315,23 @@ impl Stream for LoggingStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+        if this
+            .deadline
+            .as_mut()
+            .is_some_and(|deadline| deadline.as_mut().poll(cx).is_ready())
+        {
+            this.finished = true;
+            this.saw_error = true;
+            this.error_message = "请求总时限已到".into();
+            this.finalize();
+            return Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request deadline exceeded",
+            ))));
+        }
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
                 if this.is_stream {
@@ -1339,6 +1373,17 @@ impl Stream for LoggingStream {
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for LoggingStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.saw_error = true;
+            self.error_message = "客户端取消或响应未完成".into();
+            self.finalize();
         }
     }
 }

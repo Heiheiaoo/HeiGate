@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { clearValue, readValue, writeValue } from '@/services/storage'
 import { checkGatewayHealth } from '@/services/health'
+import { configRequest, downloadConfig } from '@/services/configTransfer'
 import {
   clearLogs,
   createChannel,
@@ -1287,8 +1288,8 @@ async function openEditChannel(channel: Channel) {
   editChannelName.value = channel.name
   editChannelUrl.value = channel.url
 
-  let rawKey = channel.apiKey || ''
-  if ((!rawKey || rawKey.includes('***')) && channel.gatewayId) {
+  let rawKey = (channel.keyCount ?? 1) > 1 ? '' : channel.apiKey || ''
+  if ((channel.keyCount ?? 1) <= 1 && (!rawKey || rawKey.includes('***')) && channel.gatewayId) {
     const fresh = await getChannel(channel.gatewayId, true)
     if (fresh?.apiKey && !fresh.apiKey.includes('***')) {
       rawKey = fresh.apiKey
@@ -1395,28 +1396,31 @@ function saveChannels() {
   return writeValue('channels', channels.value)
 }
 
-async function exportConfig() {
-  let exportChannels = channels.value
-  if (gatewayApiActive.value) {
-    const remote = await listChannels(true)
-    if (remote) {
-      exportChannels = remote.map(fromDesktopChannel)
+async function exportConfig(containsSecrets = false) {
+  if (!gatewayApiActive.value) {
+    showToast('请先连接本地网关再导出配置')
+    return
+  }
+  const save = async () => {
+    try {
+      const payload = await configRequest('config/export?include_secrets=' + containsSecrets)
+      downloadConfig(payload, containsSecrets)
+      showToast(containsSecrets ? '已导出含密钥备份，请妥善保存' : '已导出脱敏配置（不能直接恢复）')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '导出失败')
     }
   }
-  const payload = {
-    format: 'heigate-config',
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    channels: exportChannels,
+  if (containsSecrets) {
+    confirmModal.value = {
+      title: '导出完整密钥确认',
+      message: '备份文件将包含所有供应商的完整 API Key。',
+      description: '请妥善保存，不要公开或发送给不可信的人。仅导出渠道配置，不包含网关接入密钥、日志和运行状态。',
+      confirmText: '导出含 Key 备份',
+      onConfirm: save,
+    }
+  } else {
+    await save()
   }
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `heigate-config-${new Date().toISOString().slice(0, 10)}.json`
-  anchor.click()
-  URL.revokeObjectURL(url)
-  showToast('配置已导出为 JSON 文件')
 }
 
 function openImport() {
@@ -1943,37 +1947,28 @@ async function importConfig(event: Event) {
   const file = input.files?.[0]
   if (!file) return
   try {
-    const parsed = JSON.parse(await file.text())
-    const isValidFormat = parsed?.format === 'heigate-config'
-    if (!isValidFormat || !Array.isArray(parsed.channels)) throw new Error('invalid config')
-    const imported = parsed.channels.filter((channel: Channel) => channel?.name && channel?.url)
-    if (gatewayApiActive.value) {
-      const remote = await listChannels()
-      const created: ApiChannel[] = []
-      for (const channel of imported) {
-        const saved = await createChannel({ ...toDesktopChannel(channel), apiKey: channel.apiKey ?? '' })
-        if (!saved) {
-          await Promise.all(created.map((channel) => deleteChannel(channel.id)))
-          throw new Error('remote import failed')
+    if (!gatewayApiActive.value) throw new Error('请先连接本地网关再导入')
+    if (file.size > 8 * 1024 * 1024) throw new Error('配置文件不能超过 8 MB')
+    const parsed: unknown = JSON.parse(await file.text())
+    const preview = await configRequest('config/preview', parsed)
+    confirmModal.value = {
+      title: '导入配置预览',
+      message: `将追加 ${preview.channels} 个渠道、${preview.keys} 把 Key。`,
+      description: `不删除或覆盖现有渠道。渠道：${preview.names.join('、')}`,
+      confirmText: '确认追加导入',
+      onConfirm: async () => {
+        try {
+          await configRequest('config/import', parsed)
+          await refreshChannels()
+          activeSection.value = 'channels'
+          showToast('配置导入完成')
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : '导入失败，未提交修改')
         }
-        created.push(saved)
-      }
-      if (remote) {
-        for (const channel of remote) {
-          if (!(await deleteChannel(channel.id))) {
-            throw new Error('remote cleanup failed')
-          }
-        }
-      }
-      await refreshChannels()
-    } else {
-      channels.value = imported
-      await saveChannels()
+      },
     }
-    activeSection.value = 'channels'
-    showToast(`成功导入 ${imported.length} 个渠道`)
-  } catch {
-    showToast('配置文件格式不正确，请确保为有效的 JSON')
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : '配置文件格式不正确')
   } finally {
     input.value = ''
   }
@@ -3552,6 +3547,7 @@ function handleContextMenu(event: MouseEvent) {
               @set-retention="handleSetLogRetention"
               @set-max-count="handleSetLogMaxCount"
               @export-config="exportConfig"
+              @export-secrets="exportConfig(true)"
               @import-config="openImport"
               @clear-workspace="clearWorkspace"
             />
@@ -3573,7 +3569,7 @@ function handleContextMenu(event: MouseEvent) {
 
     <!-- Hidden Input for Import -->
     <div v-if="showKeyManager" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="key-manager-title" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showKeyManager = false)">
-      <ChannelKeyManager :channels="channels" @close="showKeyManager = false; refreshChannels()" />
+      <ChannelKeyManager :channels="channels" @close="showKeyManager = false; refreshChannels()" @changed="refreshChannels()" />
     </div>
 
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
@@ -3704,10 +3700,12 @@ function handleContextMenu(event: MouseEvent) {
             <div class="m26-input-wrapper">
               <input
                 v-model="editChannelKey"
+                :disabled="(editingChannel?.keyCount ?? 1) > 1"
                 :type="showEditKey ? 'text' : 'password'"
                 class="m26-input"
                 placeholder="请输入 API 密钥"
               />
+              <span v-if="(editingChannel?.keyCount ?? 1) > 1" class="text-xs">多 Key 请通过「Key 管理」编辑</span>
               <button
                 type="button"
                 class="m26-input-eye"

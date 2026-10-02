@@ -85,6 +85,7 @@ function injectionLabel(state?: string): string {
           <td>
             <div class="m26-cell-name-box">
               <span class="m26-cell-name" :title="`${c.name}\n协议: ${c.protocol}\n${c.url}`">{{ c.name }}</span>
+              <small v-if="c.keyCount">{{ c.keyCount }} Key · {{ c.keyAvailableCount }} 可用</small>
             </div>
           </td>
 

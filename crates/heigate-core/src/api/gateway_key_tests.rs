@@ -68,6 +68,73 @@ fn request() -> Vec<u8> {
 use axum::response::IntoResponse;
 
 #[tokio::test]
+async fn cancelled_and_expired_streams_are_not_successes() {
+    for expired in [false, true] {
+        let store = Store::open_in_memory().unwrap();
+        let log = Arc::new(Mutex::new(RequestLog::default()));
+        let mut logging = LoggingStream::new(
+            Box::pin(stream::pending()),
+            Arc::new(Mutex::new(StreamTokenTracker::new(0))),
+            log.clone(),
+            store,
+            None,
+            Instant::now(),
+            false,
+        );
+        if expired {
+            logging.deadline = Some(Box::pin(tokio::time::sleep_until(
+                tokio::time::Instant::now(),
+            )));
+            assert!(logging.next().await.unwrap().is_err());
+            assert!(logging.next().await.is_none());
+        }
+        drop(logging);
+        assert_eq!(log.lock().unwrap().status_code, 502);
+        assert!(!log.lock().unwrap().error_message.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn exhausted_healthy_pool_can_fail_over_to_degraded_supplier() {
+    let (gateway, id, calls, _server) = setup("ok").await;
+    let mut backup = gateway.store.get(id).unwrap();
+    backup.id = 0;
+    backup.name = "Degraded backup".into();
+    backup.last_status = "degraded".into();
+    gateway.store.save(&mut backup).unwrap();
+    for key in gateway.store.list_keys(id).unwrap() {
+        gateway
+            .store
+            .patch_key(
+                id,
+                key.id,
+                &crate::store_keys::KeyPatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let response = gateway
+        .forward(
+            GatewayProtocol::Chat,
+            &HeaderMap::new(),
+            request(),
+            &RequestContext::default(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        gateway.store.list_logs(10).unwrap()[0].channel_name,
+        "Degraded backup"
+    );
+}
+
+#[tokio::test]
 async fn stream_error_after_output_never_replays() {
     let (gateway, id, calls, _server) = setup("stream_error").await;
     let response = gateway

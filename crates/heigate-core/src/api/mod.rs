@@ -1,5 +1,6 @@
 //! The local management API (`/api/*`) and the gateway endpoints (`/v1/*`).
 
+pub mod config;
 pub mod forward;
 pub mod gateway;
 pub mod handlers;
