@@ -41,8 +41,9 @@ import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticContent.vue'
 import ChannelModelLatencyContent from '@/components/channels/ChannelModelLatencyContent.vue'
+import ChannelProviderSpeedTestContent from '@/components/channels/ChannelProviderSpeedTestContent.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
-import type { Channel, ChannelFilterStatus, ModelLatencyRow } from '@/components/channels/types'
+import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
 // canonical definition lives in components/channels/types.ts.
 export type { Channel }
@@ -2171,6 +2172,20 @@ const activeModelProviders = computed<ModelProviderSpeedTestItem[]>(() => {
     return score(a) - score(b)
   })
 })
+
+const activeModelProviderRows = computed<ModelProviderSpeedTestRow[]>(() => activeModelProviders.value.map((item) => ({
+  channel: item.channel,
+  upstreamModel: item.upstreamModel,
+  protocolLabel: protocolShortLabel(item.channel.protocol),
+  latencyDisplay: item.latencyDisplay,
+  latencyClass: item.latencyClass,
+  isProbing: item.isProbing,
+  isFailed: item.isFailed,
+  tooltip: item.tooltip,
+  preferred: isFastestProvider(item),
+})))
+
+const activeModelFastestProvider = computed(() => getFastestProviderInfo(activeModelSpeedTestName.value))
 
 function isFastestProvider(item: ModelProviderSpeedTestItem): boolean {
   const healthy = activeModelProviders.value.filter(
@@ -4674,169 +4689,22 @@ function handleContextMenu(event: MouseEvent) {
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, closeModelSpeedTestModal)"
     >
-      <div class="m26-modal-sheet m26-speedtest-modal-sheet" @click.stop>
-        <!-- Header -->
-        <div class="m26-modal-header">
-          <div class="flex items-center gap-3">
-            <div
-              class="m26-model-brand-badge shrink-0"
-              :style="{
-                color: getModelFamily(activeModelSpeedTestName).color,
-                background: getModelFamily(activeModelSpeedTestName).bg,
-                borderColor: getModelFamily(activeModelSpeedTestName).border,
-              }"
-            >
-              <span class="m26-model-brand-dot" :style="{ background: getModelFamily(activeModelSpeedTestName).color }"></span>
-              <span class="m26-model-brand-name whitespace-nowrap">{{ getModelFamily(activeModelSpeedTestName).label }}</span>
-            </div>
-            <div>
-              <div class="flex items-center gap-2">
-                <h3 class="m26-modal-title font-mono">{{ activeModelSpeedTestName }}</h3>
-                <span class="m26-modal-count-pill">
-                  共 {{ activeModelProviders.length }} 家供应商
-                </span>
-                <button
-                  class="m26-model-copy-btn"
-                  @click.stop="copyModelId(activeModelSpeedTestName)"
-                  :title="'复制模型名: ' + activeModelSpeedTestName"
-                >
-                  <svg v-if="copiedModelId !== activeModelSpeedTestName" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                    <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                  </svg>
-                  <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#059669" stroke-width="2.2">
-                    <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                  </svg>
-                  <span>{{ copiedModelId === activeModelSpeedTestName ? '已复制' : '复制' }}</span>
-                </button>
-              </div>
-              <p class="m26-modal-subtitle">
-                同一模型多供应商并发探活 · 检验该模型在各渠道的端到端真实生成响应与延迟梯度
-              </p>
-            </div>
-          </div>
-          <button class="m26-close-btn" aria-label="关闭" @click="closeModelSpeedTestModal">✕</button>
-        </div>
-
-        <!-- Toolbar -->
-        <div class="m26-modal-toolbar">
-          <div class="m26-modal-search">
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="6.5" cy="6.5" r="4.5" />
-              <line x1="10" y1="10" x2="14" y2="14" />
-            </svg>
-            <input
-              v-model="modelSpeedTestQuery"
-              type="text"
-              placeholder="搜索供应商名称、上游别名或接口地址..."
-              class="m26-modal-search-input"
-            />
-          </div>
-
-          <div class="flex items-center gap-2">
-            <div v-if="getFastestProviderInfo(activeModelSpeedTestName)" class="m26-fastest-provider-pill">
-              <span class="m26-fastest-dot"></span>
-              <span>⚡ 最优: {{ getFastestProviderInfo(activeModelSpeedTestName)!.channelName }} (首字 {{ formatLatencySec(getFastestProviderInfo(activeModelSpeedTestName)!.latency) }})</span>
-            </div>
-
-            <button
-              class="m26-action-btn primary"
-              :disabled="isProbingModelProviders"
-              @click="probeAllProvidersForModel(activeModelSpeedTestName)"
-              title="重新对该模型的所有供应商发起并发真实探活"
-            >
-              <svg v-if="!isProbingModelProviders" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
-              </svg>
-              <span v-else class="m26-spin-dot"></span>
-              <span>{{ isProbingModelProviders ? '全渠道并发探活中...' : '重新探活全部供应商' }}</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Body: Providers List -->
-        <div class="m26-modal-body m26-speedtest-body">
-          <div v-if="activeModelProviders.length > 0" class="m26-model-grid">
-            <div
-              v-for="(p, idx) in activeModelProviders"
-              :key="p.channel.gatewayId || p.channel.name"
-              class="m26-model-item-card"
-              :class="{ 'is-preferred': isFastestProvider(p) }"
-            >
-              <div class="m26-model-item-info">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="m26-model-idx">#{{ idx + 1 }}</span>
-                  <span class="m26-channel-name font-semibold">{{ p.channel.name }}</span>
-                  <span class="m26-proto-pill" :class="p.channel.protocol">{{ protocolShortLabel(p.channel.protocol) }}</span>
-
-                  <span v-if="isFastestProvider(p)" class="m26-tag-preferred">
-                    ⚡ 优选首选 (网关优先调度)
-                  </span>
-                  <span v-if="!p.channel.enabled" class="m26-tag-disabled">已暂停</span>
-                </div>
-
-                <div class="flex items-center gap-2 mt-1 text-xs text-slate-500 dark:text-slate-400 flex-wrap">
-                  <span class="m26-speedtest-alias-tag">
-                    上游别名: <code class="font-mono text-indigo-600 dark:text-indigo-400">{{ p.upstreamModel }}</code>
-                  </span>
-                  <span class="m26-model-ch-url" :title="p.channel.url">{{ p.channel.url }}</span>
-                </div>
-              </div>
-
-              <div class="m26-model-item-actions">
-                <!-- Latency Badge -->
-                <div
-                  class="m26-model-lat-pill"
-                  :class="[p.latencyClass, { 'has-err-link': p.isFailed }]"
-                  :title="p.tooltip"
-                  @click="p.isFailed ? openModelErrorDetail(p.channel, p.upstreamModel) : null"
-                >
-                  <span class="lat-dot"></span>
-                  <span class="lat-text">{{ p.latencyDisplay }}</span>
-                  <svg v-if="p.isFailed" class="lat-view-err" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                    <circle cx="8" cy="8" r="6" />
-                    <path d="M8 4.5v4M8 11.3v.2" />
-                  </svg>
-                </div>
-
-                <!-- Test single provider button -->
-                <button
-                  class="m26-btn-micro probe"
-                  :disabled="p.isProbing"
-                  @click="probeSingleModel(p.channel, p.upstreamModel)"
-                  title="单独重新探活此供应商"
-                >
-                  <span v-if="p.isProbing" class="m26-spin-dot"></span>
-                  <span>{{ p.isProbing ? '探活中' : '探活' }}</span>
-                </button>
-
-                <!-- Diagnostic details button -->
-                <button
-                  class="m26-btn-icon"
-                  @click="openModelErrorDetail(p.channel, p.upstreamModel)"
-                  title="查看此渠道完整诊断信息"
-                >
-                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <circle cx="8" cy="8" r="6" />
-                    <path d="M8 7v4M8 5h.01" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-          <div v-else class="m26-empty-state py-8 text-center text-slate-400">
-            <p v-if="modelSpeedTestQuery">未找到匹配 “{{ modelSpeedTestQuery }}” 的供应商渠道</p>
-            <p v-else>暂无支持该模型的供应商渠道</p>
-          </div>
-        </div>
-
-        <!-- Footer -->
-        <div class="m26-modal-footer">
-          <span class="m26-modal-hint text-xs text-slate-400">
-            💡 网关调度规则：本地请求该模型时，HeiGate 将首选上方延迟最低的健康供应商（带 ⚡ 优选首选 标识）。若单次调用遇到异常或限流，将执行 1 次就地快速重试，仍失败则自动无缝轮转至次优供应商，全方位保障高可用。
-          </span>
-        </div>
-      </div>
+      <ChannelProviderSpeedTestContent
+        v-if="activeModelSpeedTestName"
+        :model-name="activeModelSpeedTestName"
+        :model-family="getModelFamily(activeModelSpeedTestName)"
+        :providers="activeModelProviderRows"
+        :query="modelSpeedTestQuery"
+        :fastest="activeModelFastestProvider"
+        :probing-all="isProbingModelProviders"
+        :copied="copiedModelId === activeModelSpeedTestName"
+        @update:query="modelSpeedTestQuery = $event"
+        @copy-model="copyModelId(activeModelSpeedTestName)"
+        @probe-all="probeAllProvidersForModel(activeModelSpeedTestName)"
+        @probe-provider="probeSingleModel($event.channel, $event.upstreamModel)"
+        @open-diagnostic="openModelErrorDetail($event.channel, $event.upstreamModel)"
+        @close="closeModelSpeedTestModal"
+      />
     </div>
 
     <!-- MODAL: MODEL ALIASES DETAIL -->

@@ -32,6 +32,18 @@ export type ModelLatencyRow = {
   copied: boolean
 }
 
+export type ModelProviderSpeedTestRow = {
+  channel: Channel
+  upstreamModel: string
+  protocolLabel: string
+  latencyDisplay: string
+  latencyClass: string
+  isProbing: boolean
+  isFailed: boolean
+  tooltip: string
+  preferred: boolean
+}
+
 export type Channel = {
   name: string
   url: string
