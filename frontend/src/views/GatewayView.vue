@@ -42,6 +42,7 @@ import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticContent.vue'
 import ChannelModelLatencyContent from '@/components/channels/ChannelModelLatencyContent.vue'
 import ChannelProviderSpeedTestContent from '@/components/channels/ChannelProviderSpeedTestContent.vue'
+import ChannelInjectionContent from '@/components/channels/ChannelInjectionContent.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
@@ -1206,26 +1207,6 @@ function openModelInjectionDetail(channel: Channel, modelName: string) {
   injectionChannel.value = channel
   injectionResults.value = [r]
   showInjectionModal.value = true
-}
-
-function modelInjectionLabel(r: ModelInjectionResult): string {
-  switch (r.state) {
-    case 'clean': return '输入正常'
-    case 'suspected': return `输入偏高 · ${r.prompt_tokens} tok`
-    case 'detected': return `显著偏高 · ${r.prompt_tokens} tok`
-    case 'error': return '失败'
-    default: return '未知'
-  }
-}
-
-function injectionStateLabel(c: Channel): string {
-  switch (c.injectionState) {
-    case 'clean': return '输入正常'
-    case 'suspected': return `输入偏高 · ${c.injectionTokens ?? '?'} tok`
-    case 'detected': return `显著偏高 · ${c.injectionTokens ?? '?'} tok`
-    case 'error': return '检测失败'
-    default: return '未检测'
-  }
 }
 
 function openInjectionModal(channel: Channel) {
@@ -4307,148 +4288,18 @@ function handleContextMenu(event: MouseEvent) {
 
     <!-- MODAL: INJECTION CHECK (Redesigned) -->
     <div v-if="showInjectionModal" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-1" class="m26-modal-backdrop m26-inject-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showInjectionModal = false)">
-      <div class="m26-modal-sheet m26-inject-sheet">
-        <div class="m26-modal-header">
-          <div class="flex items-center gap-2.5">
-            <h3 id="m26-modal-title-1" class="m26-modal-title">注入检测 — {{ injectionChannel?.name }}</h3>
-            <span class="m26-inject-pill" :class="injectionChannel?.injectionState ?? 'unknown'">
-              {{ injectionStateLabel(injectionChannel!) }}
-            </span>
-          </div>
-          <button class="m26-close-btn" aria-label="关闭" @click="showInjectionModal = false">✕</button>
-        </div>
-
-        <div class="m26-modal-body m26-inject-body">
-          <div class="m26-inject-summary">
-            <span class="m26-inject-meta">
-              {{ injectionChannel?.injectionCheckedAt
-                ? `上次检测时间: ${injectionChannel.injectionCheckedAt.slice(0, 19).replace('T', ' ')}`
-                : '该渠道尚未执行过注入检测' }}
-            </span>
-          </div>
-          <div class="m26-inject-desc-box">
-            <p class="m26-inject-desc">
-              检测会发送真实请求，并参考最小提问的输入 token 数（常见模板开销约 20–80）。超出参考范围只代表输入统计偏高，不能单独证明注入；明显超出阈值时会尝试提取提示内容，结果受模型回答影响。
-            </p>
-          </div>
-
-          <div v-if="injectionResults.length" class="m26-inject-list">
-            <div
-              v-for="r in injectionResults"
-              :key="r.model"
-              class="m26-inject-row"
-              :class="{ expanded: r.content && (r.state === 'detected' || r.state === 'suspected') }"
-            >
-              <div class="m26-inject-row-head">
-                <div class="flex items-center gap-2 min-w-0 flex-1">
-                  <span class="m26-inject-model" :title="r.model">{{ r.model }}</span>
-                  <button
-                    class="m26-model-copy-btn"
-                    title="复制模型名称"
-                    @click.stop="copyModelId(r.model)"
-                  >
-                    <svg v-if="copiedModelId !== r.model" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                      <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                    </svg>
-                    <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2">
-                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                    </svg>
-                    <span>{{ copiedModelId === r.model ? '已复制' : '复制' }}</span>
-                  </button>
-                </div>
-                <div class="flex items-center gap-2">
-                  <span v-if="r.prompt_tokens" class="m26-tokens-pill">
-                    {{ r.prompt_tokens }} tokens
-                  </span>
-                  <span class="m26-inject-pill" :class="r.state">{{ modelInjectionLabel(r) }}</span>
-                </div>
-              </div>
-
-              <div
-                v-if="r.content && (r.state === 'detected' || r.state === 'suspected')"
-                class="m26-inject-content-container"
-              >
-                <div class="m26-inject-content-toolbar">
-                  <div class="flex items-center gap-1.5">
-                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <path d="M2.5 3.5h11M2.5 6.5h11M2.5 9.5h7M2.5 12.5h5" />
-                    </svg>
-                    <span class="m26-inject-content-title">模型返回的提示词内容（需人工判断）:</span>
-                  </div>
-                  <button
-                    class="m26-model-copy-btn"
-                    title="复制完整注入 Prompt 内容"
-                    @click.stop="copyInjectionContent(r.content)"
-                  >
-                    <svg v-if="copiedInjectionText !== r.content" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                      <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                    </svg>
-                    <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#059669" stroke-width="2.2">
-                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                    </svg>
-                    <span>{{ copiedInjectionText === r.content ? '已复制 Prompt' : '复制 Prompt' }}</span>
-                  </button>
-                </div>
-                <pre class="m26-inject-content">{{ r.content }}</pre>
-              </div>
-              <div v-else-if="r.state === 'clean'" class="m26-inject-row-note">
-                最小探针的输入 token 统计为 {{ r.prompt_tokens }}，处于正常模板参考范围内。
-              </div>
-              <div v-else-if="r.message" class="m26-inject-row-note">{{ r.message }}</div>
-            </div>
-          </div>
-          <div v-else class="m26-inject-empty">
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" class="m26-empty-shield-icon">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-            <p>该渠道尚未执行注入检测，点击下方按钮开始探测。</p>
-          </div>
-        </div>
-
-        <!-- FIXED FOOTER -->
-        <div class="m26-modal-footer m26-inject-footer">
-          <div class="m26-inject-footer-left">
-            <span v-if="isCheckingInjection" class="m26-inject-running-state">
-              <span class="m26-spin-dot"></span>
-              <span>正在向上游探测系统提示词注入，请稍候...</span>
-            </span>
-            <span v-else class="m26-inject-tip">
-              真实上游请求 · 输入 token 数仅作参考，建议优先检测主模型
-            </span>
-          </div>
-          <div class="m26-inject-footer-actions">
-            <button
-              class="m26-inject-btn secondary"
-              :disabled="isCheckingInjection"
-              @click="runInjectionCheck(false)"
-              title="仅检测主模型（推荐，速度快且省 Token）"
-            >
-              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                <circle cx="8" cy="8" r="6" />
-                <circle cx="8" cy="8" r="2" />
-              </svg>
-              <span>{{ isCheckingInjection ? '检测中...' : '检测主模型' }}</span>
-            </button>
-            <button
-              class="m26-inject-btn primary"
-              :disabled="isCheckingInjection"
-              @click="runInjectionCheck(true)"
-              title="逐一检测全部模型（耗时可能较长）"
-            >
-              <span v-if="isCheckingInjection" class="m26-spin-dot white"></span>
-              <svg v-else viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                <rect x="2" y="2" width="5" height="5" rx="1" />
-                <rect x="9" y="2" width="5" height="5" rx="1" />
-                <rect x="2" y="9" width="5" height="5" rx="1" />
-                <rect x="9" y="9" width="5" height="5" rx="1" />
-              </svg>
-              <span>{{ isCheckingInjection ? '全量检测中...' : '检测全部模型' }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
+      <ChannelInjectionContent
+        :channel="injectionChannel"
+        :results="injectionResults"
+        :checking="isCheckingInjection"
+        :copied-model-id="copiedModelId"
+        :copied-injection-text="copiedInjectionText"
+        @copy-model="copyModelId"
+        @copy-content="copyInjectionContent"
+        @check-primary="runInjectionCheck(false)"
+        @check-all="runInjectionCheck(true)"
+        @close="showInjectionModal = false"
+      />
     </div>
 
     <!-- MODAL: ADD CHANNEL -->
