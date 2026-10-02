@@ -269,7 +269,7 @@ impl Store {
         if let Some(position) = patch.position {
             tx.execute(
                 "UPDATE channel_keys SET position=? WHERE id=?",
-                params![position.max(0), id],
+                params![position, id],
             )?;
         }
         tx.commit()?;

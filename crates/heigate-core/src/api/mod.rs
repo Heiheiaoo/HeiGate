@@ -3,6 +3,7 @@
 pub mod forward;
 pub mod gateway;
 pub mod handlers;
+pub mod keys;
 pub mod policy;
 
 pub use gateway::{Gateway, GatewayError, RequestContext};

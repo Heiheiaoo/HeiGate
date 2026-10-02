@@ -18,6 +18,7 @@ const emit = defineEmits<{
   (e: 'update:filterStatus', val: ChannelFilterStatus): void
   (e: 'update:viewMode', val: ChannelViewMode): void
   (e: 'add-channel'): void
+  (e: 'manage-keys'): void
 }>()
 
 const searchInputRef = ref<HTMLInputElement | null>(null)
@@ -148,6 +149,7 @@ defineExpose({
 
     <!-- Right: Actions (Batch Probe, Add Channel) -->
     <div class="m26-ch-toolbar-right">
+      <button class="m26-glass-btn" @click="emit('manage-keys')">Key 管理</button>
       <button
         class="m26-ch-btn m26-ch-btn-primary icon-only"
         title="新建渠道"

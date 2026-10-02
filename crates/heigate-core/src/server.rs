@@ -98,6 +98,14 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         )
         .route("/channels/{id}/probe", post(handlers::probe_channel))
         .route(
+            "/channels/{id}/keys",
+            get(crate::api::keys::list).post(crate::api::keys::add),
+        )
+        .route(
+            "/channels/{id}/keys/{key_id}",
+            put(crate::api::keys::update).delete(crate::api::keys::delete),
+        )
+        .route(
             "/channels/{id}/injection-check",
             post(handlers::injection_check),
         )

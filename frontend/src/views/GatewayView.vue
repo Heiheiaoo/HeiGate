@@ -36,6 +36,7 @@ import {
 } from '@/services/modelNaming'
 import { vFocusTrap, openModalCount } from '@/directives/focusTrap'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
+import ChannelKeyManager from '@/components/channels/ChannelKeyManager.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
@@ -97,6 +98,7 @@ function checkTabsFit() {
 }
 const showAddChannel = ref(false)
 const showEditChannel = ref(false)
+const showKeyManager = ref(false)
 const editingChannel = ref<Channel | null>(null)
 const showApiKey = ref(false)
 const channelSearch = ref('')
@@ -3142,6 +3144,7 @@ function handleContextMenu(event: MouseEvent) {
             @update:filter-status="channelStatusFilter = $event"
             @update:view-mode="setChannelViewMode($event)"
             @add-channel="openAddChannel"
+            @manage-keys="showKeyManager = true"
           />
 
           <!-- Card Grid View -->
@@ -3562,6 +3565,10 @@ function handleContextMenu(event: MouseEvent) {
     </main>
 
     <!-- Hidden Input for Import -->
+    <div v-if="showKeyManager" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="key-manager-title" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showKeyManager = false)">
+      <ChannelKeyManager :channels="channels" @close="showKeyManager = false" />
+    </div>
+
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
 
     <!-- MODAL: INJECTION CHECK (Redesigned) -->
