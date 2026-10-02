@@ -44,6 +44,25 @@ export type ModelProviderSpeedTestRow = {
   preferred: boolean
 }
 
+export type AggregateModelChannelDetail = {
+  name: string
+  status: ChannelStatus
+  latency: number | null
+  protocol: string
+  upstreamModel: string
+}
+
+export type AggregateModelAliasItem = {
+  alias: string
+  channels: AggregateModelChannelDetail[]
+}
+
+export type AggregateModelView = {
+  name: string
+  aliases: string[]
+  providerCount: number
+}
+
 export type Channel = {
   name: string
   url: string

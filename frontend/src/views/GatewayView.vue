@@ -43,6 +43,7 @@ import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticCon
 import ChannelModelLatencyContent from '@/components/channels/ChannelModelLatencyContent.vue'
 import ChannelProviderSpeedTestContent from '@/components/channels/ChannelProviderSpeedTestContent.vue'
 import ChannelInjectionContent from '@/components/channels/ChannelInjectionContent.vue'
+import ChannelModelAliasContent from '@/components/channels/ChannelModelAliasContent.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
@@ -672,7 +673,15 @@ const filteredModalAliases = computed(() => {
     const matchedChannels = enabledChannels.value.filter((ch) => ch.modelNames?.includes(alias))
     return {
       alias,
-      channels: matchedChannels.length > 0 ? matchedChannels : m.channelDetails.filter((c) => c.upstreamModel === alias),
+      channels: matchedChannels.length > 0
+        ? matchedChannels.map((ch) => ({
+          name: ch.name,
+          status: ch.status,
+          latency: ch.ttft ?? ch.latency,
+          protocol: ch.protocol,
+          upstreamModel: alias,
+        }))
+        : m.channelDetails.filter((c) => c.upstreamModel === alias),
     }
   })
 
@@ -4565,283 +4574,24 @@ function handleContextMenu(event: MouseEvent) {
       @mousedown="onBackdropMouseDown"
       @click="handleBackdropClick($event, closeAliasModal)"
     >
-      <div class="m26-modal-sheet m26-aliases-modal-sheet">
-        <div class="m26-modal-header">
-          <div class="flex items-center gap-3">
-            <span
-              class="m26-model-family-badge"
-              :style="{
-                color: getModelFamily(activeAliasModalModel.name).color,
-                background: getModelFamily(activeAliasModalModel.name).bg,
-                borderColor: getModelFamily(activeAliasModalModel.name).border,
-              }"
-            >
-              <span class="m26-badge-dot" :style="{ background: getModelFamily(activeAliasModalModel.name).color }"></span>
-              <span>{{ getModelFamily(activeAliasModalModel.name).label }}</span>
-            </span>
-            <div>
-              <div class="flex items-center gap-2">
-                <h3 class="m26-modal-title font-mono">{{ activeAliasModalModel.name }}</h3>
-                <button
-                  class="m26-model-copy-btn"
-                  @click.stop="copyModelId(activeAliasModalModel.name)"
-                  :title="'复制模型名: ' + activeAliasModalModel.name"
-                >
-                  <svg v-if="copiedModelId !== activeAliasModalModel.name" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                    <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                  </svg>
-                  <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#059669" stroke-width="2.2">
-                    <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                  </svg>
-                  <span>{{ copiedModelId === activeAliasModalModel.name ? '已复制' : '复制' }}</span>
-                </button>
-              </div>
-              <p class="m26-modal-subtitle">
-                统一网关模型 · 聚合 {{ activeAliasModalModel.aliases.length }} 个上游别名 · 共 {{ activeAliasModalModel.providerCount }} 个供货渠道
-              </p>
-            </div>
-          </div>
-          <button class="m26-close-btn" aria-label="关闭" @click="closeAliasModal">✕</button>
-        </div>
-
-        <div class="m26-modal-toolbar">
-          <div class="m26-modal-search">
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="6.5" cy="6.5" r="4.5" />
-              <line x1="10" y1="10" x2="14" y2="14" />
-            </svg>
-            <input
-              v-model="aliasModalSearch"
-              type="text"
-              placeholder="搜索别名或渠道名称..."
-              class="m26-modal-search-input"
-            />
-          </div>
-          <div class="flex items-center gap-2">
-            <button
-              class="m26-action-btn secondary"
-              @click="openModelSpeedTestFor(activeAliasModalModel.name)"
-              title="并发探活此模型全部供应商的可用性与延迟"
-            >
-              <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
-                <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
-              </svg>
-              <span>探活全部供应商</span>
-            </button>
-            <button
-              class="m26-action-btn secondary"
-              @click="openClassifyDialog('', activeAliasModalModel.name)"
-              title="将其他渠道模型手动归并到此聚合模型"
-            >
-              <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M8 3v10M3 8h10" />
-              </svg>
-              <span>归入新别名</span>
-            </button>
-            <button
-              v-if="activeAliasModalModel.aliases.length > 0"
-              class="m26-action-btn secondary"
-              @click="copyAllAliases(activeAliasModalModel)"
-              title="复制全部上游别名（每行一个）"
-            >
-              <svg v-if="copiedAliasText !== '__ALL__'" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-              </svg>
-              <svg v-else viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="#059669" stroke-width="2.2">
-                <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-              </svg>
-              <span>{{ copiedAliasText === '__ALL__' ? '已复制全部' : '复制全部别名' }}</span>
-            </button>
-          </div>
-        </div>
-
-        <div class="m26-modal-body m26-alias-modal-body">
-          <!-- Guide -->
-          <div class="m26-alias-guide-card">
-            <div class="m26-alias-guide-header">
-              <div class="flex items-center gap-2">
-                <span class="m26-guide-badge">外部调用规范</span>
-                <span class="text-xs text-slate-500">外部应用调用此聚合模型时请求参数填写：</span>
-              </div>
-            </div>
-            <div class="m26-alias-guide-code font-mono">
-              <span class="text-indigo-600 font-semibold">"model"</span>: <span class="text-emerald-700">"{{ activeAliasModalModel.name }}"</span>
-            </div>
-          </div>
-
-          <!-- Aliases Breakdown Section -->
-          <div class="m26-alias-section">
-            <div class="m26-alias-section-head">
-              <span class="m26-alias-section-title">
-                聚合的上游原始别名 ({{ filteredModalAliases.length }})
-              </span>
-              <span class="text-xs text-slate-400">各渠道实际声明的上游模型标识</span>
-            </div>
-
-            <div v-if="filteredModalAliases.length === 0" class="m26-empty-alias-tip">
-              <span v-if="activeAliasModalModel.aliases.length === 0">
-                该模型无额外上游别名，所有提供渠道均直接使用标准名 <code>{{ activeAliasModalModel.name }}</code>。
-              </span>
-              <span v-else>未找到符合过滤条件的上游别名。</span>
-            </div>
-
-            <div v-else class="m26-alias-items-grid">
-              <div
-                v-for="aliasItem in filteredModalAliases"
-                :key="aliasItem.alias"
-                class="m26-alias-item-card"
-              >
-                <div class="m26-alias-card-top">
-                  <div class="flex items-center gap-2">
-                    <div class="m26-alias-name font-mono" :title="aliasItem.alias">
-                      {{ aliasItem.alias }}
-                    </div>
-                    <span
-                      v-if="customModelMappings[aliasItem.alias] || customModelMappings[aliasItem.alias.toLowerCase()]"
-                      class="m26-custom-mapping-badge"
-                      title="由用户手动添加的归类映射规则"
-                    >
-                      手动归类
-                    </span>
-                  </div>
-                  <div class="flex items-center gap-1">
-                    <button
-                      class="m26-alias-copy-btn"
-                      @click.stop="copyAlias(aliasItem.alias)"
-                      :title="'复制别名: ' + aliasItem.alias"
-                    >
-                      <svg v-if="copiedAliasText !== aliasItem.alias" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                        <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                      </svg>
-                      <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2">
-                        <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                      </svg>
-                      <span>{{ copiedAliasText === aliasItem.alias ? '已复制' : '复制' }}</span>
-                    </button>
-                    <button
-                      v-if="customModelMappings[aliasItem.alias] || customModelMappings[aliasItem.alias.toLowerCase()]"
-                      class="m26-alias-unlink-btn"
-                      @click.stop="handleRemoveCustomMapping(aliasItem.alias)"
-                      title="解除手动归类，恢复为独立模型"
-                    >
-                      解除
-                    </button>
-                  </div>
-                </div>
-
-                <div class="m26-alias-providers-row">
-                  <span class="m26-alias-prov-label">对应供货渠道：</span>
-                  <div class="m26-alias-prov-chips">
-                    <span
-                      v-for="ch in aliasItem.channels"
-                      :key="ch.name"
-                      class="m26-alias-prov-chip"
-                      :class="ch.status"
-                    >
-                      <span class="prov-dot" :class="ch.status"></span>
-                      <span>{{ ch.name }}</span>
-                      <span v-if="ch.latency" class="ch-lat-num">{{ formatLatencySec(ch.latency) }}</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Channel Dispatch Mapping Table -->
-          <div class="m26-alias-section">
-            <div class="m26-alias-section-head">
-              <span class="m26-alias-section-title">
-                各渠道调用与重写映射 ({{ filteredModalChannelDetails.length }})
-              </span>
-              <span class="text-xs text-slate-400">HeiGate 路由到具体渠道时的实时模型转发与重写策略</span>
-            </div>
-
-            <div class="m26-mapping-table-wrapper">
-              <table class="m26-mapping-table">
-                <thead>
-                  <tr>
-                    <th>渠道名称</th>
-                    <th>实际转发上游模型</th>
-                    <th>重写策略</th>
-                    <th>状态与延迟</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="ch in filteredModalChannelDetails"
-                    :key="ch.name"
-                  >
-                    <td>
-                      <div class="flex items-center gap-1.5 font-medium text-slate-800">
-                        <span class="prov-dot" :class="ch.status"></span>
-                        <span>{{ ch.name }}</span>
-                      </div>
-                    </td>
-                    <td>
-                      <div class="flex items-center gap-1.5 font-mono text-xs text-indigo-700 font-semibold">
-                        <span>{{ ch.upstreamModel }}</span>
-                        <button
-                          class="m26-table-copy-icon"
-                          @click.stop="copyAlias(ch.upstreamModel)"
-                          :title="'复制上游模型名: ' + ch.upstreamModel"
-                        >
-                          <svg v-if="copiedAliasText !== ch.upstreamModel" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                            <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                          </svg>
-                          <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2">
-                            <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                          </svg>
-                        </button>
-                      </div>
-                    </td>
-                    <td>
-                      <span
-                        v-if="ch.upstreamModel !== activeAliasModalModel.name"
-                        class="m26-mapping-chip rewrite"
-                        title="HeiGate 会自动重写模型名为该渠道期望的别名"
-                      >
-                        ↳ 别名重写
-                      </span>
-                      <span
-                        v-else
-                        class="m26-mapping-chip direct"
-                        title="无需别名映射，直接以同名模型请求"
-                      >
-                        ✓ 同名直通
-                      </span>
-                    </td>
-                    <td>
-                      <div class="flex items-center gap-1.5 text-xs text-slate-600">
-                        <span class="m26-status-text" :class="ch.status">
-                          {{ ch.status === 'healthy' ? '正常' : ch.status === 'degraded' ? '延迟较高' : '离线' }}
-                        </span>
-                        <span v-if="ch.latency" class="font-mono text-slate-400">({{ formatLatencySec(ch.latency) }})</span>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <div class="m26-modal-footer">
-          <div class="m26-modal-tip text-xs text-slate-400">
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-              <circle cx="8" cy="8" r="7" />
-              <line x1="8" y1="7" x2="8" y2="11" />
-              <circle cx="8" cy="4.5" r="0.7" fill="currentColor" />
-            </svg>
-            <span>HeiGate 会在分发调度时自动将统一模型名映射为上游别名，实现多渠道平滑无感负载均衡与故障熔断顺延。</span>
-          </div>
-          <button class="m26-action-btn" @click="closeAliasModal">关闭</button>
-        </div>
-      </div>
+      <ChannelModelAliasContent
+        v-if="activeAliasModalModel"
+        :model="activeAliasModalModel"
+        :family="getModelFamily(activeAliasModalModel.name)"
+        :aliases="filteredModalAliases"
+        :channel-details="filteredModalChannelDetails"
+        :search="aliasModalSearch"
+        :copied-text="copiedAliasText"
+        :mapped-aliases="customModelMappings"
+        @update:search="aliasModalSearch = $event"
+        @copy-model="copyModelId(activeAliasModalModel.name)"
+        @copy-aliases="copyAllAliases(activeAliasModalModel)"
+        @copy-alias="copyAlias"
+        @remove-mapping="handleRemoveCustomMapping"
+        @open-speed-test="openModelSpeedTestFor(activeAliasModalModel.name)"
+        @open-classify="openClassifyDialog('', activeAliasModalModel.name)"
+        @close="closeAliasModal"
+      />
     </div>
 
     <!-- MODAL: QUICK MODEL CLASSIFY -->
