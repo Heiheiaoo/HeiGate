@@ -39,6 +39,7 @@ import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
+import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticContent.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
@@ -1891,71 +1892,9 @@ const activeDiagnosticChannel = ref<Channel | null>(null)
 function openChannelDiagnostic(c: Channel) {
   activeDiagnosticChannel.value = c
 }
-
-function formatErrorSummary(rawError?: string): string {
-  if (!rawError) return '未知异常'
-  if (rawError.includes('404')) {
-    if (rawError.includes('model route not found') || rawError.includes('NOT_FOUND')) {
-      return 'HTTP 404: 上游模型路由不存在 (NOT_FOUND)'
-    }
-    return 'HTTP 404: 目标端点或模型不存在 (Not Found)'
-  }
-  if (rawError.includes('401')) {
-    return 'HTTP 401: API Key 鉴权失败，客户端未授权 (UNAUTHENTICATED)'
-  }
-  if (rawError.includes('429')) {
-    return 'HTTP 429: 上游超频限流或账户额度耗尽 (Rate limit / Quota exceeded)'
-  }
-  if (rawError.includes('timeout') || rawError.includes('deadline')) {
-    return '网络请求超时: 上游未在规定时间内返回响应'
-  }
-  if (rawError.includes('connection refused')) {
-    return '连接被拒绝: 目标服务器端口未开放或防火墙阻拦'
-  }
-  return rawError.length > 90 ? rawError.slice(0, 90) + '...' : rawError
-}
-
-function extractErrorCode(rawError?: string): string {
-  if (!rawError) return 'ERROR'
-  if (rawError.includes('404')) return 'HTTP 404'
-  if (rawError.includes('401')) return 'HTTP 401'
-  if (rawError.includes('429')) return 'HTTP 429'
-  if (rawError.includes('500')) return 'HTTP 500'
-  if (rawError.includes('502')) return 'HTTP 502'
-  if (rawError.includes('504')) return 'HTTP 504'
-  if (rawError.includes('timeout')) return 'TIMEOUT'
-  return 'FAIL'
-}
-
-type TroubleshootingAdvice = {
-  title: string
-  detail: string
-}
-
-function getTroubleshootingAdvice(c: Channel): TroubleshootingAdvice[] {
-  const err = c.lastError || ''
-  const tips: TroubleshootingAdvice[] = []
-  if (err.includes('404')) {
-    tips.push({ title: '核对探活主模型', detail: `上游可能未开通当前主模型（${c.primaryModel || c.modelNames?.[0] || '未知'}），或者官方已经迭代该版本。` })
-    tips.push({ title: '检查 Base URL 格式', detail: `当前为 ${c.url}。请确认该地址是否缺少或多加了版本路径（例如 /v1）。` })
-  } else if (err.includes('401')) {
-    tips.push({ title: '检查 API 密钥', detail: '上游返回未授权。请确认 API Key 是否正确、前后有无多余空格，以及该 Key 是否仍然有效。' })
-    tips.push({ title: '检查 Key 权限与分组', detail: '部分 OneAPI、NewAPI 或中转服务要求令牌绑定对应模型或分组后才能调用。' })
-  } else if (err.includes('429')) {
-    tips.push({ title: '检查账号额度', detail: '上游返回并发或配额超限，请登录服务商控制台查看余额和频率限制。' })
-    tips.push({ title: '调大探活周期', detail: '将探活设置为仅手动或更长周期，避免探活本身占用频控配额。' })
-  } else if (err.includes('timeout') || err.includes('deadline')) {
-    tips.push({ title: '检查本地网络与代理', detail: `当前计算机连接 ${c.url} 超时，请确认网络和代理配置。` })
-  } else {
-    tips.push({ title: '查看原始报错信息', detail: '参考下方上游完整返回内容，排查服务商给出的具体错误原因。' })
-  }
-  tips.push({ title: '修改并重试', detail: '可以直接修改渠道模型或 Key，保存后重新检测验证。' })
-  return tips
-}
-
-function copyDiagnosticRaw() {
-  if (!activeDiagnosticChannel.value?.lastError) return
-  navigator.clipboard.writeText(activeDiagnosticChannel.value.lastError).then(() => {
+function copyDiagnosticRaw(rawError: string) {
+  if (!rawError) return
+  navigator.clipboard.writeText(rawError).then(() => {
     showToast('已复制完整报错数据到剪贴板')
   })
 }
@@ -5528,62 +5467,10 @@ function handleContextMenu(event: MouseEvent) {
           <button class="m26-close-btn" aria-label="关闭" @click="activeDiagnosticChannel = null">✕</button>
         </div>
 
-        <div class="m26-modal-body m26-diagnostic-body">
-          <!-- 1. Diagnostic Summary Card -->
-          <div class="m26-diag-card danger">
-            <div class="m26-diag-card-title">
-              <span class="m26-diag-dot danger"></span>
-              <span>故障摘要</span>
-              <span class="m26-diag-code-pill">{{ extractErrorCode(activeDiagnosticChannel.lastError) }}</span>
-            </div>
-            <div class="m26-diag-main-msg">
-              {{ formatErrorSummary(activeDiagnosticChannel.lastError) }}
-            </div>
-          </div>
-
-          <!-- 2. Request Details Grid -->
-          <div class="m26-diag-meta-grid">
-            <div class="m26-diag-meta-item">
-              <span class="label">探活主模型</span>
-              <span class="value font-mono">{{ activeDiagnosticChannel.modelNames?.[0] || '默认模型' }}</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">接口协议</span>
-              <span class="value font-mono">{{ activeDiagnosticChannel.protocol }}</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">上游返回耗时</span>
-              <span class="value font-mono">{{ activeDiagnosticChannel.latency ? formatLatencySec(activeDiagnosticChannel.latency) : '超时' }}</span>
-            </div>
-            <div class="m26-diag-meta-item">
-              <span class="label">最近检测时间</span>
-              <span class="value">{{ activeDiagnosticChannel.lastCheck }}</span>
-            </div>
-          </div>
-
-          <!-- 3. Smart Advice List -->
-          <div class="m26-diag-card advice">
-            <div class="m26-diag-card-title">
-              <span class="m26-diag-dot info"></span>
-              <span>智能排查与修复建议</span>
-            </div>
-            <div class="m26-diag-advice-list">
-              <div v-for="(tip, i) in getTroubleshootingAdvice(activeDiagnosticChannel)" :key="i" class="m26-diag-tip-item">
-                <span class="tip-num">{{ i + 1 }}</span>
-                <span class="tip-txt"><strong>{{ tip.title }}</strong>：{{ tip.detail }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 4. Raw Upstream Response Code Section -->
-          <div class="m26-diag-raw-section">
-            <div class="m26-diag-raw-header">
-              <span class="label">上游原始回包数据 (Raw Response)</span>
-              <button class="m26-text-btn" @click="copyDiagnosticRaw">复制完整报错</button>
-            </div>
-            <pre class="m26-diag-raw-code font-mono text-xs"><code>{{ activeDiagnosticChannel.lastError || '无原始回包' }}</code></pre>
-          </div>
-        </div>
+        <ChannelDiagnosticContent
+          :channel="activeDiagnosticChannel"
+          @copy-raw="copyDiagnosticRaw"
+        />
 
         <div class="m26-modal-footer">
           <button class="m26-glass-btn" @click="openEditChannelFromDiag(activeDiagnosticChannel)">

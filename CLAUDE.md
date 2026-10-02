@@ -112,7 +112,7 @@ git tag v1.0.0 && git push origin v1.0.0
 ## 已知待办
 
 - 未使用 Apple Developer ID / Windows 代码签名证书，首次打开需要用户手动放行
-- 前端只有 API 层的测试，UI 交互没有测试覆盖
+- 已覆盖渠道工具栏、模型管理、焦点陷阱、日志详情和诊断内容组件；完整 GatewayView 页面级交互仍缺少测试
 - `GatewayView.vue` 仍然较大；新增独立交互时优先继续拆到对应功能组件
 - 探活和网关目前只支持 Anthropic 和 OpenAI 两种 provider，Gemini 等需要新增 adapter
 
