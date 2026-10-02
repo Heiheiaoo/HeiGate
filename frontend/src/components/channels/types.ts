@@ -15,6 +15,23 @@ export type ModelHealth = {
   checkedAt: string | null
 }
 
+export type ModelLatencyRow = {
+  name: string
+  selected: boolean
+  checkedAtLabel: string
+  latencyClass: string
+  latencyDisplay: string
+  latencyTooltip: string
+  failed: boolean
+  injectionClass: string
+  injectionTooltip: string
+  injectionLabel: string
+  primary: boolean
+  probing: boolean
+  checkingInjection: boolean
+  copied: boolean
+}
+
 export type Channel = {
   name: string
   url: string

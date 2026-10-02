@@ -40,8 +40,9 @@ import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticContent.vue'
+import ChannelModelLatencyContent from '@/components/channels/ChannelModelLatencyContent.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
-import type { Channel, ChannelFilterStatus } from '@/components/channels/types'
+import type { Channel, ChannelFilterStatus, ModelLatencyRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
 // canonical definition lives in components/channels/types.ts.
 export type { Channel }
@@ -1640,6 +1641,30 @@ const filteredModalModels = computed(() => {
     list.unshift(primary)
   }
   return list
+})
+
+const modelLatencyRows = computed<ModelLatencyRow[]>(() => {
+  const channel = activeModelLatencyChannel.value
+  if (!channel) return []
+  return filteredModalModels.value.map((name) => {
+    const entry = modelLatencies.value[getModelKey(channel, name)]
+    return {
+      name,
+      selected: selectedModelNames.value.includes(name),
+      checkedAtLabel: entry?.checkedAt ? formatModelCheckedAt(entry.checkedAt) : '',
+      latencyClass: getModelLatencyClass(channel, name),
+      latencyDisplay: getModelLatencyDisplay(channel, name),
+      latencyTooltip: getModelTooltip(channel, name),
+      failed: isModelFailed(channel, name),
+      injectionClass: getModelInjectionClass(channel, name),
+      injectionTooltip: getModelInjectionTooltip(channel, name),
+      injectionLabel: getModelInjectionLabel(channel, name),
+      primary: isPrimaryModel(channel, name),
+      probing: isModelProbing(channel, name),
+      checkingInjection: isModelCheckingInjection(channel, name),
+      copied: copiedModelId.value === name,
+    }
+  })
 })
 
 type ModelProbeOutcome = 'completed' | 'busy' | 'failed'
@@ -4619,197 +4644,26 @@ function handleContextMenu(event: MouseEvent) {
           <button class="m26-close-btn" aria-label="关闭" @click="activeModelLatencyChannel = null; selectedModelNames = []">✕</button>
         </div>
 
-        <div class="m26-modal-toolbar">
-          <!-- Left: Select All & Batch Delete -->
-          <div class="flex items-center gap-3">
-            <label class="m26-select-all-label">
-              <input
-                type="checkbox"
-                :checked="isAllModelsSelected"
-                .indeterminate="isSomeModelsSelected"
-                @change="toggleSelectAllModels"
-              />
-              <span>全选</span>
-            </label>
-
-            <button
-              v-if="selectedModelNames.length > 0"
-              class="m26-action-btn danger-subtle"
-              @click="batchDeleteSelectedModels(activeModelLatencyChannel)"
-              :title="`删除已选 ${selectedModelNames.length} 个模型`"
-              :aria-label="`删除已选 ${selectedModelNames.length} 个模型`"
-            >
-              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                <path d="M3 4h10M6 4V2h4v2M5 6v7a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V6" />
-              </svg>
-              <span>{{ selectedModelNames.length }}</span>
-            </button>
-          </div>
-
-          <div class="m26-model-batch-actions">
-            <!-- Only reports a selection; the total is in the header, and the
-                 buttons act on everything when nothing is selected. -->
-            <span v-if="selectedModelNames.length" class="m26-model-batch-count">
-              已选 {{ selectedModelNames.length }}/{{ activeModelLatencyChannel.modelNames?.length || 0 }}
-            </span>
-            <button
-              class="m26-model-batch-btn probe"
-              :class="{ 'is-loading': isProbingAllModels }"
-              :disabled="isProbingAllModels || isCheckingAllInjections"
-              :title="`${isProbingAllModels ? '探活中' : '探活'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
-              :aria-label="`${isProbingAllModels ? '探活中' : '批量探活'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
-              @click="requestBatchModelAction(activeModelLatencyChannel, 'probe')"
-            >
-              <span v-if="isProbingAllModels" class="m26-spin-dot"></span>
-              <svg v-else viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-                <path d="M2 10h3l2-5 4 10 2-5h5" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </button>
-            <button
-              class="m26-model-batch-btn injection"
-              :disabled="isProbingAllModels || isCheckingAllInjections"
-              :title="`${isCheckingAllInjections ? '检测中' : '检测输入统计'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
-              :aria-label="`${isCheckingAllInjections ? '检测中' : '批量检测输入统计'}${selectedModelNames.length ? `已选 ${selectedModelNames.length} 个` : `全部 ${activeModelLatencyChannel.modelNames?.length || 0} 个`}模型`"
-              @click="requestBatchModelAction(activeModelLatencyChannel, 'injection')"
-            >
-              <span v-if="isCheckingAllInjections" class="m26-spin-dot"></span>
-              <svg v-else viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-                <path d="M10 2 16 4.3v4.6c0 4.1-2.5 6.8-6 9.1-3.5-2.3-6-5-6-9.1V4.3L10 2Z" />
-                <path d="m7.2 9.7 1.8 1.8 3.8-4" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        <div class="m26-modal-body m26-model-list-body">
-          <div class="m26-model-grid">
-            <div
-              v-for="(modelName, idx) in filteredModalModels"
-              :key="modelName"
-              class="m26-model-item-card"
-              :class="{ 'is-selected': selectedModelNames.includes(modelName) }"
-              @click="handleModelCardClick(modelName)"
-            >
-              <div class="flex items-center gap-2.5 min-w-0 flex-1">
-                <!-- Checkbox -->
-                <label class="m26-model-checkbox" @click.stop>
-                  <input
-                    type="checkbox"
-                    :checked="selectedModelNames.includes(modelName)"
-                    @change="toggleModelSelection(modelName)"
-                  />
-                </label>
-
-                <div class="m26-model-item-info">
-                  <div class="flex items-center gap-2">
-                    <span class="m26-model-idx">#{{ idx + 1 }}</span>
-                    <span class="m26-model-full-name" :title="modelName">{{ modelName }}</span>
-                    <button
-                      class="m26-model-copy-btn m26-model-row-copy"
-                      title="复制模型名"
-                      @click.stop="copyModelId(modelName)"
-                    >
-                      <svg v-if="copiedModelId !== modelName" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                        <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                      </svg>
-                      <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2">
-                        <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                      </svg>
-                      <span>{{ copiedModelId === modelName ? '已复制' : '复制模型名' }}</span>
-                    </button>
-                  </div>
-                  <span v-if="modelLatencies[getModelKey(activeModelLatencyChannel, modelName)]?.checkedAt" class="m26-model-checked-at">
-                    最近检测 {{ formatModelCheckedAt(modelLatencies[getModelKey(activeModelLatencyChannel, modelName)]?.checkedAt) }}
-                  </span>
-                </div>
-              </div>
-
-              <div class="m26-model-item-actions" @click.stop>
-                <!-- Latency Badge -->
-                <div
-                  class="m26-model-lat-pill"
-                  :class="[getModelLatencyClass(activeModelLatencyChannel, modelName), { 'has-err-link': isModelFailed(activeModelLatencyChannel, modelName) }]"
-                  :title="getModelTooltip(activeModelLatencyChannel, modelName)"
-                  @click="openModelErrorDetail(activeModelLatencyChannel, modelName)"
-                >
-                  <span class="lat-dot"></span>
-                  <span class="lat-text">{{ getModelLatencyDisplay(activeModelLatencyChannel, modelName) }}</span>
-                  <svg v-if="isModelFailed(activeModelLatencyChannel, modelName)" class="lat-view-err" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                    <circle cx="8" cy="8" r="6" />
-                    <path d="M8 4.5v4M8 11.3v.2" />
-                  </svg>
-                </div>
-
-                <!-- Injection Badge -->
-                <div
-                  class="m26-model-inject-pill"
-                  :class="getModelInjectionClass(activeModelLatencyChannel, modelName)"
-                  :title="getModelInjectionTooltip(activeModelLatencyChannel, modelName)"
-                  @click="openModelInjectionDetail(activeModelLatencyChannel, modelName)"
-                >
-                  <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.2" class="inject-shield">
-                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                  </svg>
-                  <span class="inject-text">{{ getModelInjectionLabel(activeModelLatencyChannel, modelName) }}</span>
-                </div>
-
-                <!-- The current primary is marked; other rows can promote themselves with one tap. -->
-                <span
-                  v-if="isPrimaryModel(activeModelLatencyChannel, modelName)"
-                  class="m26-primary-slot-badge"
-                  title="当前主模型"
-                  aria-label="当前主模型"
-                >
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true">
-                    <path d="m8 1.5 1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.3l-3.8 2 .7-4.3-3.1-3 4.3-.6L8 1.5Z" />
-                  </svg>
-                </span>
-                <button
-                  v-else
-                  class="m26-btn-micro set-primary"
-                  :title="`设 ${modelName} 为主模型`"
-                  :aria-label="`设 ${modelName} 为主模型`"
-                  @click="setPrimaryFromRow(activeModelLatencyChannel, modelName)"
-                >
-                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                    <path d="m8 1.5 1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.3l-3.8 2 .7-4.3-3.1-3 4.3-.6L8 1.5Z" />
-                  </svg>
-                </button>
-
-                <!-- Test button -->
-                <button
-                  class="m26-btn-micro probe"
-                  :class="{ 'is-loading': isModelProbing(activeModelLatencyChannel, modelName) }"
-                  :disabled="isModelProbing(activeModelLatencyChannel, modelName) || isProbingAllModels"
-                  @click="probeSingleModel(activeModelLatencyChannel, modelName)"
-                  :title="isModelProbing(activeModelLatencyChannel, modelName) ? '探活中…' : '探活模型'"
-                  :aria-label="isModelProbing(activeModelLatencyChannel, modelName) ? '探活中' : `探活 ${modelName}`"
-                >
-                  <span v-if="isModelProbing(activeModelLatencyChannel, modelName)" class="m26-spin-dot"></span>
-                  <svg v-else viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-                    <path d="M2 10h3l2-5 4 10 2-5h5" stroke-linecap="round" stroke-linejoin="round" />
-                  </svg>
-                </button>
-
-                <!-- Injection test button -->
-                <button
-                  class="m26-btn-micro inject"
-                  :disabled="isModelCheckingInjection(activeModelLatencyChannel, modelName) || isCheckingAllInjections"
-                  @click="checkSingleModelInjection(activeModelLatencyChannel, modelName)"
-                  :title="isModelCheckingInjection(activeModelLatencyChannel, modelName) ? '检测中…' : '检测输入统计'"
-                  :aria-label="isModelCheckingInjection(activeModelLatencyChannel, modelName) ? '检测中' : `检测 ${modelName} 的输入统计`"
-                >
-                  <span v-if="isModelCheckingInjection(activeModelLatencyChannel, modelName)" class="m26-spin-dot"></span>
-                  <svg v-else viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-                    <path d="M10 2 16 4.3v4.6c0 4.1-2.5 6.8-6 9.1-3.5-2.3-6-5-6-9.1V4.3L10 2Z" />
-                    <path d="m7.2 9.7 1.8 1.8 3.8-4" stroke-linecap="round" stroke-linejoin="round" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ChannelModelLatencyContent
+          :channel="activeModelLatencyChannel"
+          :rows="modelLatencyRows"
+          :selected-count="selectedModelNames.length"
+          :all-selected="isAllModelsSelected"
+          :some-selected="isSomeModelsSelected"
+          :probing-all="isProbingAllModels"
+          :checking-all-injections="isCheckingAllInjections"
+          @select-all="toggleSelectAllModels"
+          @delete-selected="batchDeleteSelectedModels(activeModelLatencyChannel)"
+          @batch-action="requestBatchModelAction(activeModelLatencyChannel, $event)"
+          @toggle-selection="toggleModelSelection"
+          @card-click="handleModelCardClick"
+          @copy-model="copyModelId"
+          @open-model-detail="openModelErrorDetail(activeModelLatencyChannel, $event)"
+          @open-injection-detail="openModelInjectionDetail(activeModelLatencyChannel, $event)"
+          @set-primary="setPrimaryFromRow(activeModelLatencyChannel, $event)"
+          @probe-model="probeSingleModel(activeModelLatencyChannel, $event)"
+          @check-injection="checkSingleModelInjection(activeModelLatencyChannel, $event)"
+        />
       </div>
     </div>
 
