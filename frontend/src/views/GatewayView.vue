@@ -50,6 +50,7 @@ import AnalyticsModelBreakdown from '@/components/analytics/AnalyticsModelBreakd
 import AnalyticsChannelPerformance from '@/components/analytics/AnalyticsChannelPerformance.vue'
 import AnalyticsTrendCharts from '@/components/analytics/AnalyticsTrendCharts.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
+import LogsView from '@/components/logs/LogsView.vue'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
 // canonical definition lives in components/channels/types.ts.
@@ -3371,7 +3372,20 @@ function handleContextMenu(event: MouseEvent) {
         </section>
 
         <!-- SECTION 4: LOGS -->
-        <section v-if="activeSection === 'logs'" class="m26-section-view">
+        <LogsView
+          v-if="activeSection === 'logs'"
+          :logs="filteredLogs"
+          :total-logs="desktopLogs.length"
+          :search="channelSearch"
+          :stream-connected="logsStreamConnected"
+          :auto-scroll="autoScrollLogs"
+          :clearing="isClearingLogs"
+          @update:search="channelSearch = $event"
+          @update:auto-scroll="autoScrollLogs = $event"
+          @clear="handleClearLogs"
+          @open-detail="openLogDetail"
+        />
+        <section v-if="false" class="m26-section-view">
           <div class="m26-logs-header">
             <div class="m26-logs-left flex items-center gap-3">
               <span class="m26-logs-count">
