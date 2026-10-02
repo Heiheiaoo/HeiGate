@@ -46,6 +46,7 @@ import ChannelInjectionContent from '@/components/channels/ChannelInjectionConte
 import ChannelModelAliasContent from '@/components/channels/ChannelModelAliasContent.vue'
 import ModelMappingContent from '@/components/channels/ModelMappingContent.vue'
 import AnalyticsOverviewMetrics from '@/components/analytics/AnalyticsOverviewMetrics.vue'
+import AnalyticsModelBreakdown from '@/components/analytics/AnalyticsModelBreakdown.vue'
 import AnalyticsTrendCharts from '@/components/analytics/AnalyticsTrendCharts.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
@@ -3120,112 +3121,12 @@ function handleContextMenu(event: MouseEvent) {
             :max-daily-tokens="maxDailyTokens"
           />
 
-          <!-- Section 3: Per-Model Breakdown Table -->
-          <div class="m26-analytics-card">
-            <div class="m26-card-header-sub">
-              <div>
-                <h3 class="text-sm font-semibold text-main">各模型用量与时延表现明细</h3>
-                <p class="text-xs text-muted mt-0.5">按调用量降序分析各模型的 Token 规模、端到端延迟、首字 TTFT 与首选承载渠道</p>
-              </div>
-
-              <!-- Search filter in card header -->
-              <div class="m26-model-filter-input-wrap">
-                <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="6.5" cy="6.5" r="4.5" />
-                  <line x1="10" y1="10" x2="14" y2="14" />
-                </svg>
-                <input
-                  type="text"
-                  v-model="analyticsModelSearch"
-                  placeholder="搜索模型或承载渠道..."
-                  class="m26-sub-search-input"
-                />
-              </div>
-            </div>
-
-            <!-- Table -->
-            <div class="m26-analytics-table-wrap" v-if="filteredAnalyticsModels.length > 0">
-              <table class="m26-analytics-table">
-                <thead>
-                  <tr>
-                    <th class="text-left" style="width: 25%;">模型名称</th>
-                    <th class="text-left" style="width: 18%;">调用频次 & 占比</th>
-                    <th class="text-left" style="width: 18%;">Token 消耗 (总 / 提 / 补)</th>
-                    <th class="text-left" style="width: 13%;">平均耗时</th>
-                    <th class="text-left" style="width: 12%;">首字用时</th>
-                    <th class="text-left" style="width: 14%;">时延范围 (最小~最大)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="m in filteredAnalyticsModels" :key="m.model" class="m26-analytics-row">
-                    <!-- Model name & top channel -->
-                    <td>
-                      <div class="flex items-center gap-2.5">
-                        <div class="m26-model-icon-dot"></div>
-                        <div>
-                          <div class="font-semibold text-xs text-main font-mono">{{ m.model }}</div>
-                          <div class="text-[10.5px] text-muted flex items-center gap-1 mt-0.5" v-if="m.top_channel">
-                            <span>主承载:</span>
-                            <span class="m26-channel-tag">{{ m.top_channel }}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-
-                    <!-- Requests & Share -->
-                    <td>
-                      <div>
-                        <div class="flex items-center justify-between text-xs font-mono mb-1">
-                          <span class="text-main font-semibold">{{ m.total_requests }} 次</span>
-                          <span class="text-muted text-[11px]">{{ ((m.total_requests / (analyticsData?.summary?.total_requests || 1)) * 100).toFixed(1) }}%</span>
-                        </div>
-                        <div class="m26-mini-progress-bar">
-                          <div
-                            class="m26-mini-progress-fill"
-                            :style="{ width: Math.min(((m.total_requests / (analyticsData?.summary?.total_requests || 1)) * 100), 100) + '%' }"
-                          ></div>
-                        </div>
-                      </div>
-                    </td>
-
-                    <!-- Tokens -->
-                    <td>
-                      <div class="text-xs">
-                        <div class="font-semibold text-main font-mono">{{ formatAnalyticsTokens(m.total_tokens) }}</div>
-                        <div class="text-[10.5px] text-muted font-mono mt-0.5">
-                          提 {{ formatAnalyticsTokens(m.prompt_tokens) }} · 补 {{ formatAnalyticsTokens(m.completion_tokens) }}
-                        </div>
-                      </div>
-                    </td>
-
-                    <!-- Avg Latency -->
-                    <td>
-                      <span class="m26-latency-pill font-mono" :class="getLatencyTagClass(m.avg_latency_ms)">
-                        {{ formatAnalyticsLatency(m.avg_latency_ms) }}
-                      </span>
-                    </td>
-
-                    <!-- TTFT -->
-                    <td>
-                      <span class="text-xs font-mono font-medium text-main">
-                        {{ formatAnalyticsLatency(m.avg_ttft_ms) }}
-                      </span>
-                    </td>
-
-                    <!-- Min ~ Max -->
-                    <td>
-                      <span class="text-xs font-mono text-muted">
-                        {{ formatAnalyticsLatency(m.min_latency_ms) }} ~ {{ formatAnalyticsLatency(m.max_latency_ms) }}
-                      </span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="m26-analytics-empty" v-else>
-              <span>无匹配的模型记录</span>
-            </div>
-          </div>
+          <AnalyticsModelBreakdown
+            :models="filteredAnalyticsModels"
+            :total-requests="analyticsData?.summary?.total_requests ?? 0"
+            :search="analyticsModelSearch"
+            @update:search="analyticsModelSearch = $event"
+          />
 
           <!-- Section 4: Upstream Channel Performance Matrix -->
           <div class="m26-analytics-card" v-if="analyticsData?.channels && analyticsData.channels.length > 0">
