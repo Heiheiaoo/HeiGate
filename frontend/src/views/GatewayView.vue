@@ -26,7 +26,6 @@ import {
   deleteCustomModelMapping,
   type ApiChannel,
   type RequestLog,
-  type TraceStep,
   type SystemInfo,
   type AnalyticsResult,
 } from '@/services/gatewayApi'
@@ -40,13 +39,11 @@ import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
-
+import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus } from '@/components/channels/types'
-
 // Re-exported so existing imports of Channel from this view keep working; the
 // canonical definition lives in components/channels/types.ts.
 export type { Channel }
-
 export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
 
 // Tauri injects its IPC bridge into every page it loads; in a plain browser
@@ -2315,64 +2312,6 @@ function copyErrorMessage(msg: string) {
   })
 }
 
-function parseTraceSteps(log: RequestLog): TraceStep[] {
-  if (log.trace_json) {
-    try {
-      const parsed = JSON.parse(log.trace_json)
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed
-      }
-    } catch {
-      // Fall back to the synthesized trace below for malformed historical data.
-    }
-  }
-  // Synthetic fallback for historical records or direct requests without trace_json
-  if (log.is_failover && log.failover_from) {
-    return [
-      {
-        index: 1,
-        channel_name: log.failover_from,
-        channel_id: 0,
-        endpoint: '',
-        model: log.model,
-        attempt: 1,
-        status_code: 502,
-        latency_ms: 0,
-        error: '前序供应商请求失败/超时/熔断，触发故障轮转',
-        succeeded: false,
-      },
-      {
-        index: 2,
-        channel_name: log.channel_name,
-        channel_id: log.channel_id,
-        endpoint: log.endpoint || '',
-        model: log.upstream_model || log.model,
-        attempt: 1,
-        status_code: log.status_code,
-        latency_ms: log.latency_ms,
-        ttft_ms: log.ttft_ms,
-        error: log.error_message,
-        succeeded: log.status_code >= 200 && log.status_code < 300,
-      }
-    ]
-  }
-  return [
-    {
-      index: 1,
-      channel_name: log.channel_name || '默认渠道',
-      channel_id: log.channel_id,
-      endpoint: log.endpoint || '',
-      model: log.upstream_model || log.model,
-      attempt: 1,
-      status_code: log.status_code,
-      latency_ms: log.latency_ms,
-      ttft_ms: log.ttft_ms,
-      error: log.error_message,
-      succeeded: log.status_code >= 200 && log.status_code < 300,
-    }
-  ]
-}
-
 function getLogDiagnostic(log: RequestLog): {
   badge: 'success' | 'amber' | 'danger' | 'info'
   codeText: string
@@ -2429,14 +2368,6 @@ function getLogDiagnostic(log: RequestLog): {
       ? `上游返回明确错误：${log.error_message}`
       : `请求未能成功完成 (HTTP ${log.status_code})，请检查渠道地址、API Key 或模型名称是否正确。`,
   }
-}
-
-function calculateTokenSpeed(log: RequestLog): string {
-  if (log.completion_tokens && log.latency_ms && log.latency_ms > 0) {
-    const speed = (log.completion_tokens / (log.latency_ms / 1000)).toFixed(1)
-    return `${speed} t/s`
-  }
-  return '-'
 }
 
 function startLogsStream() {
@@ -5705,179 +5636,12 @@ function handleContextMenu(event: MouseEvent) {
           <button class="m26-close-btn" aria-label="关闭" @click="activeLogDetail = null">✕</button>
         </div>
 
-        <div class="m26-modal-body m26-diagnostic-body">
-          <!-- 1. Status Banner -->
-          <div
-            class="m26-diag-card"
-            :class="getLogDiagnostic(activeLogDetail).badge"
-          >
-            <div class="m26-diag-card-title">
-              <span
-                class="m26-diag-dot"
-                :class="getLogDiagnostic(activeLogDetail).badge"
-              ></span>
-              <span>{{ getLogDiagnostic(activeLogDetail).title }}</span>
-              <span
-                class="m26-diag-code-pill"
-                :class="'code-' + getLogDiagnostic(activeLogDetail).badge"
-              >
-                {{ getLogDiagnostic(activeLogDetail).codeText }}
-              </span>
-            </div>
-            <div class="m26-diag-main-msg">
-              {{ getLogDiagnostic(activeLogDetail).message }}
-            </div>
-          </div>
-
-          <!-- 2. Execution Trace Timeline (调用链路追踪) -->
-          <div class="m26-log-section">
-            <div class="m26-section-subtitle-bar">
-              <span class="m26-subtitle-tag">链路追踪</span>
-              <span class="m26-subtitle-title">多级重试与故障轮转链路 (Execution Trace)</span>
-            </div>
-            <div class="m26-trace-timeline">
-              <div
-                v-for="step in parseTraceSteps(activeLogDetail)"
-                :key="step.index"
-                class="m26-trace-item"
-                :class="{ 'trace-item-success': step.succeeded, 'trace-item-fail': !step.succeeded }"
-              >
-                <div class="m26-trace-node">
-                  <span class="m26-trace-index">{{ step.index }}</span>
-                  <div class="m26-trace-line"></div>
-                </div>
-                <div class="m26-trace-card">
-                  <div class="m26-trace-header">
-                    <div class="flex items-center gap-2">
-                      <span class="m26-trace-channel-name">{{ step.channel_name || '未知渠道' }}</span>
-                      <span v-if="step.channel_id" class="m26-trace-id-badge">ID: {{ step.channel_id }}</span>
-                      <span v-if="step.attempt > 1" class="m26-trace-retry-badge">重试 #{{ step.attempt }}</span>
-                    </div>
-                    <div class="flex items-center gap-1.5">
-                      <span
-                        class="m26-trace-code-pill"
-                        :class="step.status_code >= 200 && step.status_code < 300 ? 'status-200' : step.status_code === 429 ? 'status-429' : 'status-err'"
-                      >
-                        {{ step.status_code ? `HTTP ${step.status_code}` : '超时/中断' }}
-                      </span>
-                      <span v-if="step.latency_ms > 0" class="m26-trace-latency">{{ formatLatencySec(step.latency_ms) }}</span>
-                    </div>
-                  </div>
-                  <div class="m26-trace-body">
-                    <div class="m26-trace-spec-row">
-                      <span class="label">端点:</span>
-                      <span class="val font-mono truncate" :title="step.endpoint">{{ step.endpoint || '默认网关路由' }}</span>
-                    </div>
-                    <div class="m26-trace-spec-row">
-                      <span class="label">模型:</span>
-                      <span class="val font-mono">{{ step.model }}</span>
-                      <span v-if="step.ttft_ms" class="val-ttft">TTFT: {{ formatLatencySec(step.ttft_ms) }}</span>
-                    </div>
-                    <div v-if="step.error || step.raw_error" class="m26-trace-error-box">
-                      <span class="error-icon">⚠️</span>
-                      <span class="font-mono text-xs">{{ step.error || step.raw_error }}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 3. Performance & Tokens Summary (吞吐性能) -->
-          <div class="m26-log-section">
-            <div class="m26-section-subtitle-bar">
-              <span class="m26-subtitle-tag">吞吐性能</span>
-              <span class="m26-subtitle-title">Token 用量与响应延迟</span>
-            </div>
-            <div class="m26-perf-grid">
-              <div class="m26-perf-card">
-                <span class="label">首字耗时 (TTFT)</span>
-                <span class="val font-mono">{{ formatLatencySec(activeLogDetail.ttft_ms || activeLogDetail.latency_ms) }}</span>
-              </div>
-              <div class="m26-perf-card">
-                <span class="label">全程总耗时</span>
-                <span class="val font-mono">{{ formatLatencySec(activeLogDetail.latency_ms) }}</span>
-              </div>
-              <div class="m26-perf-card">
-                <span class="label">生成速率</span>
-                <span class="val font-mono">{{ calculateTokenSpeed(activeLogDetail) }}</span>
-              </div>
-              <div class="m26-perf-card">
-                <span class="label">提示词 Token</span>
-                <span class="val font-mono">{{ activeLogDetail.prompt_tokens ?? 0 }}</span>
-              </div>
-              <div class="m26-perf-card">
-                <span class="label">补全 Token</span>
-                <span class="val font-mono text-emerald-600">{{ activeLogDetail.completion_tokens ?? 0 }}</span>
-              </div>
-              <div class="m26-perf-card">
-                <span class="label">总 Token</span>
-                <span class="val font-mono">{{ activeLogDetail.total_tokens ?? ((activeLogDetail.prompt_tokens || 0) + (activeLogDetail.completion_tokens || 0)) }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 4. Environment & Request Specs (网络与网关环境) -->
-          <div class="m26-log-section">
-            <div class="m26-section-subtitle-bar">
-              <span class="m26-subtitle-tag">调用环境</span>
-              <span class="m26-subtitle-title">客户端与网关路由参数</span>
-            </div>
-            <div class="m26-diag-meta-grid">
-              <div class="m26-diag-meta-item">
-                <span class="label">客户端地址 (Client IP)</span>
-                <span class="value font-mono">{{ activeLogDetail.client_ip || '127.0.0.1 (本地)' }}</span>
-              </div>
-              <div class="m26-diag-meta-item">
-                <span class="label">请求接口 (Endpoint Path)</span>
-                <span class="value font-mono">{{ activeLogDetail.request_path || '/v1/chat/completions' }}</span>
-              </div>
-              <div class="m26-diag-meta-item">
-                <span class="label">请求模型 (Requested)</span>
-                <span class="value font-mono">{{ activeLogDetail.model || '通用模型' }}</span>
-              </div>
-              <div class="m26-diag-meta-item">
-                <span class="label">上游映射模型 (Upstream)</span>
-                <span class="value font-mono">{{ activeLogDetail.upstream_model || activeLogDetail.model || '通用模型' }}</span>
-              </div>
-              <div class="m26-diag-meta-item">
-                <span class="label">传输类型</span>
-                <span class="value">{{ activeLogDetail.is_stream ? 'SSE 流式传输 (Server-Sent Events)' : '同步阻塞传输 (Blocking)' }}</span>
-              </div>
-              <div class="m26-diag-meta-item">
-                <span class="label">结束状态 (Finish Reason)</span>
-                <span class="value font-mono">{{ activeLogDetail.finish_reason || (activeLogDetail.status_code === 200 ? 'stop' : 'unknown') }}</span>
-              </div>
-              <div class="m26-diag-meta-item col-span-2">
-                <span class="label">最终承载渠道</span>
-                <span class="value">{{ activeLogDetail.channel_name || '默认' }} (ID: {{ activeLogDetail.channel_id }}) · {{ activeLogDetail.endpoint || '默认地址' }}</span>
-              </div>
-              <div v-if="activeLogDetail.user_agent" class="m26-diag-meta-item col-span-2">
-                <span class="label">客户端软件 (User-Agent)</span>
-                <span class="value font-mono text-xs" :title="activeLogDetail.user_agent">{{ activeLogDetail.user_agent }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 5. Error message if any -->
-          <div v-if="activeLogDetail.error_message" class="m26-diag-raw-section">
-            <div class="m26-diag-raw-header">
-              <span class="label">上游异常报错回包 (Error Diagnostics)</span>
-              <button class="m26-text-btn" @click="copyErrorMessage(activeLogDetail.error_message)">复制报错</button>
-            </div>
-            <pre class="m26-diag-raw-code font-mono text-xs"><code>{{ activeLogDetail.error_message }}</code></pre>
-          </div>
-
-          <!-- 6. Full JSON View -->
-          <div class="m26-diag-raw-section">
-            <div class="m26-diag-raw-header">
-              <span class="label">完整流水数据 (JSON)</span>
-              <button class="m26-text-btn" @click="copyLogJson(activeLogDetail)">复制完整 JSON</button>
-            </div>
-            <pre class="m26-diag-raw-code font-mono text-xs"><code>{{ JSON.stringify(activeLogDetail, null, 2) }}</code></pre>
-          </div>
-        </div>
-
+        <LogDetailContent
+          :log="activeLogDetail"
+          :diagnostic="getLogDiagnostic(activeLogDetail)"
+          @copy-log-json="copyLogJson"
+          @copy-error-message="copyErrorMessage"
+        />
         <div class="m26-modal-footer">
           <button class="m26-glass-btn" @click="copyLogJson(activeLogDetail)">复制 JSON</button>
           <button class="m26-action-btn primary" @click="activeLogDetail = null">关闭</button>
