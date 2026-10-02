@@ -47,6 +47,7 @@ import ChannelModelAliasContent from '@/components/channels/ChannelModelAliasCon
 import ModelMappingContent from '@/components/channels/ModelMappingContent.vue'
 import AnalyticsOverviewMetrics from '@/components/analytics/AnalyticsOverviewMetrics.vue'
 import AnalyticsModelBreakdown from '@/components/analytics/AnalyticsModelBreakdown.vue'
+import AnalyticsChannelPerformance from '@/components/analytics/AnalyticsChannelPerformance.vue'
 import AnalyticsTrendCharts from '@/components/analytics/AnalyticsTrendCharts.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
@@ -179,13 +180,6 @@ function protocolShortLabel(protocol: Channel['protocol']): string {
   if (protocol === 'anthropic') return 'Anthropic'
   if (protocol === 'openai-responses') return 'Responses'
   return 'OpenAI Chat'
-}
-
-function getLatencyTagClass(ms: number): string {
-  if (!ms || ms <= 0) return 'text-muted'
-  if (ms < 1000) return 'm26-tag-fast'
-  if (ms < 3000) return 'm26-tag-normal'
-  return 'm26-tag-slow'
 }
 
 const filteredAnalyticsModels = computed(() => {
@@ -3128,47 +3122,7 @@ function handleContextMenu(event: MouseEvent) {
             @update:search="analyticsModelSearch = $event"
           />
 
-          <!-- Section 4: Upstream Channel Performance Matrix -->
-          <div class="m26-analytics-card" v-if="analyticsData?.channels && analyticsData.channels.length > 0">
-            <div class="m26-card-header-sub">
-              <div>
-                <h3 class="text-sm font-semibold text-main">上游供应商渠道调度与承载分布</h3>
-                <p class="text-xs text-muted mt-0.5">统计网关向各个渠道分发请求的吞吐量、平均响应耗时及成功率表现</p>
-              </div>
-            </div>
-
-            <div class="m26-channel-perf-grid">
-              <div v-for="ch in analyticsData.channels" :key="ch.channel_name" class="m26-channel-perf-card">
-                <div class="flex items-center justify-between">
-                  <div class="flex items-center gap-2">
-                    <span class="m26-channel-dot"></span>
-                    <span class="font-semibold text-xs text-main">{{ ch.channel_name }}</span>
-                  </div>
-                  <span class="m26-badge emerald text-[11px]" v-if="ch.success_rate >= 95">{{ ch.success_rate.toFixed(0) }}% 成功</span>
-                  <span class="m26-badge amber text-[11px]" v-else>{{ ch.success_rate.toFixed(0) }}% 成功</span>
-                </div>
-
-                <div class="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-slate-100">
-                  <div>
-                    <span class="text-[10.5px] text-muted block">承载请求</span>
-                    <span class="font-semibold text-xs text-main font-mono">{{ ch.total_requests }} 次</span>
-                  </div>
-                  <div>
-                    <span class="text-[10.5px] text-muted block">平均耗时</span>
-                    <span class="font-semibold text-xs font-mono" :class="getLatencyTagClass(ch.avg_latency_ms)">
-                      {{ formatAnalyticsLatency(ch.avg_latency_ms) }}
-                    </span>
-                  </div>
-                  <div>
-                    <span class="text-[10.5px] text-muted block">首字用时</span>
-                    <span class="font-semibold text-xs text-main font-mono">
-                      {{ formatAnalyticsLatency(ch.avg_ttft_ms) }}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <AnalyticsChannelPerformance :channels="analyticsData?.channels ?? []" />
         </section>
 
         <!-- SECTION 2: CHANNELS -->
