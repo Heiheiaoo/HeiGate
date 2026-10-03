@@ -6,7 +6,6 @@ defineProps<{
   search: string
   filterStatus: ChannelFilterStatus
   viewMode: ChannelViewMode
-  isProbingAll?: boolean
   totalCount: number
   healthyCount: number
   degradedCount: number
@@ -18,7 +17,6 @@ const emit = defineEmits<{
   (e: 'update:search', val: string): void
   (e: 'update:filterStatus', val: ChannelFilterStatus): void
   (e: 'update:viewMode', val: ChannelViewMode): void
-  (e: 'probe-all'): void
   (e: 'add-channel'): void
 }>()
 
@@ -55,12 +53,11 @@ defineExpose({
         <button
           v-if="search"
           class="m26-ch-search-clear"
-          title="清空搜索 (Esc)"
+          title="清空搜索"
           @click="emit('update:search', '')"
         >
           ✕
         </button>
-        <span v-else class="m26-ch-kbd">⌘K</span>
       </div>
 
       <!-- Filter Status Pills -->
@@ -152,22 +149,8 @@ defineExpose({
     <!-- Right: Actions (Batch Probe, Add Channel) -->
     <div class="m26-ch-toolbar-right">
       <button
-        class="m26-ch-btn m26-ch-btn-secondary icon-only"
-        :disabled="isProbingAll"
-        :title="isProbingAll ? '探活中…' : '批量探活 (⌘⇧P)'"
-        :aria-label="isProbingAll ? '批量探活进行中' : '批量探活全部渠道'"
-        @click="emit('probe-all')"
-      >
-        <span v-if="isProbingAll" class="m26-spin-dot"></span>
-        <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M23 4v6h-6M1 20v-6h6" />
-          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-        </svg>
-      </button>
-
-      <button
         class="m26-ch-btn m26-ch-btn-primary icon-only"
-        title="新建渠道 (⌘N)"
+        title="新建渠道"
         aria-label="添加渠道"
         @click="emit('add-channel')"
       >
@@ -257,17 +240,6 @@ defineExpose({
   color: #475569;
 }
 
-.m26-ch-kbd {
-  margin-right: 6px;
-  padding: 1px 4px;
-  background: rgba(0, 0, 0, 0.05);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 4px;
-  font-size: 10px;
-  font-family: inherit;
-  color: #64748b;
-  pointer-events: none;
-}
 
 .m26-ch-filter-pills {
   display: flex;

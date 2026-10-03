@@ -137,8 +137,7 @@ function onPrimaryInput(val: string) {
       <div class="flex items-center justify-between mb-1.5">
         <label class="m26-mgr-label flex items-center gap-1.5">
           <span class="text-amber-500 font-bold">⚡</span>
-          <span class="font-semibold text-slate-800">探活主模型</span>
-          <span class="text-[11px] text-slate-400 font-normal">（用于周期探活与卡片首显）</span>
+          <span class="font-semibold text-slate-800">主模型</span>
         </label>
         <span v-if="currentPrimary" class="m26-primary-chip truncate max-w-[180px]" :title="currentPrimary">
           当前：{{ currentPrimary }}
@@ -152,7 +151,7 @@ function onPrimaryInput(val: string) {
               type="text"
               :value="currentPrimary"
               class="m26-mgr-input font-mono text-xs pr-7"
-              placeholder="输入或从下方点击选择主模型，例如：gpt-4o-mini"
+              placeholder="模型名称"
               @input="onPrimaryInput(($event.target as HTMLInputElement).value)"
             />
             <button
@@ -190,14 +189,14 @@ function onPrimaryInput(val: string) {
       <div class="flex justify-between items-center mb-2">
         <div class="flex items-center gap-2">
           <label class="m26-mgr-label mb-0">
-            全部支持模型 <span class="text-slate-400 font-normal">({{ modelList.length }})</span>
+            模型 <span class="text-slate-400 font-normal">({{ modelList.length }})</span>
           </label>
           <button
             type="button"
             class="text-[11px] text-blue-600 hover:text-blue-800 hover:underline cursor-pointer bg-transparent border-none p-0"
             @click="isTextMode = !isTextMode"
           >
-            {{ isTextMode ? '切换为胶囊标签 🏷' : '切换为多行文本 ✎' }}
+            {{ isTextMode ? '标签模式' : '多行文本' }}
           </button>
         </div>
 
@@ -208,7 +207,7 @@ function onPrimaryInput(val: string) {
           @click="emit('fetchUpstream')"
         >
           <span v-if="isFetching" class="m26-spin-dot mini"></span>
-          <span>{{ isFetching ? '拉取中...' : '自动拉取上游模型' }}</span>
+          <span>{{ isFetching ? '拉取中...' : '获取模型' }}</span>
         </button>
       </div>
 
@@ -220,7 +219,7 @@ function onPrimaryInput(val: string) {
             v-model="newTagText"
             type="text"
             class="m26-mgr-input font-mono text-xs flex-1"
-            placeholder="输入模型名称，按 Enter 添加；支持直接粘贴多行或逗号文本..."
+            placeholder="模型名称"
             @keydown.enter.prevent="addTag"
             @paste="handlePaste"
           />
@@ -268,7 +267,7 @@ function onPrimaryInput(val: string) {
           </div>
 
           <div v-if="modelList.length === 0" class="m26-empty-tags-hint">
-            暂无模型。可在此输入模型名称，或点击右上角“自动拉取上游模型”
+            暂无模型
           </div>
         </div>
       </div>
@@ -282,9 +281,6 @@ function onPrimaryInput(val: string) {
           placeholder="gpt-4o-mini&#10;gpt-4o&#10;deepseek-chat"
           @input="onTextModeChange(($event.target as HTMLTextAreaElement).value)"
         ></textarea>
-        <p class="text-[11px] text-slate-400 mt-1 mb-0">
-          * 每行一个模型名称。修改后首行将作为默认主模型，也可以在上方的“探活主模型”处随时指定。
-        </p>
       </div>
     </div>
   </div>

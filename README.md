@@ -75,22 +75,16 @@ export ANTHROPIC_AUTH_TOKEN="<界面里的网关密钥>"
 
 ## 从源码构建
 
-需要 Go 1.27+、Node 22+、pnpm 9+。
+需要 Rust（stable）与 Node 22+ / pnpm 9+。Linux 打包还需要 WebKitGTK 4.1 与 GTK 3 开发库。
 
 ```bash
-make app-macos-arm64  # macOS：还需要 Xcode Command Line Tools
-open dist/HeiGate.app
+make app      # 构建 macOS HeiGate.app（Tauri）
+open target/release/bundle/macos/HeiGate.app
 
-make run     # 直接从源码跑，数据放在 ./desktop-data
-make test    # 后端 + 前端测试
-make help    # 看所有目标
-```
-
-Windows 10/11 需要 .NET 8 SDK；生成安装包还需要 NSIS：
-
-```powershell
-make windows          # 构建 dist/windows-x64
-make package-windows  # 生成便携 zip 和 Setup.exe
+make bundle   # 构建当前平台的全部打包产物（dmg / msi / deb / rpm / AppImage）
+make run      # 直接从源码跑桌面应用
+make test     # Rust + 前端测试
+make help     # 看所有目标
 ```
 
 开发时前后端分开跑更方便：
@@ -126,16 +120,9 @@ HeiGate 在你的机器上开了一个 HTTP 端口，所以做了这些约束：
 ## 项目结构
 
 ```
-cmd/heigate         程序入口：装配路由、启动 HTTP 服务
-internal/api        本地管理接口 + 网关端点
-internal/channel    渠道存储（SQLite）、路由与故障转移、手动探活、模型名归一化
-internal/probe      上游健康检查
-internal/protocol   Anthropic ↔ OpenAI 协议转换（含流式）
-internal/middleware 本地访问防护、CSP、认证
-internal/web        嵌入编译好的界面
-frontend            Vue 3 界面
-desktop/macos       Cocoa + WebKit 原生外壳
-desktop/windows     WinForms + WebView2 外壳与 NSIS 安装脚本
+crates/heigate-core    核心库（server / api / store / router / resilience / protocol / probe / middleware）
+src-tauri              Tauri 2 外壳：起核心服务、开窗口、打包前端
+frontend               Vue 3 界面
 ```
 
 ## 说明

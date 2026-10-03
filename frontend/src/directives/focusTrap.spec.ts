@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { defineComponent, ref, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
-import { vFocusTrap } from '@/directives/focusTrap'
+import { vFocusTrap, openModalCount } from '@/directives/focusTrap'
 
 // A dialog rendered with v-if, matching how every modal in GatewayView works.
 const Host = defineComponent({
@@ -107,5 +107,21 @@ describe('v-focus-trap', () => {
     pressTab()
     expect(document.activeElement).toBe(opener)
     wrapper.unmount()
+  })
+
+  it('tracks the open-dialog count across open and close', async () => {
+    const baseline = openModalCount.value
+    const wrapper = mount(Host, { attachTo: document.body })
+
+    wrapper.vm.open = true
+    await nextTick()
+    expect(openModalCount.value).toBe(baseline + 1)
+
+    wrapper.vm.open = false
+    await nextTick()
+    expect(openModalCount.value).toBe(baseline)
+
+    wrapper.unmount()
+    expect(openModalCount.value).toBe(baseline)
   })
 })

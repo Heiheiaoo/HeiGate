@@ -1,0 +1,15 @@
+{
+  "name": "heigate",
+  "private": true,
+  "version": "2.0.0",
+  "description": "HeiGate — local AI API gateway desktop app (Tauri 2 + Rust)",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "app": "tauri build --bundles app",
+    "bundle": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.0"
+  }
+}

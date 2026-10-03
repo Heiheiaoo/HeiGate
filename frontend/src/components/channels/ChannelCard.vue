@@ -69,10 +69,7 @@ const isCircuitOpen = computed(() => {
   return c.value.circuitState && c.value.circuitState !== 'closed'
 })
 
-const extraModelsCount = computed(() => {
-  if (!c.value.modelNames || c.value.modelNames.length <= 1) return 0
-  return c.value.modelNames.length - 1
-})
+const modelCount = computed(() => c.value.modelNames?.length ?? 0)
 
 function onCardClick() {
   if (window.getSelection()?.toString().trim()) return
@@ -103,6 +100,7 @@ function onModelHighlightClick() {
     <div class="m26-card-header">
       <div class="m26-card-title-box">
         <h4 class="m26-card-title" :title="`${c.name}\n协议: ${c.protocol}\n${c.url}`">{{ c.name }}</h4>
+        <span v-if="c.keyCount" class="text-xs text-muted">{{ c.keyCount }} Key · {{ c.keyAvailableCount }} 可用<span v-if="c.keyCoolingCount"> · {{ c.keyCoolingCount }} 冷却</span></span>
       </div>
 
       <div class="m26-card-ctrl-box" @click.stop>
@@ -156,12 +154,12 @@ function onModelHighlightClick() {
 
       <!-- Models count chip / Single model probe chip -->
       <button
-        v-if="extraModelsCount > 0"
+        v-if="modelCount > 1"
         class="m26-models-count-chip"
         title="点击查看全部支持模型及探活"
         @click.stop="emit('open-models', c)"
       >
-        +{{ extraModelsCount }} 模型
+        {{ modelCount }} 模型
       </button>
       <button
         v-else

@@ -75,22 +75,16 @@ The gateway exposes `POST /v1/messages`, `POST /v1/chat/completions`, `POST /v1/
 
 ## Build from source
 
-You need Go 1.27+, Node 22+, and pnpm 9+.
+You need Rust (stable) plus Node 22+ / pnpm 9+. Packaging on Linux also needs the WebKitGTK 4.1 and GTK 3 development libraries.
 
 ```bash
-make app-macos-arm64  # macOS; also requires Xcode Command Line Tools
-open dist/HeiGate.app
+make app      # build the macOS HeiGate.app (Tauri)
+open target/release/bundle/macos/HeiGate.app
 
-make run     # run from source with data in ./desktop-data
-make test    # backend and frontend tests
-make help    # list every target
-```
-
-On Windows 10/11, install the .NET 8 SDK; packaging the installer also requires NSIS:
-
-```powershell
-make windows          # build dist/windows-x64
-make package-windows  # create the portable zip and Setup.exe
+make bundle   # build every bundle target for this platform (dmg / msi / deb / rpm / AppImage)
+make run      # run the desktop app from source
+make test     # Rust and frontend tests
+make help     # list every target
 ```
 
 For development it is easier to run the two halves separately:
@@ -126,16 +120,9 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 ## Layout
 
 ```
-cmd/heigate         entry point: wires routes and starts the HTTP server
-internal/api        local management API and gateway endpoints
-internal/channel    channel storage (SQLite), routing and failover, on-demand probes, model-name normalisation
-internal/probe      upstream health checks
-internal/protocol   Anthropic ↔ OpenAI translation, including streaming
-internal/middleware local-only guards, CSP, authentication
-internal/web        embeds the compiled UI
-frontend            Vue 3 interface
-desktop/macos       native Cocoa + WebKit shell
-desktop/windows     WinForms + WebView2 shell and the NSIS installer script
+crates/heigate-core    core library (server / api / store / router / resilience / protocol / probe / middleware)
+src-tauri              Tauri 2 shell: starts the core, opens the window, bundles the UI
+frontend               Vue 3 interface
 ```
 
 ## Notes

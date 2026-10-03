@@ -1,4 +1,7 @@
 export type ApiChannel = {
+  keyCount?: number
+  keyAvailableCount?: number
+  keyCoolingCount?: number
   id: number
   name: string
   provider: 'anthropic' | 'openai-compatible' | 'openai-responses'
@@ -44,6 +47,9 @@ function protocolFromRecord(record: ApiRecord): ApiChannel['provider'] {
 function normalizeChannel(record: ApiRecord): ApiChannel {
   const status = record.last_status === 'operational' ? 'healthy' : record.last_status === 'degraded' ? 'degraded' : record.last_status === 'error' || record.last_status === 'failed' ? 'offline' : 'unknown'
   return {
+    keyCount: Number(record.key_count ?? 1),
+    keyAvailableCount: Number(record.key_available_count ?? 1),
+    keyCoolingCount: Number(record.key_cooling_count ?? 0),
     id: Number(record.id),
     name: String(record.name ?? ''),
     provider: protocolFromRecord(record),
@@ -272,6 +278,8 @@ export async function duplicateChannel(id: number): Promise<ApiChannel | null> {
 }
 
 export type TraceStep = {
+  key_id?: number
+  key_name?: string
   index: number
   channel_name: string
   channel_id: number
@@ -447,11 +455,12 @@ export async function fetchUpstreamModels(
   endpointUrl: string,
   apiKey: string,
   provider?: string,
+  channelId?: number,
 ): Promise<{ ok: boolean; models?: string[]; error?: string }> {
   try {
     const response = await request('/channels/upstream-models', {
       method: 'POST',
-      body: JSON.stringify({ endpoint: endpointUrl, api_key: apiKey, provider }),
+      body: JSON.stringify({ endpoint: endpointUrl, api_key: channelId ? undefined : apiKey, provider, channel_id: channelId }),
     })
     const payload = await response.json() as { data?: string[]; error?: string }
     if (!response.ok) {
