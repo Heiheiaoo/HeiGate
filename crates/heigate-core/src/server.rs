@@ -86,11 +86,6 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         .route("/config/export", get(crate::api::config::export))
         .route("/config/preview", post(crate::api::config::preview))
         .route("/config/import", post(crate::api::config::import))
-        .route(
-            "/channels/merge/preview",
-            post(crate::api::config::merge_preview),
-        )
-        .route("/channels/merge", post(crate::api::config::merge))
         .route("/session", get(handlers::session))
         .route(
             "/channels",
@@ -111,6 +106,10 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         .route(
             "/channels/{id}/keys/{key_id}/probe",
             post(crate::api::keys::probe),
+        )
+        .route(
+            "/channels/{id}/keys/{key_id}/secret",
+            get(crate::api::keys::reveal),
         )
         .route(
             "/channels/{id}/keys",

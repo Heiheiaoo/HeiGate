@@ -181,11 +181,6 @@ pub struct ChannelRequest {
     extra_models: Vec<String>,
     #[serde(default)]
     enabled: Option<bool>,
-    /// Accepted for API compatibility; automatic probes are disabled, so the
-    /// persisted value is always forced to zero.
-    #[serde(default)]
-    #[allow(dead_code)]
-    interval_seconds: Option<i64>,
 }
 
 /// Builds a channel from user input, defaulting the API mode and endpoint and

@@ -45,25 +45,3 @@ pub async fn preview(State(state): State<SharedState>, Json(backup): Json<Backup
 pub async fn import(State(state): State<SharedState>, Json(backup): Json<Backup>) -> Response {
     result(state.store.import_config(&backup))
 }
-#[derive(Deserialize)]
-pub struct Merge {
-    target_id: i64,
-    source_ids: Vec<i64>,
-    #[serde(default)]
-    revision: Option<String>,
-}
-pub async fn merge_preview(State(state): State<SharedState>, Json(body): Json<Merge>) -> Response {
-    result(
-        state
-            .store
-            .merge_channels(body.target_id, &body.source_ids, false, None),
-    )
-}
-pub async fn merge(State(state): State<SharedState>, Json(body): Json<Merge>) -> Response {
-    result(state.store.merge_channels(
-        body.target_id,
-        &body.source_ids,
-        true,
-        body.revision.as_deref(),
-    ))
-}

@@ -42,6 +42,8 @@ function appendBatch() {
 .key-input-row { display: flex; gap: 8px; align-items: center; }
 .key-input-row input { min-width: 0; flex: 1; }
 .key-inputs textarea { height: auto; margin: 8px 0; }
+.key-inputs details { width: 100%; }
+.key-inputs details textarea { display: block; width: 100%; }
 .key-inputs small { color: #64748b; }
 .key-inputs summary { cursor: pointer; font-size: 13px; }
 </style>

@@ -9,14 +9,14 @@ const props = {
   allDetectedChannelModels: ['upstream-model'],
   existingCanonicalModelNames: ['canonical-model'],
   customModelMappings: {},
-  appVersion: '1.0.5',
+  appVersion: '2.0.0',
 }
 
 describe('ModelRulesSettings', () => {
   it('renders empty rules, model suggestions and the supplied version', () => {
     const wrapper = mount(ModelRulesSettings, { props })
     expect(wrapper.text()).toContain('暂无自定义归类规则')
-    expect(wrapper.text()).toContain('v1.0.5')
+    expect(wrapper.text()).toContain('v2.0.0')
     expect(wrapper.get('datalist#source-model-suggestions option').attributes('value')).toBe('upstream-model')
     expect(wrapper.get('datalist#target-model-suggestions option').attributes('value')).toBe('canonical-model')
     expect(wrapper.emitted()).toEqual({})

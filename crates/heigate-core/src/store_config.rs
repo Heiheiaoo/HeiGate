@@ -1,5 +1,4 @@
-//! Portable configuration contains no runtime state. Imports append atomically;
-//! merges preserve sources for audit and recovery.
+//! Portable configuration contains no runtime state. Imports append atomically.
 use crate::{
     probe,
     store::{Result, Store, StoreError},
@@ -236,86 +235,6 @@ impl Store {
         tx.commit()?;
         Ok(ids)
     }
-
-    pub fn merge_channels(
-        &self,
-        target: i64,
-        sources: &[i64],
-        commit: bool,
-        expected_revision: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        if sources.is_empty() || sources.len() > 100 || sources.contains(&target) {
-            return Err(StoreError::Invalid("请选择不同的源渠道和目标渠道".into()));
-        }
-        let _guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
-        let target_channel = self.get(target)?;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for id in std::iter::once(&target).chain(sources.iter()) {
-            let c = self.get(*id)?;
-            (
-                &c.name,
-                &c.endpoint,
-                &c.provider,
-                &c.api_mode,
-                &c.primary_model,
-                &c.extra_models,
-                c.enabled,
-            )
-                .hash(&mut hasher);
-            for k in self.list_keys(*id)? {
-                (k.id, k.generation, k.enabled, k.name, k.position).hash(&mut hasher);
-            }
-        }
-        let revision = format!("{:x}", hasher.finish());
-        if commit && expected_revision != Some(revision.as_str()) {
-            return Err(StoreError::Invalid(
-                "渠道或 Key 状态已变化，请重新预览后确认".into(),
-            ));
-        }
-        let mut names = Vec::new();
-        for source in sources {
-            let channel = self.get(*source)?;
-            let mut a = channel.extra_models.clone();
-            a.sort();
-            a.dedup();
-            let mut b = target_channel.extra_models.clone();
-            b.sort();
-            b.dedup();
-            if probe::normalize_endpoint(&channel.endpoint)
-                != probe::normalize_endpoint(&target_channel.endpoint)
-                || channel.provider != target_channel.provider
-                || channel.api_mode != target_channel.api_mode
-                || channel.primary_model != target_channel.primary_model
-                || a != b
-            {
-                return Err(StoreError::Invalid(
-                    "地址、协议或模型配置不同，不能直接合并；请先对齐配置".into(),
-                ));
-            }
-            names.push(channel.name);
-        }
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let mut added = 0;
-        for source in sources {
-            added+=tx.execute("INSERT OR IGNORE INTO channel_keys(channel_id,name,secret,enabled,position,auth_invalid,rate_limit_count,cooldown_until,last_error,generation) SELECT ?,name,secret,enabled,position+COALESCE((SELECT MAX(position)+1 FROM channel_keys WHERE channel_id=?),0),auth_invalid,rate_limit_count,cooldown_until,last_error,generation FROM channel_keys WHERE channel_id=?",params![target,target,source])?;
-            tx.execute("INSERT INTO channel_key_models(key_id,model,unavailable_until) SELECT dst.id,m.model,m.unavailable_until FROM channel_key_models m JOIN channel_keys src ON src.id=m.key_id JOIN channel_keys dst ON dst.channel_id=? AND dst.secret=src.secret WHERE src.channel_id=? ON CONFLICT(key_id,model) DO UPDATE SET unavailable_until=MAX(unavailable_until,excluded.unavailable_until)",params![target,source])?;
-            if commit {
-                tx.execute(
-                    "UPDATE desktop_channels SET enabled=0,updated_at=? WHERE id=?",
-                    params![Utc::now().to_rfc3339(), source],
-                )?;
-            }
-        }
-        let result = serde_json::json!({"target":target_channel.name,"sources":names,"added_keys":added,"source_action":"disable","revision":revision});
-        if commit {
-            tx.commit()?;
-        } else {
-            tx.rollback()?;
-        }
-        Ok(result)
-    }
 }
 
 #[cfg(test)]
@@ -350,56 +269,5 @@ mod tests {
         backup.channels.push(invalid);
         assert!(store.import_config(&backup).is_err());
         assert!(store.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn duplicate_preserves_key_pool_and_stale_merge_is_rejected() {
-        let store = Store::open_in_memory().unwrap();
-        let a = store.import_config(&sample()).unwrap()[0];
-        store
-            .add_keys(
-                a,
-                &[crate::store_keys::KeyInput {
-                    name: "B".into(),
-                    secret: "key-b".into(),
-                }],
-            )
-            .unwrap();
-        let b = store.duplicate_with_keys(a).unwrap();
-        assert_eq!(store.list_keys(b).unwrap().len(), 2);
-        let preview = store.merge_channels(a, &[b], false, None).unwrap();
-        let key = store.list_keys(b).unwrap().remove(0);
-        store
-            .patch_key(
-                b,
-                key.id,
-                &crate::store_keys::KeyPatch {
-                    enabled: Some(false),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(store
-            .merge_channels(a, &[b], true, preview["revision"].as_str())
-            .is_err());
-        assert!(store.get(b).unwrap().enabled);
-    }
-    #[test]
-    fn merge_preview_does_not_mutate_and_commit_preserves_source() {
-        let store = Store::open_in_memory().unwrap();
-        let a = store.import_config(&sample()).unwrap()[0];
-        let mut other = sample();
-        other.channels[0].api_key = Some("second-key".into());
-        let b = store.import_config(&other).unwrap()[0];
-        let preview = store.merge_channels(a, &[b], false, None).unwrap();
-        assert_eq!(preview["added_keys"], 1);
-        assert_eq!(store.list_keys(a).unwrap().len(), 1);
-        assert!(store.get(b).unwrap().enabled);
-        store
-            .merge_channels(a, &[b], true, preview["revision"].as_str())
-            .unwrap();
-        assert_eq!(store.list_keys(a).unwrap().len(), 2);
-        assert!(!store.get(b).unwrap().enabled);
-        assert_eq!(store.list_keys(b).unwrap().len(), 1);
     }
 }

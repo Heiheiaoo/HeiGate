@@ -22,6 +22,16 @@ export async function probeKey(channelId: number, keyId: number) {
   return result.data as Array<{ status: string; message: string; key_id: number; key_name: string }>
 }
 
+export async function revealKey(channelId: number, keyId: number): Promise<string> {
+  const response = await fetch(`/api/channels/${channelId}/keys/${keyId}/secret`, {
+    headers: { 'X-HeiGate-Request': '1' },
+    signal: AbortSignal.timeout(30000),
+  })
+  const result = await response.json()
+  if (!response.ok) throw new Error(result.error || '读取 Key 失败')
+  return String(result.data?.secret ?? '')
+}
+
 export async function keyRequest(channelId: number, method = 'GET', body?: unknown, keyId?: number): Promise<ChannelKey[]> {
   const response = await fetch(`/api/channels/${channelId}/keys${keyId === undefined ? '' : '/' + keyId}`, {
     method,

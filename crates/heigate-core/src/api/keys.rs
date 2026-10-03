@@ -58,6 +58,26 @@ pub async fn list(State(state): State<SharedState>, Path(channel_id): Path<i64>)
     }
 }
 
+/// Reveals one key only when the user explicitly requests it from the local UI.
+/// The regular list endpoint intentionally remains redacted.
+pub async fn reveal(
+    State(state): State<SharedState>,
+    Path((channel_id, key_id)): Path<(i64, i64)>,
+) -> Response {
+    if let Err(err) = state.store.get(channel_id) {
+        return error(err);
+    }
+    match state
+        .store
+        .list_keys(channel_id)
+        .ok()
+        .and_then(|keys| keys.into_iter().find(|key| key.id == key_id))
+    {
+        Some(key) => Json(json!({"data": {"secret": key.secret}})).into_response(),
+        None => error(StoreError::NotFound(key_id)),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct AddKeys {
     pub keys: Vec<KeyInput>,

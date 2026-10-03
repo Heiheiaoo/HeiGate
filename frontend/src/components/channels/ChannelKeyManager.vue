@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { keyRequest, probeKey, type ChannelKey } from '@/services/channelKeys'
-import { configRequest } from '@/services/configTransfer'
+import { keyRequest, probeKey, revealKey, type ChannelKey } from '@/services/channelKeys'
 
 const props = defineProps<{ channels: Array<{ gatewayId?: number; name: string; enabled?: boolean }>; fixedChannelId?: number; embedded?: boolean }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
@@ -16,8 +15,9 @@ const editName = ref('')
 const editSecret = ref('')
 const deleteId = ref<number | null>(null)
 const testIds = ref<number[]>([])
-const mergeSource = ref<number | undefined>()
-const mergePreview = ref<{ target: string; sources: string[]; added_keys: number; revision: string } | null>(null)
+const revealedKeys = ref<Record<number, string>>({})
+const revealingId = ref<number | null>(null)
+const copiedId = ref<number | null>(null)
 const now = ref(Date.now())
 const timer = setInterval(() => { now.value = Date.now() }, 1000)
 onBeforeUnmount(() => clearInterval(timer))
@@ -54,8 +54,8 @@ watch(channelId, () => {
   batch.value = ''
   editId.value = null
   deleteId.value = null
-  mergeSource.value = undefined
-  mergePreview.value = null
+  revealedKeys.value = {}
+  copiedId.value = null
   void run()
 }, { immediate: true })
 
@@ -103,25 +103,53 @@ async function testKeys() {
   }
 }
 
-async function merge(commit = false) {
-  if (channelId.value === undefined || mergeSource.value === undefined || busy.value) return
-  busy.value = true
+async function loadSecret(key: ChannelKey) {
+  if (revealedKeys.value[key.id] !== undefined || channelId.value === undefined || revealingId.value !== null) return revealedKeys.value[key.id] ?? ''
+  revealingId.value = key.id
   error.value = ''
   try {
-    const result = await configRequest(commit ? 'channels/merge' : 'channels/merge/preview', {
-      target_id: channelId.value, source_ids: [mergeSource.value], revision: commit ? mergePreview.value?.revision : undefined,
-    })
-    if (commit) {
-      mergePreview.value = null
-      mergeSource.value = undefined
-      keys.value = await keyRequest(channelId.value)
-      emit('changed')
-    } else mergePreview.value = result
+    const secret = await revealKey(channelId.value, key.id)
+    revealedKeys.value = { ...revealedKeys.value, [key.id]: secret }
+    return secret
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '合并失败'
-    mergePreview.value = null
-  } finally { busy.value = false }
+    error.value = err instanceof Error ? err.message : '读取 Key 失败'
+    return ''
+  } finally {
+    revealingId.value = null
+  }
 }
+
+async function toggleSecret(key: ChannelKey) {
+  if (revealedKeys.value[key.id] !== undefined) {
+    const next = { ...revealedKeys.value }
+    delete next[key.id]
+    revealedKeys.value = next
+    return
+  }
+  await loadSecret(key)
+}
+
+async function copySecret(key: ChannelKey) {
+  const secret = await loadSecret(key)
+  if (!secret) return
+  try {
+    await navigator.clipboard.writeText(secret)
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = secret
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    textarea.remove()
+  }
+  copiedId.value = key.id
+  window.setTimeout(() => {
+    if (copiedId.value === key.id) copiedId.value = null
+  }, 1600)
+}
+
 </script>
 
 <template>
@@ -151,12 +179,14 @@ async function merge(commit = false) {
       </div>
       <div v-for="key in keys" :key="key.id" class="key-row">
         <div>
-<strong>{{ key.name }}</strong> <code>{{ key.masked_secret }}</code><p>{{ status(key) }}</p>
+<strong>{{ key.name }}</strong> <code class="key-secret" :title="revealedKeys[key.id] ? '点击隐藏完整 Key' : '当前仅显示末尾字符'">{{ revealedKeys[key.id] ?? key.masked_secret }}</code><p>{{ status(key) }}</p>
           <small>选用 {{ key.attempts }} · 成功 {{ key.successes }} · 限流轮次 {{ key.rate_limits }} · Token {{ key.prompt_tokens + key.completion_tokens }}</small>
           <p v-if="key.last_error" class="key-error">{{ key.last_error }}</p>
         </div>
         <div class="key-actions">
           <button class="m26-glass-btn" :disabled="busy || channelDisabled || status(key) !== '可用'" @click="testIds = [key.id]">测试</button>
+          <button class="m26-glass-btn" :disabled="busy || revealingId === key.id" @click="toggleSecret(key)">{{ revealingId === key.id ? '读取中…' : revealedKeys[key.id] !== undefined ? '隐藏 Key' : '显示完整' }}</button>
+          <button class="m26-glass-btn" :disabled="busy || revealingId === key.id" @click="copySecret(key)">{{ copiedId === key.id ? '已复制' : '复制 Key' }}</button>
           <button class="m26-glass-btn" :disabled="busy" @click="run('PUT', { enabled: !key.enabled }, key.id)">{{ key.enabled ? '停用' : '启用' }}</button>
           <button class="m26-glass-btn" :disabled="busy" @click="edit(key)">编辑</button>
           <button class="m26-glass-btn" :disabled="busy" @click="run('PUT', { position: Math.min(...keys.map(k => k.position)) - 1 }, key.id)">置顶</button>
@@ -179,19 +209,6 @@ async function merge(commit = false) {
         <textarea placeholder="每行一把 Key" id="key-batch" v-model="batch" class="m26-input" rows="4" autocomplete="off" spellcheck="false" />
         <button class="m26-glass-btn" :disabled="busy || !batch.trim() || channelId === undefined">添加 Key</button>
       </form>
-      <div class="key-form">
-        <label for="merge-source">合并供应商</label>
-        <select id="merge-source" v-model="mergeSource" class="m26-select" :disabled="busy" @change="mergePreview = null">
-          <option :value="undefined">选择源渠道</option>
-          <option v-for="channel in channels.filter(c => c.gatewayId && c.gatewayId !== channelId)" :key="channel.gatewayId" :value="channel.gatewayId">{{ channel.name }}</option>
-        </select>
-        <button class="m26-glass-btn" :disabled="busy || mergeSource === undefined" @click="merge(false)">预览合并</button>
-        <div v-if="mergePreview" role="alert">
-          <p>将 {{ mergePreview.sources.join('、') }} 的 {{ mergePreview.added_keys }} 把非重复 Key 加入 {{ mergePreview.target }}。源渠道将停用保留，历史日志不变。</p>
-          <button class="m26-glass-btn" :disabled="busy" @click="merge(true)">确认合并并停用源渠道</button>
-          <button class="m26-glass-btn" :disabled="busy" @click="mergePreview = null">取消</button>
-        </div>
-      </div>
     </div>
   </div>
 </template>
@@ -204,6 +221,7 @@ async function merge(commit = false) {
 .key-form > button { justify-self: start; }
 .key-note { margin: 12px 0; font-size: 12px; opacity: .7; }
 .key-row { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 0; border-bottom: 1px solid #8883; overflow-wrap: anywhere; }
+.key-secret { word-break: break-all; }
 .key-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .key-form { display: grid; gap: 10px; padding: 16px 0; }
 .key-form textarea { height: auto; min-height: 90px; }
