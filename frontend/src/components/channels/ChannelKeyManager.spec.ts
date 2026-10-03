@@ -9,6 +9,15 @@ vi.mock('@/services/channelKeys', () => ({ keyRequest: vi.fn() }))
 const key = { id: 1, channel_id: 7, name: 'Primary', masked_secret: '••••abcd', enabled: true, position: 0, auth_invalid: false, cooldown_until: null, last_error: '', attempts: 0, successes: 0, rate_limits: 0, prompt_tokens: 0, completion_tokens: 0 }
 beforeEach(() => { vi.mocked(keyRequest).mockReset().mockResolvedValue([key, { ...key, id: 2, name: 'Backup' }]) })
 describe('ChannelKeyManager', () => {
+  it('embeds only the edited supplier without a second selector or close button', async () => {
+    const wrapper = mount(ChannelKeyManager, { props: { channels: [{ gatewayId: 7, name: 'Supplier' }, { gatewayId: 8, name: 'Edited' }], fixedChannelId: 8, embedded: true } })
+    await flushPromises()
+    expect(keyRequest).toHaveBeenLastCalledWith(8, 'GET', undefined, undefined)
+    expect(wrapper.find('#key-channel').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="关闭"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('立即生效')
+    wrapper.unmount()
+  })
   it('requires merge preview and sends its revision only after confirmation', async () => {
     vi.mocked(configRequest).mockReset().mockResolvedValue({ target: 'Supplier', sources: ['Source'], added_keys: 1, revision: 'rev-1' })
     const wrapper = mount(ChannelKeyManager, { props: { channels: [{ gatewayId: 7, name: 'Supplier' }, { gatewayId: 8, name: 'Source' }] } })

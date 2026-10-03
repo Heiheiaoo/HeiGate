@@ -5,11 +5,9 @@ import { checkGatewayHealth } from '@/services/health'
 import { configRequest, downloadConfig } from '@/services/configTransfer'
 import {
   clearLogs,
-  createChannel,
   deleteChannel,
   duplicateChannel as apiDuplicateChannel,
   fetchUpstreamModels as apiFetchUpstreamModels,
-  getChannel,
   getGatewayKey,
   injectionCheck,
   type ModelInjectionResult,
@@ -38,6 +36,7 @@ import {
 import { vFocusTrap, openModalCount } from '@/directives/focusTrap'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelKeyManager from '@/components/channels/ChannelKeyManager.vue'
+import ChannelKeyInputs from '@/components/channels/ChannelKeyInputs.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
@@ -99,7 +98,6 @@ function checkTabsFit() {
 }
 const showAddChannel = ref(false)
 const showEditChannel = ref(false)
-const showKeyManager = ref(false)
 const editingChannel = ref<Channel | null>(null)
 const showApiKey = ref(false)
 const channelSearch = ref('')
@@ -227,18 +225,15 @@ const newChannelEnabled = ref(true)
 const newChannelPrimaryModel = ref('')
 const newChannelModelNames = ref<string[]>([])
 const isFetchingNewModels = ref(false)
-const showNewKey = ref(false)
 
 // Edit Channel Form State
 const editChannelName = ref('')
 const editChannelUrl = ref('')
-const editChannelKey = ref('')
 const editChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const editChannelEnabled = ref(true)
 const editChannelPrimaryModel = ref('')
 const editChannelModelNames = ref<string[]>([])
 const isFetchingEditModels = ref(false)
-const showEditKey = ref(false)
 
 const configInput = ref<HTMLInputElement | null>(null)
 const gatewayApiActive = ref(false)
@@ -1288,18 +1283,8 @@ async function openEditChannel(channel: Channel) {
   editChannelName.value = channel.name
   editChannelUrl.value = channel.url
 
-  let rawKey = (channel.keyCount ?? 1) > 1 ? '' : channel.apiKey || ''
-  if ((channel.keyCount ?? 1) <= 1 && (!rawKey || rawKey.includes('***')) && channel.gatewayId) {
-    const fresh = await getChannel(channel.gatewayId, true)
-    if (fresh?.apiKey && !fresh.apiKey.includes('***')) {
-      rawKey = fresh.apiKey
-      channel.apiKey = fresh.apiKey
-    }
-  }
-  editChannelKey.value = rawKey
   editChannelProtocol.value = channel.protocol
   editChannelEnabled.value = channel.enabled
-  showEditKey.value = false
   const primary = channel.primaryModel || channel.modelNames?.[0] || 'gpt-4o-mini'
   editChannelPrimaryModel.value = primary
   editChannelModelNames.value = channel.modelNames?.length ? [...channel.modelNames] : [primary]
@@ -1319,7 +1304,7 @@ async function saveEditChannel() {
     return
   }
   const finalUrl = normalizeEndpointUrl(rawUrl)
-  const target = editingChannel.value
+  const target = { ...editingChannel.value }
   const primaryChanged = target.primaryModel !== primaryModel
   target.name = name
   target.url = finalUrl
@@ -1330,11 +1315,8 @@ async function saveEditChannel() {
   target.models = target.modelNames.length
   target.accent = target.protocol === 'anthropic' ? '#f59e0b' : target.protocol === 'openai-responses' ? '#3b82f6' : '#10b981'
 
-  if (editChannelKey.value.trim() && !editChannelKey.value.includes('***')) {
-    target.apiKey = editChannelKey.value.trim()
-  } else if (!editChannelKey.value.trim()) {
-    target.apiKey = ''
-  }
+  // Credentials are managed by the embedded key panel, never overwrite them here.
+  target.apiKey = ''
 
   // If primary model changed, sync target status/latency from cached primary model if exists
   if (primaryChanged) {
@@ -1354,7 +1336,12 @@ async function saveEditChannel() {
     }
   }
 
-  await persistChannel(target)
+  const saved = await updateChannel(toDesktopChannel(target))
+  if (!saved) {
+    showToast('保存失败，表单已保留，请重试')
+    return
+  }
+  await refreshChannels()
   showEditChannel.value = false
   editingChannel.value = null
   showToast(`渠道“${name}”配置已保存`)
@@ -2402,11 +2389,7 @@ type UpstreamModelsPayload = {
 
 async function fetchUpstreamModels(mode: 'new' | 'edit') {
   const url = mode === 'new' ? newChannelUrl.value : editChannelUrl.value
-  const apiKey = mode === 'new'
-    ? newChannelKey.value
-    : editChannelKey.value.includes('***')
-      ? editingChannel.value?.apiKey ?? ''
-      : editChannelKey.value
+  const apiKey = mode === 'new' ? newChannelKey.value.split(/\r?\n/).map(s => s.trim()).find(Boolean) || '' : ''
   const protocol = mode === 'new' ? newChannelProtocol.value : editChannelProtocol.value
   const setLoading = mode === 'new' ? (value: boolean) => { isFetchingNewModels.value = value } : (value: boolean) => { isFetchingEditModels.value = value }
   if (!url.trim()) {
@@ -2511,6 +2494,8 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
   }
 }
 
+const isCreatingChannel = ref(false)
+
 async function addChannel() {
   const rawUrl = newChannelUrl.value.trim()
   const name = newChannelName.value.trim()
@@ -2524,40 +2509,32 @@ async function addChannel() {
     showToast('请完整填写渠道名称、接口协议与主模型')
     return
   }
-  const finalUrl = normalizeEndpointUrl(rawUrl)
-  const draft: Channel = {
-    name,
-    url: finalUrl,
-    apiKey: newChannelKey.value.trim(),
-    protocol: newChannelProtocol.value,
-    primaryModel: model,
-    status: 'unknown',
-    latency: null,
-    ttft: null,
-    models: modelNames.length,
-    lastCheck: '尚未探活',
-    accent: newChannelProtocol.value === 'anthropic' ? '#f59e0b' : newChannelProtocol.value === 'openai-responses' ? '#3b82f6' : '#10b981',
-    enabled: newChannelEnabled.value,
-    modelNames,
+  const secrets = [...new Set(newChannelKey.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean))]
+  if (!gatewayApiActive.value || !secrets.length || secrets.length > 100) {
+    showToast('请连接本地网关，并填写 1–100 把 Key')
+    return
   }
-  if (gatewayApiActive.value) {
-    const created = await createChannel({ ...toDesktopChannel(draft), apiKey: newChannelKey.value.trim() })
-    if (created) {
-      channels.value.unshift(fromDesktopChannel(created))
-      showToast(`渠道“${name}”创建成功`)
-    } else {
-      // 保留表单内容以便重试；不落本地存储，否则刷新后副本会消失。
-      showToast(`渠道“${name}”创建失败，请检查网关状态后重试`)
-      return
-    }
-  } else {
-    channels.value.unshift(draft)
-    showToast(`渠道“${name}”已保存`)
-  }
+  if (isCreatingChannel.value) return
+  isCreatingChannel.value = true
+  try {
+    // Reuse the transactional channel + key insertion: never leave a half-created pool.
+    await configRequest('config/import', {
+      format: 'heigate-config', version: 2, includes_secrets: true,
+      channels: [{
+        name, url: normalizeEndpointUrl(rawUrl), protocol: newChannelProtocol.value,
+        primaryModel: model, modelNames, enabled: newChannelEnabled.value,
+        keys: secrets.map((secret, position) => ({ name: `Key ${position + 1}`, secret, enabled: true, position })),
+      }],
+    })
+    await refreshChannels()
+    showToast(`渠道“${name}”创建成功，共 ${secrets.length} 把 Key`)
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '创建失败，表单已保留')
+    return
+  } finally { isCreatingChannel.value = false }
   newChannelName.value = ''
   newChannelUrl.value = ''
   newChannelKey.value = ''
-  showNewKey.value = false
   newChannelPrimaryModel.value = ''
   newChannelModelNames.value = []
   newChannelProtocol.value = 'openai-compatible'
@@ -2567,7 +2544,6 @@ async function addChannel() {
 }
 
 function openAddChannel() {
-  showNewKey.value = false
   showAddChannel.value = true
 }
 
@@ -3146,7 +3122,6 @@ function handleContextMenu(event: MouseEvent) {
             @update:filter-status="channelStatusFilter = $event"
             @update:view-mode="setChannelViewMode($event)"
             @add-channel="openAddChannel"
-            @manage-keys="showKeyManager = true"
           />
 
           <!-- Card Grid View -->
@@ -3568,9 +3543,6 @@ function handleContextMenu(event: MouseEvent) {
     </main>
 
     <!-- Hidden Input for Import -->
-    <div v-if="showKeyManager" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="key-manager-title" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showKeyManager = false)">
-      <ChannelKeyManager :channels="channels" @close="showKeyManager = false; refreshChannels()" @changed="refreshChannels()" />
-    </div>
 
     <input ref="configInput" type="file" accept=".json" class="hidden" @change="importConfig" />
 
@@ -3620,33 +3592,7 @@ function handleContextMenu(event: MouseEvent) {
             <input v-model="newChannelUrl" type="text" class="m26-input" placeholder="https://api.openai.com/v1" />
           </div>
 
-          <div class="m26-form-group">
-            <label class="m26-label">API 密钥 (API Key)</label>
-            <div class="m26-input-wrapper">
-              <input
-                v-model="newChannelKey"
-                :type="showNewKey ? 'text' : 'password'"
-                class="m26-input"
-                placeholder="sk-..."
-              />
-              <button
-                type="button"
-                class="m26-input-eye"
-                tabindex="-1"
-                @click="showNewKey = !showNewKey"
-                :title="showNewKey ? '隐藏密钥' : '显示密钥'"
-              >
-                <svg v-if="showNewKey" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                  <line x1="1" y1="1" x2="23" y2="23" />
-                </svg>
-                <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-              </button>
-            </div>
-          </div>
+          <ChannelKeyInputs v-model="newChannelKey" />
 
           <div class="m26-form-group">
             <ChannelModelManager
@@ -3660,7 +3606,7 @@ function handleContextMenu(event: MouseEvent) {
 
         <div class="m26-modal-footer">
           <button class="m26-glass-btn" @click="showAddChannel = false">取消</button>
-          <button class="m26-action-btn primary" @click="addChannel">确认创建</button>
+          <button class="m26-action-btn primary" :disabled="isCreatingChannel" @click="addChannel">{{ isCreatingChannel ? '创建中…' : '确认创建' }}</button>
         </div>
       </div>
     </div>
@@ -3695,35 +3641,7 @@ function handleContextMenu(event: MouseEvent) {
             <input v-model="editChannelUrl" type="text" class="m26-input" />
           </div>
 
-          <div class="m26-form-group">
-            <label class="m26-label">API 密钥</label>
-            <div class="m26-input-wrapper">
-              <input
-                v-model="editChannelKey"
-                :disabled="(editingChannel?.keyCount ?? 1) > 1"
-                :type="showEditKey ? 'text' : 'password'"
-                class="m26-input"
-                placeholder="请输入 API 密钥"
-              />
-              <span v-if="(editingChannel?.keyCount ?? 1) > 1" class="text-xs">多 Key 请通过「Key 管理」编辑</span>
-              <button
-                type="button"
-                class="m26-input-eye"
-                tabindex="-1"
-                @click="showEditKey = !showEditKey"
-                :title="showEditKey ? '隐藏密钥' : '显示密钥'"
-              >
-                <svg v-if="showEditKey" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                  <line x1="1" y1="1" x2="23" y2="23" />
-                </svg>
-                <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-              </button>
-            </div>
-          </div>
+          <ChannelKeyManager v-if="editingChannel?.gatewayId" :key="editingChannel.gatewayId" :channels="channels" :fixed-channel-id="editingChannel.gatewayId" embedded @changed="refreshChannels()" />
 
           <div class="m26-form-group">
             <ChannelModelManager

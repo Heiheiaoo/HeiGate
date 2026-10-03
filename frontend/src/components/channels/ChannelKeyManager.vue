@@ -3,9 +3,9 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { keyRequest, probeKey, type ChannelKey } from '@/services/channelKeys'
 import { configRequest } from '@/services/configTransfer'
 
-const props = defineProps<{ channels: Array<{ gatewayId?: number; name: string; enabled?: boolean }> }>()
+const props = defineProps<{ channels: Array<{ gatewayId?: number; name: string; enabled?: boolean }>; fixedChannelId?: number; embedded?: boolean }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
-const channelId = ref<number | undefined>((props.channels.find(c => c.gatewayId && c.enabled !== false) ?? props.channels.find(c => c.gatewayId))?.gatewayId)
+const channelId = ref<number | undefined>(props.fixedChannelId ?? (props.channels.find(c => c.gatewayId && c.enabled !== false) ?? props.channels.find(c => c.gatewayId))?.gatewayId)
 const channelDisabled = computed(() => props.channels.find(c => c.gatewayId === channelId.value)?.enabled === false)
 const keys = ref<ChannelKey[]>([])
 const busy = ref(false)
@@ -39,6 +39,7 @@ async function run(method = 'GET', body?: unknown, keyId?: number) {
   try {
     const result = await keyRequest(id, method, body, keyId)
     if (id === channelId.value) keys.value = result
+    if (method !== 'GET') emit('changed')
     return true
   } catch (err) {
     error.value = err instanceof Error ? err.message : '请求失败'
@@ -124,14 +125,16 @@ async function merge(commit = false) {
 </script>
 
 <template>
-  <div class="m26-modal-sheet key-manager">
-    <div class="m26-modal-header">
+  <div class="key-manager" :class="{ 'm26-modal-sheet': !embedded, 'key-manager-embedded': embedded }">
+    <div v-if="!embedded" class="m26-modal-header">
       <h3 id="key-manager-title" class="m26-modal-title">供应商 Key 管理</h3>
       <button class="m26-close-btn" aria-label="关闭" @click="$emit('close')">✕</button>
     </div>
-    <div class="m26-modal-body">
-      <label class="m26-label" for="key-channel">选择供应商渠道</label>
-      <select id="key-channel" v-model="channelId" class="m26-select" :disabled="busy">
+    <div :class="{ 'm26-modal-body': !embedded }">
+      <h4 v-if="embedded" class="m26-label">API 密钥（多 Key 顺序轮询）</h4>
+      <p v-if="embedded" class="key-note">下方 Key 操作单独确认后立即生效，不随窗口的取消撤销。渠道名称、地址和模型使用底部“保存修改”。</p>
+      <label v-if="!embedded" class="m26-label" for="key-channel">选择供应商渠道</label>
+      <select v-if="!embedded" id="key-channel" v-model="channelId" class="m26-select" :disabled="busy">
         <option v-for="channel in channels.filter(c => c.gatewayId)" :key="channel.gatewayId" :value="channel.gatewayId">{{ channel.name }}</option>
       </select>
       <p class="key-note">{{ keys.length }} 把 Key · {{ readyCount }} 可用 · 顺序轮询。429 冷却 5 / 10 / 20 / 30 分钟；上游要求更久时遵守上游。</p>
@@ -195,6 +198,7 @@ async function merge(commit = false) {
 
 <style scoped>
 .key-manager { max-width: 850px; width: min(850px, 95vw); }
+.key-manager-embedded { width: 100%; min-width: 0; }
 .key-manager .m26-modal-body { display: block; }
 .key-manager .m26-glass-btn { width: auto; min-height: 32px; }
 .key-form > button { justify-self: start; }
