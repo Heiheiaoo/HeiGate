@@ -14,6 +14,12 @@ function mountManager(overrides: Partial<InstanceType<typeof ChannelModelManager
 }
 
 describe('ChannelModelManager', () => {
+  it('keeps model labels concise without explanatory paragraphs', () => {
+    const wrapper = mountManager()
+    expect(wrapper.text()).not.toContain('周期探活')
+    expect(wrapper.get('.m26-primary-model-box input').attributes('placeholder')).toBe('模型名称')
+    expect(wrapper.get('.m26-mgr-fetch-btn').text()).toBe('获取模型')
+  })
   it('adds pasted model names, removes duplicates, and keeps the existing primary', async () => {
     const wrapper = mountManager()
     const input = wrapper.get('.m26-add-bar input')

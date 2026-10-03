@@ -4,6 +4,12 @@ import { mount } from '@vue/test-utils'
 import ChannelKeyInputs from './ChannelKeyInputs.vue'
 
 describe('ChannelKeyInputs', () => {
+  it('shows a short label without routing instructions', () => {
+    const wrapper = mount(ChannelKeyInputs, { props: { modelValue: '' } })
+    expect(wrapper.get('label').text()).toBe('API Key')
+    expect(wrapper.text()).not.toContain('冷却')
+    expect(wrapper.get('summary').text()).toBe('批量添加')
+  })
   it('adds masked rows and emits all keys together', async () => {
     const wrapper = mount(ChannelKeyInputs, { props: { modelValue: '' } })
     await wrapper.get('input').setValue('key-a')

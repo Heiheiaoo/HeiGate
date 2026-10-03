@@ -3564,31 +3564,31 @@ function handleContextMenu(event: MouseEvent) {
 
     <!-- MODAL: ADD CHANNEL -->
     <div v-if="showAddChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-2" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showAddChannel = false)">
-      <div class="m26-modal-sheet">
+      <div class="m26-modal-sheet supplier-sheet">
         <div class="m26-modal-header">
-          <h3 id="m26-modal-title-2" class="m26-modal-title">添加供应商渠道</h3>
+          <h3 id="m26-modal-title-2" class="m26-modal-title">添加供应商</h3>
           <button class="m26-close-btn" aria-label="关闭" @click="showAddChannel = false">✕</button>
         </div>
 
-        <div class="m26-modal-body">
+        <div class="m26-modal-body supplier-form">
           <div class="m26-form-group">
-            <label class="m26-label">渠道名称</label>
-            <input v-model="newChannelName" type="text" class="m26-input" placeholder="例如：Anthropic 官方主力 / DeepSeek V3" />
+            <label class="m26-label">名称</label>
+            <input v-model="newChannelName" type="text" class="m26-input" placeholder="供应商名称" />
           </div>
 
           <div class="m26-form-row">
             <div class="m26-form-group">
-              <label class="m26-label">接口协议</label>
+              <label class="m26-label">协议</label>
               <select v-model="newChannelProtocol" class="m26-select">
-                <option value="openai-compatible">OpenAI Compatible (Chat Completions)</option>
-                <option value="anthropic">Anthropic Claude (/v1/messages)</option>
-                <option value="openai-responses">OpenAI Responses API (原生补全)</option>
+                <option value="openai-compatible">OpenAI Compatible</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="openai-responses">OpenAI Responses</option>
               </select>
             </div>
           </div>
 
           <div class="m26-form-group">
-            <label class="m26-label">Base URL (API 端点)</label>
+            <label class="m26-label">Base URL</label>
             <input v-model="newChannelUrl" type="text" class="m26-input" placeholder="https://api.openai.com/v1" />
           </div>
 
@@ -3606,38 +3606,38 @@ function handleContextMenu(event: MouseEvent) {
 
         <div class="m26-modal-footer">
           <button class="m26-glass-btn" @click="showAddChannel = false">取消</button>
-          <button class="m26-action-btn primary" :disabled="isCreatingChannel" @click="addChannel">{{ isCreatingChannel ? '创建中…' : '确认创建' }}</button>
+          <button class="m26-action-btn primary" :disabled="isCreatingChannel" @click="addChannel">{{ isCreatingChannel ? '创建中…' : '创建' }}</button>
         </div>
       </div>
     </div>
 
     <!-- MODAL: EDIT CHANNEL -->
     <div v-if="showEditChannel" v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-3" class="m26-modal-backdrop" @mousedown="onBackdropMouseDown" @click="handleBackdropClick($event, () => showEditChannel = false)">
-      <div class="m26-modal-sheet">
+      <div class="m26-modal-sheet supplier-sheet">
         <div class="m26-modal-header">
-          <h3 id="m26-modal-title-3" class="m26-modal-title">编辑渠道配置</h3>
+          <h3 id="m26-modal-title-3" class="m26-modal-title">编辑供应商</h3>
           <button class="m26-close-btn" aria-label="关闭" @click="showEditChannel = false">✕</button>
         </div>
 
-        <div class="m26-modal-body">
+        <div class="m26-modal-body supplier-form">
           <div class="m26-form-group">
-            <label class="m26-label">渠道名称</label>
+            <label class="m26-label">名称</label>
             <input v-model="editChannelName" type="text" class="m26-input" />
           </div>
 
           <div class="m26-form-row">
             <div class="m26-form-group">
-              <label class="m26-label">接口协议</label>
+              <label class="m26-label">协议</label>
               <select v-model="editChannelProtocol" class="m26-select">
-                <option value="openai-compatible">OpenAI Compatible (Chat Completions)</option>
-                <option value="anthropic">Anthropic Claude (/v1/messages)</option>
-                <option value="openai-responses">OpenAI Responses API (原生补全)</option>
+                <option value="openai-compatible">OpenAI Compatible</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="openai-responses">OpenAI Responses</option>
               </select>
             </div>
           </div>
 
           <div class="m26-form-group">
-            <label class="m26-label">Base URL (API 端点)</label>
+            <label class="m26-label">Base URL</label>
             <input v-model="editChannelUrl" type="text" class="m26-input" />
           </div>
 
@@ -3655,7 +3655,7 @@ function handleContextMenu(event: MouseEvent) {
 
         <div class="m26-modal-footer">
           <button class="m26-glass-btn" @click="showEditChannel = false">取消</button>
-          <button class="m26-action-btn primary" @click="saveEditChannel">保存修改</button>
+          <button class="m26-action-btn primary" @click="saveEditChannel">保存</button>
         </div>
       </div>
     </div>
@@ -3989,6 +3989,17 @@ function handleContextMenu(event: MouseEvent) {
 .m26-modal-header {
   user-select: none;
   -webkit-user-select: none;
+}
+
+.m26-modal-sheet.supplier-sheet { max-width: 800px; }
+.supplier-sheet .supplier-form { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 24px; }
+.supplier-form > * { grid-column: 1 / -1; min-width: 0; }
+.supplier-form > :first-child { grid-column: 1; }
+.supplier-form > .m26-form-row { grid-column: 2; grid-template-columns: 1fr; }
+.supplier-form .m26-select { width: 100%; }
+@media (max-width: 600px) {
+  .supplier-sheet .supplier-form { grid-template-columns: 1fr; }
+  .supplier-form > :first-child, .supplier-form > .m26-form-row { grid-column: 1; }
 }
 
 /* Ambient dynamic background in delicate light pastels */

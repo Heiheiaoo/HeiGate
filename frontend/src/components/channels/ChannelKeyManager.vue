@@ -131,13 +131,13 @@ async function merge(commit = false) {
       <button class="m26-close-btn" aria-label="关闭" @click="$emit('close')">✕</button>
     </div>
     <div :class="{ 'm26-modal-body': !embedded }">
-      <h4 v-if="embedded" class="m26-label">API 密钥（多 Key 顺序轮询）</h4>
-      <p v-if="embedded" class="key-note">下方 Key 操作单独确认后立即生效，不随窗口的取消撤销。渠道名称、地址和模型使用底部“保存修改”。</p>
+      <h4 v-if="embedded" class="m26-label">API Key</h4>
+      <p v-if="embedded" class="key-note">Key 更改立即生效</p>
       <label v-if="!embedded" class="m26-label" for="key-channel">选择供应商渠道</label>
       <select v-if="!embedded" id="key-channel" v-model="channelId" class="m26-select" :disabled="busy">
         <option v-for="channel in channels.filter(c => c.gatewayId)" :key="channel.gatewayId" :value="channel.gatewayId">{{ channel.name }}</option>
       </select>
-      <p class="key-note">{{ keys.length }} 把 Key · {{ readyCount }} 可用 · 顺序轮询。429 冷却 5 / 10 / 20 / 30 分钟；上游要求更久时遵守上游。</p>
+      <p class="key-note">{{ keys.length }} 把 Key · {{ readyCount }} 可用</p>
       <p v-if="error" role="alert" class="key-error">{{ error }}</p>
       <p v-if="channelDisabled" class="key-error">当前渠道已停用，Key 不会参与转发或测试。</p>
       <div class="key-actions">
@@ -175,12 +175,12 @@ async function merge(commit = false) {
         <button class="m26-glass-btn" @click="deleteId = null">取消</button>
       </div>
       <form class="key-form" @submit.prevent="add">
-        <label for="key-batch">批量添加密钥（一行一把，最多 100 把）</label>
-        <textarea id="key-batch" v-model="batch" class="m26-input" rows="4" autocomplete="off" spellcheck="false" />
+        <label for="key-batch">添加 Key</label>
+        <textarea placeholder="每行一把 Key" id="key-batch" v-model="batch" class="m26-input" rows="4" autocomplete="off" spellcheck="false" />
         <button class="m26-glass-btn" :disabled="busy || !batch.trim() || channelId === undefined">添加 Key</button>
       </form>
       <div class="key-form">
-        <label for="merge-source">合并重复供应商到当前渠道（地址、协议及模型配置必须一致）</label>
+        <label for="merge-source">合并供应商</label>
         <select id="merge-source" v-model="mergeSource" class="m26-select" :disabled="busy" @change="mergePreview = null">
           <option :value="undefined">选择源渠道</option>
           <option v-for="channel in channels.filter(c => c.gatewayId && c.gatewayId !== channelId)" :key="channel.gatewayId" :value="channel.gatewayId">{{ channel.name }}</option>

@@ -20,7 +20,7 @@ function appendBatch() {
 
 <template>
   <section class="key-inputs" aria-label="API 密钥列表">
-    <label class="m26-label">API 密钥（多 Key 顺序轮询）</label>
+    <label class="m26-label">API Key</label>
     <div v-for="(_, index) in rows" :key="index" class="key-input-row">
       <input v-model="rows[index]" :aria-label="`Key ${index + 1}`" :type="visible ? 'text' : 'password'" class="m26-input" placeholder="sk-..." autocomplete="new-password" @input="update" />
       <button type="button" class="m26-glass-btn" :disabled="rows.length === 1" :aria-label="`移除 Key ${index + 1}`" @click="remove(index)">移除</button>
@@ -30,11 +30,10 @@ function appendBatch() {
       <button type="button" class="m26-glass-btn" @click="visible = !visible">{{ visible ? '隐藏密钥' : '显示密钥' }}</button>
     </div>
     <details>
-      <summary>批量粘贴（一行一把）</summary>
-      <textarea v-model="batch" aria-label="批量密钥" class="m26-input" rows="3" autocomplete="off" spellcheck="false" />
+      <summary>批量添加</summary>
+      <textarea v-model="batch" aria-label="批量密钥" placeholder="每行一把 Key" class="m26-input" rows="3" autocomplete="off" spellcheck="false" />
       <button type="button" class="m26-glass-btn" :disabled="!batch.trim()" @click="appendBatch">加入列表并去重</button>
     </details>
-    <small>确认创建时一并保存；429 首次冷却 5 分钟，自动跳过冷却 Key。</small>
   </section>
 </template>
 
