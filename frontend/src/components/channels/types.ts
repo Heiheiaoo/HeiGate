@@ -15,7 +15,58 @@ export type ModelHealth = {
   checkedAt: string | null
 }
 
+export type ModelLatencyRow = {
+  name: string
+  selected: boolean
+  checkedAtLabel: string
+  latencyClass: string
+  latencyDisplay: string
+  latencyTooltip: string
+  failed: boolean
+  injectionClass: string
+  injectionTooltip: string
+  injectionLabel: string
+  primary: boolean
+  probing: boolean
+  checkingInjection: boolean
+  copied: boolean
+}
+
+export type ModelProviderSpeedTestRow = {
+  channel: Channel
+  upstreamModel: string
+  protocolLabel: string
+  latencyDisplay: string
+  latencyClass: string
+  isProbing: boolean
+  isFailed: boolean
+  tooltip: string
+  preferred: boolean
+}
+
+export type AggregateModelChannelDetail = {
+  name: string
+  status: ChannelStatus
+  latency: number | null
+  protocol: string
+  upstreamModel: string
+}
+
+export type AggregateModelAliasItem = {
+  alias: string
+  channels: AggregateModelChannelDetail[]
+}
+
+export type AggregateModelView = {
+  name: string
+  aliases: string[]
+  providerCount: number
+}
+
 export type Channel = {
+  keyCount?: number
+  keyAvailableCount?: number
+  keyCoolingCount?: number
   name: string
   url: string
   protocol: ChannelProtocol

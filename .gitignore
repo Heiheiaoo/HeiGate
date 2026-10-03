@@ -1,21 +1,12 @@
 # ---- Build outputs ----
 /dist/
+/target/
 /frontend/dist/
-/internal/web/dist/*
-!/internal/web/dist/.keep
-/desktop/macos/HeiGate
-/desktop/macos/*.app
-/desktop/windows/AppIcon.ico
-/desktop/windows/bin/
-/desktop/windows/obj/
 *.dmg
-*.zip
-
-# ---- Go ----
-*.test
-*.out
-coverage.html
-/bin/
+*.msi
+*.deb
+*.rpm
+*.AppImage
 
 # ---- Node ----
 node_modules/

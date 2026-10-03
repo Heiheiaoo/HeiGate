@@ -1,4 +1,7 @@
 export type ApiChannel = {
+  keyCount?: number
+  keyAvailableCount?: number
+  keyCoolingCount?: number
   id: number
   name: string
   provider: 'anthropic' | 'openai-compatible' | 'openai-responses'
@@ -44,6 +47,9 @@ function protocolFromRecord(record: ApiRecord): ApiChannel['provider'] {
 function normalizeChannel(record: ApiRecord): ApiChannel {
   const status = record.last_status === 'operational' ? 'healthy' : record.last_status === 'degraded' ? 'degraded' : record.last_status === 'error' || record.last_status === 'failed' ? 'offline' : 'unknown'
   return {
+    keyCount: Number(record.key_count ?? 1),
+    keyAvailableCount: Number(record.key_available_count ?? 1),
+    keyCoolingCount: Number(record.key_cooling_count ?? 0),
     id: Number(record.id),
     name: String(record.name ?? ''),
     provider: protocolFromRecord(record),
@@ -198,10 +204,17 @@ export async function probeChannelDetails(
     const timeout = all ? probeTimeoutMs(options?.modelCount) : PROBE_TIMEOUT_MS
     const response = await request(`/channels/${id}/probe${query}`, { method: 'POST' }, timeout)
     if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as { code?: string; error?: string }
       if (response.status === 409) {
-        const payload = await response.json().catch(() => ({})) as { code?: string }
         if (payload.code === 'probe_busy') return 'busy'
         if (payload.code === 'channel_disabled') return 'disabled'
+      }
+      if (payload.error && modelName) {
+        return [{
+          model: modelName,
+          status: 'error',
+          message: payload.error,
+        }]
       }
       return null
     }
@@ -272,6 +285,8 @@ export async function duplicateChannel(id: number): Promise<ApiChannel | null> {
 }
 
 export type TraceStep = {
+  key_id?: number
+  key_name?: string
   index: number
   channel_name: string
   channel_id: number
@@ -414,6 +429,8 @@ export type SystemInfo = {
   log_max_count: number
   logs_count: number
   routing_strategy: 'smart_quality' | 'round_robin' | 'latency'
+  hide_dock_icon?: boolean
+  dock_supported?: boolean
 }
 
 export async function getSystemInfo(): Promise<SystemInfo | null> {
@@ -431,6 +448,7 @@ export async function updateSettings(settings: {
   log_retention_days?: number
   log_max_count?: number
   routing_strategy?: 'smart_quality' | 'round_robin' | 'latency'
+  hide_dock_icon?: boolean
 }): Promise<boolean> {
   try {
     const response = await request('/settings', {
@@ -447,11 +465,12 @@ export async function fetchUpstreamModels(
   endpointUrl: string,
   apiKey: string,
   provider?: string,
+  channelId?: number,
 ): Promise<{ ok: boolean; models?: string[]; error?: string }> {
   try {
     const response = await request('/channels/upstream-models', {
       method: 'POST',
-      body: JSON.stringify({ endpoint: endpointUrl, api_key: apiKey, provider }),
+      body: JSON.stringify({ endpoint: endpointUrl, api_key: channelId ? undefined : apiKey, provider, channel_id: channelId }),
     })
     const payload = await response.json() as { data?: string[]; error?: string }
     if (!response.ok) {

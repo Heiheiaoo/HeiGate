@@ -1,0 +1,21 @@
+[package]
+name = "heigate-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HeiGate desktop shell (Tauri 2) for macOS, Windows and Linux"
+
+[lib]
+name = "heigate_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+heigate-core = { path = "../crates/heigate-core" }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }

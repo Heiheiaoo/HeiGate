@@ -80,14 +80,14 @@ const emit = defineEmits<{
 <style scoped>
 .m26-channel-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
 }
 
 @media (min-width: 1400px) {
   .m26-channel-grid {
-    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-    gap: 18px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
   }
 }
 

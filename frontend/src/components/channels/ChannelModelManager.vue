@@ -2,7 +2,7 @@
 import { ref, computed, watch } from 'vue'
 
 const props = defineProps<{
-  primaryModel: string
+  primaryModel?: string
   modelNames: string[]
   isFetching?: boolean
 }>()
@@ -30,9 +30,6 @@ const isTextMode = ref(false)
 // Tag input field
 const newTagText = ref('')
 
-// Dropdown state for primary model quick selector
-const isDropdownOpen = ref(false)
-
 // Multi-line text for text mode
 const rawModelText = ref('')
 
@@ -42,6 +39,10 @@ watch(
   (newVal) => {
     if (!isTextMode.value) {
       rawModelText.value = (newVal || []).join('\n')
+    }
+    // Automatically keep primary model synced to first available model if unset or missing
+    if (newVal && newVal.length > 0 && (!currentPrimary.value || !newVal.includes(currentPrimary.value))) {
+      emit('update:primaryModel', newVal[0])
     }
   },
   { immediate: true }
@@ -114,113 +115,48 @@ function removeModel(modelToRemove: string) {
 
 function selectPrimary(m: string) {
   emit('update:primaryModel', m)
-  // Ensure it is in modelNames
   if (!modelList.value.includes(m)) {
     emit('update:modelNames', [m, ...modelList.value])
-  }
-  isDropdownOpen.value = false
-}
-
-function onPrimaryInput(val: string) {
-  const trimmed = val.trim()
-  emit('update:primaryModel', trimmed)
-  if (trimmed && !modelList.value.includes(trimmed)) {
-    emit('update:modelNames', [trimmed, ...modelList.value])
   }
 }
 </script>
 
 <template>
-  <div class="m26-model-mgr-wrap">
-    <!-- 1. Dedicated Primary Model Selection Field -->
-    <div class="m26-primary-model-box">
-      <div class="flex items-center justify-between mb-1.5">
-        <label class="m26-mgr-label flex items-center gap-1.5">
-          <span class="text-amber-500 font-bold">⚡</span>
-          <span class="font-semibold text-slate-800">探活主模型</span>
-          <span class="text-[11px] text-slate-400 font-normal">（用于周期探活与卡片首显）</span>
-        </label>
-        <span v-if="currentPrimary" class="m26-primary-chip truncate max-w-[180px]" :title="currentPrimary">
-          当前：{{ currentPrimary }}
-        </span>
-      </div>
-
-      <div class="relative">
-        <div class="flex items-center gap-2">
-          <div class="relative flex-1">
-            <input
-              type="text"
-              :value="currentPrimary"
-              class="m26-mgr-input font-mono text-xs pr-7"
-              placeholder="输入或从下方点击选择主模型，例如：gpt-4o-mini"
-              @input="onPrimaryInput(($event.target as HTMLInputElement).value)"
-            />
-            <button
-              v-if="modelList.length > 0"
-              type="button"
-              class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-0.5"
-              title="从已添加的模型中选择主模型"
-              @click="isDropdownOpen = !isDropdownOpen"
-            >
-              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M4 6l4 4 4-4" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        <!-- Quick Dropdown Menu -->
-        <div v-if="isDropdownOpen && modelList.length > 0" class="m26-mgr-dropdown">
-          <div
-            v-for="m in modelList"
-            :key="m"
-            class="m26-mgr-dropdown-item"
-            :class="{ 'is-selected': m === currentPrimary }"
-            @click="selectPrimary(m)"
-          >
-            <span class="truncate font-mono">{{ m }}</span>
-            <span v-if="m === currentPrimary" class="text-blue-600 text-[11px] font-semibold shrink-0">✓ 主模型</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 2. Models Pool / Tag Capsules -->
+  <div class="m26-model-mgr-wrap" aria-label="模型配置">
+    <!-- 可用模型池 -->
     <div class="m26-models-pool-section">
-      <div class="flex justify-between items-center mb-2">
-        <div class="flex items-center gap-2">
-          <label class="m26-mgr-label mb-0">
-            全部支持模型 <span class="text-slate-400 font-normal">({{ modelList.length }})</span>
-          </label>
+      <div class="m26-mgr-row-header">
+        <div class="m26-mgr-left-group">
           <button
             type="button"
-            class="text-[11px] text-blue-600 hover:text-blue-800 hover:underline cursor-pointer bg-transparent border-none p-0"
-            @click="isTextMode = !isTextMode"
+            class="m26-mgr-fetch-btn"
+            :disabled="isFetching"
+            title="从上游接口自动拉取模型列表"
+            @click="emit('fetchUpstream')"
           >
-            {{ isTextMode ? '切换为胶囊标签 🏷' : '切换为多行文本 ✎' }}
+            <span v-if="isFetching" class="m26-spin-dot mini"></span>
+            <span>{{ isFetching ? '拉取中...' : '获取模型' }}</span>
           </button>
+          <span class="m26-count-pill" title="已添加模型数量">{{ modelList.length }}</span>
         </div>
-
         <button
           type="button"
-          class="m26-mgr-fetch-btn"
-          :disabled="isFetching"
-          @click="emit('fetchUpstream')"
+          class="m26-mode-toggle"
+          @click="isTextMode = !isTextMode"
         >
-          <span v-if="isFetching" class="m26-spin-dot mini"></span>
-          <span>{{ isFetching ? '拉取中...' : '自动拉取上游模型' }}</span>
+          {{ isTextMode ? '标签模式' : '多行文本' }}
         </button>
       </div>
 
-      <!-- Tag Mode -->
+      <!-- 标签模式 -->
       <div v-if="!isTextMode" class="m26-tag-mode-wrap">
-        <!-- Input bar -->
         <div class="m26-add-bar">
           <input
             v-model="newTagText"
             type="text"
-            class="m26-mgr-input font-mono text-xs flex-1"
-            placeholder="输入模型名称，按 Enter 添加；支持直接粘贴多行或逗号文本..."
+            class="m26-mgr-input font-mono text-xs"
+            placeholder="输入模型名称，按 Enter 添加（支持批量粘贴）"
+            aria-label="添加模型"
             @keydown.enter.prevent="addTag"
             @paste="handlePaste"
           />
@@ -234,7 +170,6 @@ function onPrimaryInput(val: string) {
           </button>
         </div>
 
-        <!-- Tags container -->
         <div class="m26-tags-scroll-area">
           <div
             v-for="m in modelList"
@@ -242,24 +177,21 @@ function onPrimaryInput(val: string) {
             class="m26-tag-capsule"
             :class="{ 'is-primary': m === currentPrimary }"
           >
-            <span v-if="m === currentPrimary" class="tag-primary-badge">
-              ⚡ 主模型
-            </span>
+            <span v-if="m === currentPrimary" class="tag-primary-badge">主模型</span>
             <button
               v-else
               type="button"
               class="tag-set-btn"
-              title="点击设为此渠道的探活主模型"
+              title="点击设为主模型"
               @click.stop="selectPrimary(m)"
             >
               设为主模型
             </button>
-
             <span class="tag-text font-mono truncate" :title="m">{{ m }}</span>
-
             <button
               type="button"
               class="tag-del-btn"
+              :aria-label="`移除模型 ${m}`"
               title="移除此模型"
               @click.stop="removeModel(m)"
             >
@@ -268,23 +200,22 @@ function onPrimaryInput(val: string) {
           </div>
 
           <div v-if="modelList.length === 0" class="m26-empty-tags-hint">
-            暂无模型。可在此输入模型名称，或点击右上角“自动拉取上游模型”
+            暂无模型。可在此输入添加或点击上方“获取模型”
           </div>
         </div>
       </div>
 
-      <!-- Multi-line Textarea Mode -->
+      <!-- 多行文本模式 -->
       <div v-else class="m26-text-mode-wrap">
         <textarea
           :value="rawModelText"
           rows="4"
           class="m26-mgr-textarea font-mono text-xs"
-          placeholder="gpt-4o-mini&#10;gpt-4o&#10;deepseek-chat"
+          placeholder="每行一个模型名称，例如：&#10;gpt-4o&#10;gpt-4o-mini&#10;deepseek-chat"
+          aria-label="多行模型列表"
           @input="onTextModeChange(($event.target as HTMLTextAreaElement).value)"
         ></textarea>
-        <p class="text-[11px] text-slate-400 mt-1 mb-0">
-          * 每行一个模型名称。修改后首行将作为默认主模型，也可以在上方的“探活主模型”处随时指定。
-        </p>
+        <span class="m26-text-mode-hint">每行一个模型名称，重复项自动去重</span>
       </div>
     </div>
   </div>
@@ -294,112 +225,58 @@ function onPrimaryInput(val: string) {
 .m26-model-mgr-wrap {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
-}
-
-.m26-primary-model-box {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-
-.m26-mgr-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #334155;
-  user-select: none;
-}
-
-.m26-primary-chip {
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 600;
-  color: #2563eb;
-  background: #eff6ff;
-  border: 1px solid rgba(37, 99, 235, 0.2);
-  padding: 1px 7px;
-  border-radius: 9999px;
-}
-
-.m26-mgr-input {
-  width: 100%;
-  height: 32px;
-  padding: 0 10px;
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #0f172a;
-  outline: none;
-  transition: all 0.12s;
-  box-sizing: border-box;
-}
-
-.m26-mgr-input:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
-}
-
-.m26-mgr-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.12);
-  max-height: 180px;
-  overflow-y: auto;
-  z-index: 50;
-  padding: 4px 0;
-}
-
-.m26-mgr-dropdown-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  font-size: 12px;
-  color: #334155;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-
-.m26-mgr-dropdown-item:hover {
-  background: #f1f5f9;
-}
-
-.m26-mgr-dropdown-item.is-selected {
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 600;
 }
 
 .m26-models-pool-section {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.m26-mgr-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.m26-mgr-left-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.m26-count-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 1px 6px;
+  border-radius: 9999px;
 }
 
 .m26-mgr-fetch-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  background: transparent;
-  border: none;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
   font-size: 11px;
-  font-weight: 500;
-  color: #2563eb;
+  font-weight: 600;
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 6px;
   cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 4px;
-  transition: all 0.12s;
+  transition: all 0.15s ease;
 }
 
 .m26-mgr-fetch-btn:hover:not(:disabled) {
-  background: #eff6ff;
+  background: #e0e7ff;
+  border-color: #a5b4fc;
 }
 
 .m26-mgr-fetch-btn:disabled {
@@ -407,24 +284,67 @@ function onPrimaryInput(val: string) {
   cursor: not-allowed;
 }
 
+.m26-mode-toggle {
+  font-size: 11px;
+  font-weight: 500;
+  color: #6366f1;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 0.12s;
+}
+
+.m26-mode-toggle:hover {
+  color: #4338ca;
+  text-decoration: underline;
+}
+
+.m26-tag-mode-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .m26-add-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: 8px;
+}
+
+.m26-mgr-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #0f172a;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+}
+
+.m26-mgr-input:focus {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
 }
 
 .m26-mgr-add-btn {
-  height: 32px;
+  height: 36px;
   padding: 0 14px;
   background: #0f172a;
   color: #ffffff;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.12s;
+  transition: background 0.12s;
   flex-shrink: 0;
 }
 
@@ -433,7 +353,7 @@ function onPrimaryInput(val: string) {
 }
 
 .m26-mgr-add-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -443,11 +363,12 @@ function onPrimaryInput(val: string) {
   gap: 6px;
   max-height: 140px;
   overflow-y: auto;
-  padding: 8px;
+  padding: 8px 10px;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  min-height: 52px;
+  min-height: 48px;
+  align-items: flex-start;
 }
 
 .m26-tag-capsule {
@@ -456,7 +377,7 @@ function onPrimaryInput(val: string) {
   gap: 5px;
   background: #ffffff;
   border: 1px solid #cbd5e1;
-  padding: 2.5px 6px 2.5px 8px;
+  padding: 3px 6px 3px 8px;
   border-radius: 6px;
   font-size: 11.5px;
   color: #334155;
@@ -469,16 +390,17 @@ function onPrimaryInput(val: string) {
 }
 
 .m26-tag-capsule.is-primary {
-  background: #eff6ff;
-  border-color: #93c5fd;
-  color: #1e40af;
+  background: #eef2ff;
+  border-color: #818cf8;
+  color: #312e81;
+  font-weight: 600;
 }
 
 .tag-primary-badge {
   font-size: 9.5px;
   font-weight: 700;
-  color: #1d4ed8;
-  background: #dbeafe;
+  color: #4338ca;
+  background: #e0e7ff;
   padding: 1px 5px;
   border-radius: 4px;
   flex-shrink: 0;
@@ -498,12 +420,12 @@ function onPrimaryInput(val: string) {
 }
 
 .tag-set-btn:hover {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: #e0e7ff;
+  color: #4338ca;
 }
 
 .tag-text {
-  max-width: 180px;
+  max-width: 200px;
 }
 
 .tag-del-btn {
@@ -525,13 +447,21 @@ function onPrimaryInput(val: string) {
 
 .tag-del-btn:hover {
   background: #fee2e2;
-  color: #dc2626;
+  color: #ef4444;
 }
 
 .m26-empty-tags-hint {
   font-size: 12px;
   color: #94a3b8;
   padding: 8px 4px;
+  width: 100%;
+  text-align: center;
+}
+
+.m26-text-mode-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .m26-mgr-textarea {
@@ -539,28 +469,39 @@ function onPrimaryInput(val: string) {
   padding: 8px 10px;
   background: #ffffff;
   border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #0f172a;
   outline: none;
-  box-sizing: border-box;
   resize: vertical;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
 }
 
 .m26-mgr-textarea:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.m26-text-mode-hint {
+  font-size: 11px;
+  color: #94a3b8;
 }
 
 .m26-spin-dot.mini {
   width: 10px;
   height: 10px;
-  border: 1.5px solid rgba(59, 130, 246, 0.3);
-  border-top-color: #3b82f6;
+  border: 1.5px solid #c7d2fe;
+  border-top-color: #4338ca;
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  animation: spin 0.6s linear infinite;
   display: inline-block;
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>
