@@ -6,7 +6,7 @@
 
 **一个运行在你自己电脑上（macOS / Windows）的 AI API 网关。多渠道路由、自动故障转移、用量统计，数据不出本机。**
 
-[![CI](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml)
+[![CI](https://github.com/Heiheiaoo/HeiGate/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate/actions/workflows/ci.yml)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)](https://vuejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -29,7 +29,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases) 下载对应版本：
+从 [Releases](https://github.com/Heiheiaoo/HeiGate/releases) 下载对应版本：
 
 - Apple 芯片 Mac（arm64）：先退出 HeiGate，打开 `.dmg`，把 HeiGate 拖到「Applications」图标；如果提示已有旧版本，选择「替换」
 - Windows 10/11（x64）：下载 `Setup.exe` 安装（或使用 `.msi` 安装包）

@@ -2,7 +2,7 @@
 
 本地 AI API 网关桌面应用（macOS arm64 / Windows x64 / Linux x64）。多渠道路由 + 故障转移 + 用量统计，数据只存本机，服务只监听回环地址。
 
-- **仓库**：`github.com/Heiheiaoo/HeiGate-Desktop`
+- **仓库**：`github.com/Heiheiaoo/HeiGate`
 - **许可**：MIT
 - **技术栈**：Rust（Tauri 2 外壳 + axum + rusqlite）/ Vue 3（仅依赖 vue 本体）
 - **规模**：Rust 核心约 6.5k 行（含测试），前端 15k 行

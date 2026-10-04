@@ -9,8 +9,8 @@
 - 构建 macOS 应用还需要 Xcode Command Line Tools
 
 ```bash
-git clone https://github.com/Heiheiaoo/HeiGate-Desktop.git
-cd HeiGate-Desktop
+git clone https://github.com/Heiheiaoo/HeiGate.git
+cd HeiGate
 pnpm --dir frontend install
 make test
 ```

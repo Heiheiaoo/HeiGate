@@ -3,10 +3,10 @@ resolver = "2"
 members = ["crates/heigate-core", "src-tauri"]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Heiheiaoo/HeiGate-Desktop"
+repository = "https://github.com/Heiheiaoo/HeiGate"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "io-util", "sync", "fs"] }

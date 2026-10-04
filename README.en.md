@@ -6,7 +6,7 @@
 
 **An AI API gateway that runs on your own computer (macOS or Windows). Multi-channel routing, automatic failover, usage tracking — your data never leaves the machine.**
 
-[![CI](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml)
+[![CI](https://github.com/Heiheiaoo/HeiGate/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate/actions/workflows/ci.yml)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)](https://vuejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -29,7 +29,7 @@ Everything lives in a local SQLite file (macOS: `~/Library/Application Support/H
 
 ## Install
 
-Download the matching build from [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases):
+Download the matching build from [Releases](https://github.com/Heiheiaoo/HeiGate/releases):
 
 - Apple silicon Mac (arm64): quit HeiGate, open the `.dmg`, and drag it onto the `Applications` icon; choose **Replace** if an older copy is installed
 - Windows 10/11 (x64): use the `Setup.exe` installer (or the `.msi` package)
