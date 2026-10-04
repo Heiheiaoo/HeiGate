@@ -58,4 +58,4 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-`.github/workflows/release.yml` 会并行构建 macOS arm64 的 `.dmg` / `.zip` 和 Windows x64 的 `Setup.exe` / 便携 `.zip`，最后统一生成 checksums 并创建 Release。记得同步更新根目录的 `VERSION` 文件。
+`.github/workflows/release.yml` 会并行构建 macOS arm64 的 `.dmg` / `.zip`、Windows x64 的 `.msi` / `Setup.exe` 和 Linux x64 的 `.deb` / `.rpm` / `.AppImage`，最后统一生成 checksums 并创建 Release。记得同步更新根目录的 `VERSION` 文件。

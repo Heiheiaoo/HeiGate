@@ -7,7 +7,6 @@
 **An AI API gateway that runs on your own computer (macOS or Windows). Multi-channel routing, automatic failover, usage tracking — your data never leaves the machine.**
 
 [![CI](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.27-00ADD8.svg)](https://go.dev/)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)](https://vuejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -33,7 +32,7 @@ Everything lives in a local SQLite file (macOS: `~/Library/Application Support/H
 Download the matching build from [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases):
 
 - Apple silicon Mac (arm64): quit HeiGate, open the `.dmg`, and drag it onto the `Applications` icon; choose **Replace** if an older copy is installed
-- Windows 10/11 (x64): use `Setup.exe`, or download the portable `.zip`
+- Windows 10/11 (x64): use the `Setup.exe` installer (or the `.msi` package)
 
 Before installing, verify your download against `checksums.txt`. Put it in the same folder as the download and run this there (`--ignore-missing` skips the builds for other platforms you did not download):
 
@@ -90,18 +89,16 @@ make help     # list every target
 For development it is easier to run the two halves separately:
 
 ```bash
-make run                          # terminal 1: gateway on 8080
-pnpm --dir frontend run dev       # terminal 2: Vite on 5273, proxying to 8080
+make run                          # terminal 1: desktop gateway on a local port starting at 18080
+pnpm --dir frontend run dev       # terminal 2: Vite on 5273, proxying to 18080
 ```
 
 ## Configuration
 
-You normally don't need any. When you do, use environment variables:
+You normally don't need any. To relocate local data, use this environment variable:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `HEIGATE_HOST` | `127.0.0.1` | Listen address. **Setting a non-loopback address disables the local-only protections and is not recommended** |
-| `HEIGATE_PORT` | `8080` from source; desktop prefers `18080` | Listen port |
 | `DATA_DIR` | Platform application data directory | Where the database and gateway key are stored |
 
 ## Security design

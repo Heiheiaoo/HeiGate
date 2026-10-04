@@ -633,7 +633,7 @@ function copyAlias(text: string) {
         copiedAliasText.value = ''
       }
     }, 1800)
-  })
+  }).catch(() => showToast('复制失败，请手动复制'))
 }
 
 function copyAllAliases(model: AggregateModelCard) {
@@ -647,7 +647,7 @@ function copyAllAliases(model: AggregateModelCard) {
         copiedAliasText.value = ''
       }
     }, 1800)
-  })
+  }).catch(() => showToast('复制失败，请手动复制'))
 }
 
 const filteredModalAliases = computed(() => {
@@ -805,10 +805,14 @@ const averageLatency = computed(() => {
 })
 
 
-function toggleChannel(channel: Channel) {
+async function toggleChannel(channel: Channel) {
+  const previous = channel.enabled
   channel.enabled = !channel.enabled
-  void persistChannel(channel)
-  showToast(`已${channel.enabled ? '启用' : '暂停'}渠道“${channel.name}”`)
+  if (await persistChannel(channel)) {
+    showToast(`已${channel.enabled ? '启用' : '暂停'}渠道“${channel.name}”`)
+  } else {
+    channel.enabled = previous
+  }
 }
 
 function fromDesktopChannel(item: ApiChannel): Channel {
@@ -882,7 +886,10 @@ function toDesktopChannel(channel: Channel): ApiChannel {
 
 async function refreshChannels() {
   const remote = await listChannels()
-  if (remote === null) return false
+  if (remote === null) {
+    gatewayApiActive.value = false
+    return false
+  }
   gatewayApiActive.value = true
   channels.value = remote.map(fromDesktopChannel)
   for (const channel of channels.value) {
@@ -904,15 +911,19 @@ async function refreshChannels() {
   return true
 }
 
-async function persistChannel(channel: Channel) {
+async function persistChannel(channel: Channel): Promise<boolean> {
   if (!gatewayApiActive.value) {
     await saveChannels()
-    return
+    return true
   }
   const saved = await updateChannel(toDesktopChannel(channel))
   // 单次失败只提示，不切换到本地存储模式：一旦切换，后续编辑会写进本地，
   // 下次 refreshChannels 拉取服务端数据时这些编辑会被静默丢弃。
-  if (!saved) showToast(`渠道“${channel.name}”保存失败，请检查网关状态后重试`)
+  if (!saved) {
+    showToast(`渠道“${channel.name}”保存失败，请检查网关状态后重试`)
+    return false
+  }
+  return true
 }
 
 async function probeChannel(channel: Channel) {
@@ -1047,7 +1058,7 @@ function copyInjectionContent(content?: string) {
     setTimeout(() => {
       if (copiedInjectionText.value === content) copiedInjectionText.value = ''
     }, 2000)
-  })
+  }).catch(() => showToast('复制失败，请手动复制'))
 }
 
 function getModelInjection(channel: Channel, modelName: string): ModelInjectionResult | null {
@@ -1448,12 +1459,14 @@ function clearWorkspace() {
     onConfirm: async () => {
       if (gatewayApiActive.value) {
         const remote = await listChannels()
-        if (remote) {
-          for (const channel of remote) {
-            if (!(await deleteChannel(channel.id))) {
-              showToast('清空失败，已有部分渠道未删除')
-              return
-            }
+        if (!remote) {
+          showToast('无法读取网关渠道，未清空本地工作区')
+          return
+        }
+        for (const channel of remote) {
+          if (!(await deleteChannel(channel.id))) {
+            showToast('清空失败，已有部分渠道未删除')
+            return
           }
         }
       }
@@ -1865,7 +1878,7 @@ async function batchDeleteSelectedModels(channel?: Channel | null) {
       })
       selectedModelNames.value = []
 
-      await persistChannel(channel)
+      if (!(await persistChannel(channel))) return
       await refreshChannels()
 
       const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
@@ -1895,7 +1908,7 @@ async function setAsPrimaryModel(channel?: Channel | null, modelName?: string) {
     if (cached.error) channel.lastError = cached.error
   }
 
-  await persistChannel(channel)
+  if (!(await persistChannel(channel))) return
   await refreshChannels()
 
   const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
@@ -1922,7 +1935,7 @@ function copyDiagnosticRaw(rawError: string) {
   if (!rawError) return
   navigator.clipboard.writeText(rawError).then(() => {
     showToast('已复制完整报错数据到剪贴板')
-  })
+  }).catch(() => showToast('复制失败，请手动复制'))
 }
 
 function openEditChannelFromDiag(c: Channel) {
@@ -2092,7 +2105,7 @@ function copyModelId(modelName: string) {
     setTimeout(() => {
       if (copiedModelId.value === modelName) copiedModelId.value = ''
     }, 2000)
-  })
+  }).catch(() => showToast('复制失败，请手动复制'))
 }
 
 interface ModelProviderSpeedTestItem {
@@ -2273,13 +2286,13 @@ function openLogDetail(log: RequestLog) {
 function copyLogJson(log: RequestLog) {
   navigator.clipboard.writeText(JSON.stringify(log, null, 2)).then(() => {
     showToast('已复制完整日志 JSON 到剪贴板')
-  })
+  }).catch(() => showToast('复制失败，请手动复制'))
 }
 
 function copyErrorMessage(msg: string) {
   navigator.clipboard.writeText(msg).then(() => {
     showToast('已复制报错信息到剪贴板')
-  })
+  }).catch(() => showToast('复制失败，请手动复制'))
 }
 
 function getLogDiagnostic(log: RequestLog): {
@@ -2640,23 +2653,31 @@ async function setRoutingStrategy(strategy: GlobalRouteStrategy) {
 }
 
 async function handleSetLogRetention(days: number) {
+  const previous = logRetentionDays.value
   logRetentionDays.value = days
   if (gatewayApiActive.value) {
     const ok = await updateSettings({ log_retention_days: days })
     if (ok) {
       showToast(days > 0 ? `日志保留时长已设为 ${days} 天` : '已设为永久保留日志')
       await refreshSystemInfo()
+    } else {
+      logRetentionDays.value = previous
+      showToast('日志保留时长更新失败')
     }
   }
 }
 
 async function handleSetLogMaxCount(count: number) {
+  const previous = logMaxCount.value
   logMaxCount.value = count
   if (gatewayApiActive.value) {
     const ok = await updateSettings({ log_max_count: count })
     if (ok) {
       showToast(count > 0 ? `日志容量上限已设为 ${count.toLocaleString()} 条` : '已设为不限制流水条数')
       await refreshSystemInfo()
+    } else {
+      logMaxCount.value = previous
+      showToast('日志容量上限更新失败')
     }
   }
 }

@@ -4,6 +4,7 @@
 //! the previous native shells.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -121,12 +122,26 @@ pub fn run() {
             let bound = heigate_core::server::bind()?;
             let port = bound.port;
             let static_dir = static_dir(&app.handle().clone());
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
             tauri::async_runtime::spawn(async move {
-                if let Err(err) = heigate_core::server::run_default(bound, static_dir).await {
+                if let Err(err) =
+                    heigate_core::server::run_default_with_ready(bound, static_dir, ready_tx).await
+                {
                     eprintln!("heigate: gateway server exited: {err}");
                 }
             });
+
+            let ready = tauri::async_runtime::block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), ready_rx).await
+            });
+            match ready {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(err))) => return Err(std::io::Error::other(err).into()),
+                Ok(Err(_)) | Err(_) => {
+                    return Err(std::io::Error::other("HeiGate 网关启动超时").into())
+                }
+            }
 
             let url = format!("http://127.0.0.1:{port}/")
                 .parse::<tauri::Url>()

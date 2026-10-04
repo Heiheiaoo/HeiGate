@@ -7,7 +7,6 @@
 **一个运行在你自己电脑上（macOS / Windows）的 AI API 网关。多渠道路由、自动故障转移、用量统计，数据不出本机。**
 
 [![CI](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/Heiheiaoo/HeiGate-Desktop/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.27-00ADD8.svg)](https://go.dev/)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)](https://vuejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -33,7 +32,7 @@
 从 [Releases](https://github.com/Heiheiaoo/HeiGate-Desktop/releases) 下载对应版本：
 
 - Apple 芯片 Mac（arm64）：先退出 HeiGate，打开 `.dmg`，把 HeiGate 拖到「Applications」图标；如果提示已有旧版本，选择「替换」
-- Windows 10/11（x64）：下载 `Setup.exe` 安装；也可以下载便携版 `.zip`
+- Windows 10/11（x64）：下载 `Setup.exe` 安装（或使用 `.msi` 安装包）
 
 安装前建议先用 `checksums.txt` 校验下载的文件。把它和安装包放在同一目录，然后在该目录执行（`--ignore-missing` 会跳过你没有下载的其他平台文件）：
 
@@ -90,18 +89,16 @@ make help     # 看所有目标
 开发时前后端分开跑更方便：
 
 ```bash
-make run                          # 终端 1：网关，监听 8080
-pnpm --dir frontend run dev       # 终端 2：Vite，5273，API 请求代理到 8080
+make run                          # 终端 1：桌面网关，监听 18080 起的本地端口
+pnpm --dir frontend run dev       # 终端 2：Vite，5273，API 请求代理到 18080
 ```
 
 ## 配置
 
-一般不需要改。需要时可以用环境变量：
+一般不需要改。数据目录需要时可以用环境变量：
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `HEIGATE_HOST` | `127.0.0.1` | 监听地址。**改成非回环地址会关闭本地防护，不建议** |
-| `HEIGATE_PORT` | 源码运行 `8080`；桌面版优先 `18080` | 监听端口 |
 | `DATA_DIR` | 平台应用数据目录 | 数据库和网关密钥的存放位置 |
 
 ## 安全设计

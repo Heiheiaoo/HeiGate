@@ -357,7 +357,7 @@ impl Gateway {
                         channel_name: channel.name.clone(),
                         key_id: lease.key.id,
                         key_name: lease.key.name.clone(),
-                        endpoint: channel.endpoint.clone(),
+                        endpoint: crate::probe::redact_endpoint(&channel.endpoint),
                         model: upstream_model.clone(),
                         attempt: attempts,
                         latency_ms: latency,
@@ -819,7 +819,7 @@ impl Gateway {
                 .last()
                 .map(|step| step.model.clone())
                 .unwrap_or_default();
-            request_log.endpoint = winning.endpoint.clone();
+            request_log.endpoint = crate::probe::redact_endpoint(&winning.endpoint);
             request_log.is_stream = is_stream;
             request_log.is_failover = !failed_attempts.is_empty();
             request_log.failover_from = failover_from.clone();

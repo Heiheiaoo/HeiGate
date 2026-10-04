@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::routing::{get, post, put};
-use axum::{middleware, Json, Router};
+use axum::{extract::DefaultBodyLimit, middleware, Json, Router};
 use serde_json::{json, Value};
+use tokio::sync::oneshot;
 
 use crate::api::gateway::Gateway;
 use crate::api::handlers::SharedState;
@@ -29,6 +30,7 @@ pub const HOST: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 /// Preferred ports, mirroring the desktop shells' probing order.
 pub const PORT_CANDIDATES: std::ops::RangeInclusive<u16> = 18080..=18090;
+pub const MAX_REQUEST_BODY: usize = 16 << 20;
 
 /// A bound-but-not-yet-serving listener plus the port it landed on.
 pub struct Bound {
@@ -143,6 +145,7 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         .route("/logs/prune", post(handlers::prune_logs))
         .route("/system", get(handlers::system_info))
         .route("/settings", put(handlers::update_settings))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn(same_origin_only));
 
     let gateway = Router::new()
@@ -153,6 +156,7 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         )
         .route("/v1/responses", post(handlers::forward_responses))
         .route("/v1/models", get(handlers::gateway_models))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn_with_state(GatewayKey(key), bearer_auth))
         .layer(middleware::from_fn(loopback_only));
 
@@ -179,6 +183,18 @@ async fn health() -> Json<Value> {
 
 /// Serves until the process exits.
 pub async fn serve(bound: Bound, static_dir: PathBuf, state: SharedState) -> std::io::Result<()> {
+    serve_with_ready(bound, static_dir, state, None).await
+}
+
+/// Serves the application and optionally signals once the router has been
+/// assembled and is ready to accept connections. Desktop shells use this to
+/// avoid opening a webview against a listener that has not started serving.
+pub async fn serve_with_ready(
+    bound: Bound,
+    static_dir: PathBuf,
+    state: SharedState,
+    ready: Option<oneshot::Sender<Result<(), String>>>,
+) -> std::io::Result<()> {
     // The listener was bound with std; tokio's `from_std` requires the socket
     // to be non-blocking before it can register it.
     bound.listener.set_nonblocking(true)?;
@@ -197,6 +213,9 @@ pub async fn serve(bound: Bound, static_dir: PathBuf, state: SharedState) -> std
     }
 
     let app = router(state, static_dir);
+    if let Some(ready) = ready {
+        let _ = ready.send(Ok(()));
+    }
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -209,4 +228,21 @@ pub async fn serve(bound: Bound, static_dir: PathBuf, state: SharedState) -> std
 pub async fn run_default(bound: Bound, static_dir: PathBuf) -> std::io::Result<()> {
     let state = build_state()?;
     serve(bound, static_dir, state).await
+}
+
+/// Builds the default state and signals readiness for desktop startup.
+pub async fn run_default_with_ready(
+    bound: Bound,
+    static_dir: PathBuf,
+    ready: oneshot::Sender<Result<(), String>>,
+) -> std::io::Result<()> {
+    let state = match build_state() {
+        Ok(state) => state,
+        Err(err) => {
+            let message = err.to_string();
+            let _ = ready.send(Err(message.clone()));
+            return Err(std::io::Error::other(message));
+        }
+    };
+    serve_with_ready(bound, static_dir, state, Some(ready)).await
 }

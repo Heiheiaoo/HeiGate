@@ -409,6 +409,7 @@ impl Store {
     }
 
     pub fn set_model_health(&self, channel_id: i64, health: &ModelHealth) -> Result<()> {
+        let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
         let conn = self.lock();
         conn.execute(
             "INSERT INTO desktop_model_health(channel_id, model, status, latency_ms, ttft_ms, error, checked_at) \
@@ -429,6 +430,11 @@ impl Store {
     }
 
     pub fn save(&self, channel: &mut Channel) -> Result<()> {
+        let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
+        self.save_locked(channel)
+    }
+
+    fn save_locked(&self, channel: &mut Channel) -> Result<()> {
         let primary = channel.primary_model.trim().to_string();
         channel.primary_model = primary.clone();
         let mut seen = HashSet::new();
@@ -594,25 +600,33 @@ impl Store {
         let _guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
         let mut fresh = self.get(id)?;
         mutate(&mut fresh);
-        self.save(&mut fresh)
+        self.save_locked(&mut fresh)
     }
 
     /// Persists an injection-check result without racing a concurrent edit.
     pub fn set_injection(&self, id: i64, state: &str, tokens: i64, content: &str) -> Result<()> {
+        let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
         let now = format_time(Utc::now());
         let conn = self.lock();
-        conn.execute(
+        let affected = conn.execute(
             "UPDATE desktop_channels
              SET injection_state = ?, injection_tokens = ?, injection_content = ?, injection_checked_at = ?, updated_at = ?
              WHERE id = ?",
             params![state, tokens, content, now, now, id],
         )?;
+        if affected == 0 {
+            return Err(StoreError::NotFound(id));
+        }
         Ok(())
     }
 
     pub fn delete(&self, id: i64) -> Result<()> {
+        let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
         let conn = self.lock();
-        conn.execute("DELETE FROM desktop_channels WHERE id = ?", params![id])?;
+        let affected = conn.execute("DELETE FROM desktop_channels WHERE id = ?", params![id])?;
+        if affected == 0 {
+            return Err(StoreError::NotFound(id));
+        }
         Ok(())
     }
 

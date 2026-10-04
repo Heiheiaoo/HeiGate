@@ -1,16 +1,7 @@
-# Surfaces outdated / vulnerable dependencies across all four ecosystems this
-# repo ships. Minor+patch updates are grouped to keep PR volume low; majors come
-# as individual PRs so their breaking changes can be reviewed on their own.
+# Surfaces outdated / vulnerable dependencies for the ecosystems this repo
+# currently ships. Minor+patch updates are grouped to keep PR volume low.
 version: 2
 updates:
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
-      go-minor-patch:
-        update-types: [minor, patch]
-
   - package-ecosystem: npm
     directory: /frontend
     schedule:
@@ -26,11 +17,3 @@ updates:
     groups:
       actions-all:
         patterns: ['*']
-
-  - package-ecosystem: nuget
-    directory: /desktop/windows
-    schedule:
-      interval: weekly
-    groups:
-      nuget-minor-patch:
-        update-types: [minor, patch]

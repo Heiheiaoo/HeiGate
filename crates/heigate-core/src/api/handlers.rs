@@ -9,6 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Json;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -38,6 +39,27 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
+const MAX_UPSTREAM_RESPONSE_BODY: usize = 2 << 20;
+
+async fn read_upstream_body(response: reqwest::Response) -> Result<Vec<u8>, ()> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_UPSTREAM_RESPONSE_BODY as u64)
+    {
+        return Err(());
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ())?;
+        if body.len().saturating_add(chunk.len()) > MAX_UPSTREAM_RESPONSE_BODY {
+            return Err(());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 fn ok_data(data: Value) -> Response {
     json_response(StatusCode::OK, json!({ "data": data }))
 }
@@ -48,6 +70,10 @@ fn json_response(status: StatusCode, body: Value) -> Response {
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("no-store, private"),
+    );
     response
 }
 
@@ -95,8 +121,8 @@ fn include_secrets(params: &HashMap<String, String>) -> bool {
 /// Masks the API key to its first four characters unless secrets are requested.
 pub fn sanitize_channel(ch: &Channel) -> Channel {
     let mut copy = ch.clone();
-    copy.api_key = if copy.api_key.len() > 4 {
-        format!("{}***", &copy.api_key[..4])
+    copy.api_key = if copy.api_key.chars().count() > 4 {
+        format!("{}***", copy.api_key.chars().take(4).collect::<String>())
     } else {
         "***".to_string()
     };
@@ -523,11 +549,14 @@ pub async fn set_custom_mapping(
     }
     let mut mappings = get_custom_model_mappings();
     mappings.insert(raw.to_lowercase(), target);
+    let serialized = serde_json::to_string(&mappings).unwrap_or_default();
+    if let Err(err) = state
+        .store
+        .set_setting("custom_model_mappings", &serialized)
+    {
+        return store_error_response(&err);
+    }
     set_custom_model_mappings(mappings.clone());
-    let _ = state.store.set_setting(
-        "custom_model_mappings",
-        &serde_json::to_string(&mappings).unwrap_or_default(),
-    );
     json_response(StatusCode::OK, json!({ "status": "ok", "data": mappings }))
 }
 
@@ -547,11 +576,14 @@ pub async fn delete_custom_mapping(
     }
     let mut mappings = get_custom_model_mappings();
     mappings.remove(&raw.to_lowercase());
+    let serialized = serde_json::to_string(&mappings).unwrap_or_default();
+    if let Err(err) = state
+        .store
+        .set_setting("custom_model_mappings", &serialized)
+    {
+        return store_error_response(&err);
+    }
     set_custom_model_mappings(mappings.clone());
-    let _ = state.store.set_setting(
-        "custom_model_mappings",
-        &serde_json::to_string(&mappings).unwrap_or_default(),
-    );
     json_response(StatusCode::OK, json!({ "status": "ok", "data": mappings }))
 }
 
@@ -838,8 +870,11 @@ pub async fn fetch_upstream_models(
         .build()
     {
         Ok(client) => client,
-        Err(err) => {
-            return json_response(StatusCode::BAD_GATEWAY, json!({ "error": err.to_string() }))
+        Err(_err) => {
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": "无法创建上游请求客户端" }),
+            )
         }
     };
 
@@ -863,8 +898,8 @@ pub async fn fetch_upstream_models(
 
         let response = match request.send().await {
             Ok(response) => response,
-            Err(err) => {
-                last_err = Some(err.to_string());
+            Err(_err) => {
+                last_err = Some("无法连接上游服务".to_string());
                 continue;
             }
         };
@@ -875,7 +910,13 @@ pub async fn fetch_upstream_models(
             .and_then(|v| v.to_str().ok())
             .map(crate::api::forward::parse_retry_after)
             .unwrap_or_default();
-        let body = response.bytes().await.unwrap_or_default();
+        let body = match read_upstream_body(response).await {
+            Ok(body) => body,
+            Err(()) => {
+                last_err = Some("上游响应过大或读取失败".to_string());
+                break;
+            }
+        };
 
         if status != 200 {
             if let Some(lease) = &lease {

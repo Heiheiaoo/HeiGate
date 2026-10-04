@@ -73,7 +73,10 @@ pub async fn same_origin_only(req: Request, next: Next) -> Response {
     let headers = req.headers();
 
     if let Some(origin) = header_str(headers, "origin") {
-        if !origin.is_empty() && origin != "null" && !origin_is_loopback(origin) {
+        // `Origin: null` can be emitted by local files, sandboxed frames and
+        // extensions.  It is not the Tauri webview origin and must not be
+        // allowed to read management responses containing secrets.
+        if origin.is_empty() || origin == "null" || !origin_is_loopback(origin) {
             return forbidden("cross-origin requests are not allowed");
         }
     }
@@ -389,6 +392,18 @@ mod tests {
                 "127.0.0.1:1",
                 local,
                 &[("origin", "https://evil.example")]
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                r.clone(),
+                Method::GET,
+                "/ping",
+                "127.0.0.1:1",
+                local,
+                &[("origin", "null")]
             )
             .await,
             StatusCode::FORBIDDEN

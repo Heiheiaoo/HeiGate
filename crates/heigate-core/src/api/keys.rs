@@ -5,7 +5,7 @@ use crate::{
 };
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -51,7 +51,12 @@ pub async fn list(State(state): State<SharedState>, Path(channel_id): Path<i64>)
                     value
                 })
                 .collect();
-            Json(json!({"data":data})).into_response()
+            let mut response = Json(json!({"data":data})).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, private"),
+            );
+            response
         }
         Err(err) => error(err),
     }
@@ -72,7 +77,14 @@ pub async fn reveal(
         .ok()
         .and_then(|keys| keys.into_iter().find(|key| key.id == key_id))
     {
-        Some(key) => Json(json!({"data": {"secret": key.secret}})).into_response(),
+        Some(key) => {
+            let mut response = Json(json!({"data": {"secret": key.secret}})).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, private"),
+            );
+            response
+        }
         None => error(StoreError::NotFound(key_id)),
     }
 }

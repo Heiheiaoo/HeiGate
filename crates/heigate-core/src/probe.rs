@@ -180,6 +180,46 @@ pub fn normalize_endpoint(raw: &str) -> String {
     ep.trim_end_matches('/').to_string()
 }
 
+/// Removes credentials from an endpoint before it is written to request logs
+/// or trace details. The live request still uses the original validated URL.
+pub fn redact_endpoint(raw: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| {
+            let lower = key.to_ascii_lowercase();
+            let sensitive = ["token", "key", "secret", "password", "passwd", "auth"]
+                .iter()
+                .any(|name| lower.contains(name));
+            (
+                key.into_owned(),
+                if sensitive {
+                    "[REDACTED]".into()
+                } else {
+                    value.into_owned()
+                },
+            )
+        })
+        .collect();
+    url.set_username("").ok();
+    url.set_password(None).ok();
+    if url.query().is_some() {
+        url.set_query(None);
+        if !pairs.is_empty() {
+            let mut query = url.query_pairs_mut();
+            query.extend_pairs(
+                pairs
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            );
+        }
+    }
+    url.set_fragment(None);
+    url.to_string()
+}
+
 /// Checks provider, api mode, endpoint and primary model.
 pub fn validate_config(cfg: &Config) -> Result<(), ProbeError> {
     let provider = cfg.provider.trim();
@@ -221,6 +261,9 @@ fn validate_endpoint(raw: &str) -> Result<(), ProbeError> {
     match reqwest::Url::parse(&ep) {
         Ok(parsed) if !parsed.host_str().unwrap_or("").is_empty() => {
             if parsed.scheme() == "http" || parsed.scheme() == "https" {
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return Err(ProbeError::InvalidEndpoint);
+                }
                 Ok(())
             } else {
                 Err(ProbeError::InvalidEndpoint)
@@ -703,6 +746,26 @@ mod tests {
         );
         assert_eq!(normalize_endpoint("  https://a.b  "), "https://a.b");
         assert_eq!(normalize_endpoint(""), "");
+    }
+
+    #[test]
+    fn endpoint_redaction_hides_query_credentials() {
+        let redacted = redact_endpoint("https://api.example.com/v1?token=secret&api-version=2024");
+        assert!(redacted.contains("token=%5BREDACTED%5D"));
+        assert!(redacted.contains("api-version=2024"));
+        assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn endpoint_validation_rejects_url_credentials() {
+        let cfg = Config {
+            provider: PROVIDER_OPENAI.to_string(),
+            api_mode: API_MODE_CHAT_COMPLETIONS.to_string(),
+            endpoint: "https://user:password@example.com".to_string(),
+            primary_model: "gpt-4o".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(validate_config(&cfg), Err(ProbeError::InvalidEndpoint));
     }
 
     #[test]

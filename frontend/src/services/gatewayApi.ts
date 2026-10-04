@@ -36,6 +36,14 @@ export type ApiChannel = {
 
 type ApiRecord = Record<string, unknown>
 
+function asRecord(value: unknown): ApiRecord {
+  return typeof value === 'object' && value !== null ? value as ApiRecord : {}
+}
+
+function numberOrNull(value: unknown): number | null {
+  return value == null ? null : Number(value)
+}
+
 const endpoint = '/api'
 
 function protocolFromRecord(record: ApiRecord): ApiChannel['provider'] {
@@ -72,14 +80,17 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
     injectionTokens: record.injection_tokens == null ? null : Number(record.injection_tokens),
     injectionContent: String(record.injection_content ?? ''),
     injectionCheckedAt: record.injection_checked_at ? String(record.injection_checked_at) : null,
-    modelHealth: Array.isArray(record.model_health) ? record.model_health.map((item: any) => ({
-      model: String(item.model ?? ''),
-      status: String(item.status ?? 'unknown'),
-      latencyMs: item.latency_ms == null ? null : Number(item.latency_ms),
-      ttftMs: item.ttft_ms == null ? null : Number(item.ttft_ms),
-      error: String(item.error ?? ''),
-      checkedAt: item.checked_at ? String(item.checked_at) : null,
-    })) : [],
+    modelHealth: Array.isArray(record.model_health) ? record.model_health.map((rawItem: unknown) => {
+      const item = asRecord(rawItem)
+      return {
+        model: String(item.model ?? ''),
+        status: String(item.status ?? 'unknown'),
+        latencyMs: item.latency_ms == null ? null : Number(item.latency_ms),
+        ttftMs: item.ttft_ms == null ? null : Number(item.ttft_ms),
+        error: String(item.error ?? ''),
+        checkedAt: item.checked_at ? String(item.checked_at) : null,
+      }
+    }) : [],
   }
 }
 
@@ -218,16 +229,19 @@ export async function probeChannelDetails(
       }
       return null
     }
-    const payload = (await response.json()) as { data?: any[] }
+    const payload = (await response.json()) as { data?: unknown[] }
     if (!Array.isArray(payload.data)) return []
-    return payload.data.map((item) => ({
-      model: item.model || item.Model || '',
-      status: item.status || item.Status || 'unknown',
-      latencyMs: item.latency_ms ?? item.LatencyMs ?? null,
-      ttftMs: item.ttft_ms ?? item.TTFTMs ?? null,
-      pingLatencyMs: item.ping_latency_ms ?? item.PingLatencyMs ?? null,
-      message: item.message || item.Message || '',
-    }))
+    return payload.data.map((rawItem) => {
+      const item = asRecord(rawItem)
+      return {
+        model: String(item.model ?? item.Model ?? ''),
+        status: String(item.status ?? item.Status ?? 'unknown'),
+        latencyMs: numberOrNull(item.latency_ms ?? item.LatencyMs),
+        ttftMs: numberOrNull(item.ttft_ms ?? item.TTFTMs),
+        pingLatencyMs: numberOrNull(item.ping_latency_ms ?? item.PingLatencyMs),
+        message: String(item.message ?? item.Message ?? ''),
+      }
+    })
   } catch {
     return null
   }
@@ -343,7 +357,7 @@ export type LogEventCallback = {
   onCleared?: () => void
   onPruned?: () => void
   onConnected?: () => void
-  onError?: (err: any) => void
+  onError?: (err: Event) => void
 }
 
 export function subscribeLogs(callbacks: LogEventCallback): () => void {
@@ -477,8 +491,8 @@ export async function fetchUpstreamModels(
       return { ok: false, error: payload.error || `HTTP ${response.status}` }
     }
     return { ok: true, models: payload.data ?? [] }
-  } catch (err: any) {
-    return { ok: false, error: err?.message || '无法连接到本地网关服务' }
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : '无法连接到本地网关服务' }
   }
 }
 
