@@ -38,7 +38,6 @@ import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelKeyManager from '@/components/channels/ChannelKeyManager.vue'
 import ChannelKeyInputs, { type ChannelKeyDraft } from '@/components/channels/ChannelKeyInputs.vue'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
-import ChannelTableView from '@/components/channels/ChannelTableView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticContent.vue'
 import ChannelModelLatencyContent from '@/components/channels/ChannelModelLatencyContent.vue'
@@ -206,17 +205,6 @@ const maxDailyTokens = computed(() => {
   return Math.max(...analyticsData.value.daily.map(d => d.total_tokens), 1)
 })
 
-// Channel View Mode (Cards Grid vs Table List)
-const channelViewMode = ref<'grid' | 'list'>('grid')
-function setChannelViewMode(mode: 'grid' | 'list') {
-  channelViewMode.value = mode
-  try {
-    localStorage.setItem('heigate_channel_view_mode', mode)
-  } catch (err) {
-    console.debug('Failed to persist view mode', err)
-  }
-}
-
 // Add Channel Form State
 const newChannelName = ref('')
 const newChannelUrl = ref('')
@@ -263,6 +251,7 @@ const logsStreamConnected = ref(false)
 const autoScrollLogs = ref(true)
 let logsUnsubscribe: (() => void) | null = null
 const logsTableWrapRef = ref<HTMLDivElement | null>(null)
+const logsViewRef = ref<InstanceType<typeof LogsView> | null>(null)
 const copiedModelId = ref('')
 
 const copiedTarget = ref<'url' | 'key' | ''>('')
@@ -452,7 +441,15 @@ const models = computed(() => {
   groups.forEach((data, groupKey) => {
     const allRaw = Array.from(data.rawModels)
     const displayName = selectCanonicalDisplayNameFrontend(allRaw)
-    const aliases = allRaw.filter((r) => r !== displayName)
+    const seenAliases = new Set<string>()
+    const aliases: string[] = []
+    for (const r of allRaw) {
+      const lower = r.toLowerCase()
+      if (lower !== displayName.toLowerCase() && !seenAliases.has(lower)) {
+        seenAliases.add(lower)
+        aliases.push(r)
+      }
+    }
     const avgLat = data.latencies.length
       ? Math.round(data.latencies.reduce((sum, value) => sum + value, 0) / data.latencies.length)
       : null
@@ -741,7 +738,7 @@ const modelFamilyTabs = computed(() => {
     counts[fam] = (counts[fam] || 0) + 1
   })
   const tabs = [{ key: 'all', label: '全部', count: models.value.length }]
-  const order = ['deepseek', 'claude', 'openai', 'qwen', 'glm', 'kimi', 'minimax', 'mimo', 'doubao', 'gemini', 'llama', 'other']
+  const order = ['deepseek', 'qwen', 'glm', 'kimi', 'minimax', 'mimo', 'doubao', 'claude', 'openai', 'gemini', 'llama', 'other']
   const labelMap: Record<string, string> = {
     deepseek: 'DeepSeek',
     claude: 'Claude',
@@ -2274,6 +2271,11 @@ function openModelSpeedTestFor(modelName: string) {
   void probeAllProvidersForModel(modelName)
 }
 
+function openModelSpeedTestFromAlias(modelName: string) {
+  closeAliasModal()
+  openModelSpeedTestFor(modelName)
+}
+
 function closeModelSpeedTestModal() {
   activeModelSpeedTestName.value = null
   modelSpeedTestQuery.value = ''
@@ -2372,7 +2374,9 @@ function startLogsStream() {
       }
       if (autoScrollLogs.value && activeSection.value === 'logs') {
         nextTick(() => {
-          if (logsTableWrapRef.value) {
+          if (logsViewRef.value) {
+            logsViewRef.value.scrollToTop()
+          } else if (logsTableWrapRef.value) {
             logsTableWrapRef.value.scrollTo({ top: 0, behavior: 'smooth' })
           }
         })
@@ -2977,7 +2981,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- Main Content Workspace (Full Width, No Left Sidebar) -->
     <main class="m26-workspace">
       <!-- Scrollable Main Viewport -->
-      <div class="m26-viewport">
+      <div class="m26-viewport" :class="{ 'is-fixed-header-view': activeSection === 'models' || activeSection === 'channels' || activeSection === 'logs' }">
         <!-- SECTION: DATA DASHBOARD (KANBAN) -->
         <section v-if="activeSection === 'analytics'" class="m26-section-view">
           <AnalyticsOverviewMetrics
@@ -2990,73 +2994,61 @@ function handleContextMenu(event: MouseEvent) {
             :available-models="availableModels"
           />
 
-          <!-- Top Control Header: Title & Time Range Filter -->
+          <!-- Control Bar: Time Range Selector on Left, Refresh on Right -->
           <div class="m26-analytics-header-bar">
-            <div>
-              <div class="flex items-center gap-2.5">
-                <h2 class="text-base font-bold text-main">用量与性能数据看板</h2>
-                <span class="m26-badge emerald text-xs font-mono" v-if="analyticsData?.summary?.total_requests">
-                  共 {{ analyticsData.summary.total_requests }} 次调用记录
-                </span>
-              </div>
-              <p class="text-xs text-muted mt-0.5">全维度透视模型调用量、Token 消耗、响应时延与首字 (TTFT) 表现</p>
-            </div>
-
-            <div class="flex items-center gap-3">
-              <!-- Time Range Selector -->
-              <div class="m26-time-pills">
-                <button
-                  class="m26-time-pill-btn"
-                  :class="{ active: analyticsDays === 1 }"
-                  @click="setAnalyticsDays(1)"
-                >
-今日
-</button>
-                <button
-                  class="m26-time-pill-btn"
-                  :class="{ active: analyticsDays === 7 }"
-                  @click="setAnalyticsDays(7)"
-                >
-近 7 天
-</button>
-                <button
-                  class="m26-time-pill-btn"
-                  :class="{ active: analyticsDays === 14 }"
-                  @click="setAnalyticsDays(14)"
-                >
-近 14 天
-</button>
-                <button
-                  class="m26-time-pill-btn"
-                  :class="{ active: analyticsDays === 30 }"
-                  @click="setAnalyticsDays(30)"
-                >
-近 30 天
-</button>
-                <button
-                  class="m26-time-pill-btn"
-                  :class="{ active: analyticsDays === 0 }"
-                  @click="setAnalyticsDays(0)"
-                >
-全部历史
-</button>
-              </div>
-
-              <!-- Refresh Button -->
+            <!-- Time Range Selector (Left) -->
+            <div class="m26-time-pills">
               <button
-                class="m26-glass-btn text-xs flex items-center gap-1.5"
-                :disabled="isLoadingAnalytics"
-                @click="loadAnalytics"
-                title="刷新看板数据"
+                class="m26-time-pill-btn"
+                :class="{ active: analyticsDays === 1 }"
+                @click="setAnalyticsDays(1)"
               >
-                <span v-if="isLoadingAnalytics" class="m26-spin-dot"></span>
-                <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M23 4v6h-6M1 20v-6h6" />
-                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                </svg>
-                <span>刷新</span>
+                今日
+              </button>
+              <button
+                class="m26-time-pill-btn"
+                :class="{ active: analyticsDays === 7 }"
+                @click="setAnalyticsDays(7)"
+              >
+                近 7 天
+              </button>
+              <button
+                class="m26-time-pill-btn"
+                :class="{ active: analyticsDays === 14 }"
+                @click="setAnalyticsDays(14)"
+              >
+                近 14 天
+              </button>
+              <button
+                class="m26-time-pill-btn"
+                :class="{ active: analyticsDays === 30 }"
+                @click="setAnalyticsDays(30)"
+              >
+                近 30 天
+              </button>
+              <button
+                class="m26-time-pill-btn"
+                :class="{ active: analyticsDays === 0 }"
+                @click="setAnalyticsDays(0)"
+              >
+                全部历史
               </button>
             </div>
+
+            <!-- Refresh Button (Right) -->
+            <button
+              class="m26-glass-btn m26-analytics-refresh-btn"
+              :disabled="isLoadingAnalytics"
+              @click="loadAnalytics"
+              title="刷新看板数据"
+            >
+              <span v-if="isLoadingAnalytics" class="m26-spin-dot"></span>
+              <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M23 4v6h-6M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              <span>刷新</span>
+            </button>
           </div>
 
           <!-- KPI Summary Cards Grid (5 Cards) -->
@@ -3178,14 +3170,13 @@ function handleContextMenu(event: MouseEvent) {
         </section>
 
         <!-- SECTION 2: CHANNELS -->
-        <section v-if="activeSection === 'channels'" class="m26-section-view">
-          <!-- Toolbar: Search, Filter Pills, View Mode Switcher, Batch Probe, Add Channel -->
+        <section v-if="activeSection === 'channels'" class="m26-section-view m26-channels-section">
+          <!-- Toolbar: Search, Filter Pills, Add Channel -->
           <ChannelToolbar
             ref="channelToolbarRef"
             data-tauri-drag-region="deep"
             :search="channelSearch"
             :filter-status="channelStatusFilter"
-            :view-mode="channelViewMode"
             :total-count="channels.length"
             :healthy-count="healthyChannelsCount"
             :degraded-count="degradedChannelsCount"
@@ -3193,51 +3184,32 @@ function handleContextMenu(event: MouseEvent) {
             :disabled-count="disabledChannelsCount"
             @update:search="channelSearch = $event"
             @update:filter-status="channelStatusFilter = $event"
-            @update:view-mode="setChannelViewMode($event)"
             @add-channel="openAddChannel"
           />
 
-          <!-- Card Grid View -->
-          <ChannelGridView
-            v-if="channelViewMode === 'grid'"
-            :channels="sortedChannels"
-            :selected-channel="getSelectedChannel()"
-            :search-query="channelSearch"
-            @select="selectChannel($event as Channel)"
-            @toggle="toggleChannel($event as Channel)"
-            @probe="probeChannel($event as Channel)"
-            @edit="openEditChannel($event as Channel)"
-            @duplicate="duplicateChannel($event as Channel)"
-            @remove="removeChannel($event as Channel)"
-            @open-models="openModelLatencyModal($event as Channel)"
-            @open-diagnostic="openChannelDiagnostic($event as Channel)"
-            @open-inject="openInjectionModal($event as Channel)"
-            @add-channel="openAddChannel"
-            @clear-search="channelSearch = ''; channelStatusFilter = 'all'"
-          />
-
-          <!-- High-Density Table View -->
-          <ChannelTableView
-            v-else
-            :channels="sortedChannels"
-            :selected-channel="getSelectedChannel()"
-            :search-query="channelSearch"
-            @select="selectChannel($event as Channel)"
-            @toggle="toggleChannel($event as Channel)"
-            @probe="probeChannel($event as Channel)"
-            @edit="openEditChannel($event as Channel)"
-            @duplicate="duplicateChannel($event as Channel)"
-            @remove="removeChannel($event as Channel)"
-            @open-models="openModelLatencyModal($event as Channel)"
-            @open-diagnostic="openChannelDiagnostic($event as Channel)"
-            @open-inject="openInjectionModal($event as Channel)"
-            @add-channel="openAddChannel"
-            @clear-search="channelSearch = ''; channelStatusFilter = 'all'"
-          />
+          <!-- Card Grid View in Dedicated Scroll Container -->
+          <div class="m26-channels-scroll-area">
+            <ChannelGridView
+              :channels="sortedChannels"
+              :selected-channel="getSelectedChannel()"
+              :search-query="channelSearch"
+              @select="selectChannel($event as Channel)"
+              @toggle="toggleChannel($event as Channel)"
+              @probe="probeChannel($event as Channel)"
+              @edit="openEditChannel($event as Channel)"
+              @duplicate="duplicateChannel($event as Channel)"
+              @remove="removeChannel($event as Channel)"
+              @open-models="openModelLatencyModal($event as Channel)"
+              @open-diagnostic="openChannelDiagnostic($event as Channel)"
+              @open-inject="openInjectionModal($event as Channel)"
+              @add-channel="openAddChannel"
+              @clear-search="channelSearch = ''; channelStatusFilter = 'all'"
+            />
+          </div>
         </section>
 
         <!-- SECTION 3: MODELS -->
-        <section v-if="activeSection === 'models'" class="m26-section-view">
+        <section v-if="activeSection === 'models'" class="m26-section-view m26-models-section">
           <div class="m26-models-page-header">
             <div class="m26-models-title-area">
               <div class="m26-family-pill-group">
@@ -3249,114 +3221,52 @@ function handleContextMenu(event: MouseEvent) {
                   @click="selectedModelFamily = tab.key"
                 >
                   <span>{{ tab.label }}</span>
-                  <span class="m26-family-count">{{ tab.count }}</span>
+                  <span class="m26-family-count font-mono">{{ tab.count }}</span>
                 </button>
               </div>
             </div>
 
             <div class="m26-models-actions-area">
               <button
-                class="m26-action-btn secondary"
+                class="m26-models-merge-btn"
                 @click="openCustomMappingsModal"
-                title="模型归并设置"
+                title="模型归并"
               >
                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M4 6h16M4 12h10M4 18h14" />
                 </svg>
-                <span>模型归并设置</span>
-                <span v-if="Object.keys(customModelMappings).length > 0" class="m26-badge-count">{{ Object.keys(customModelMappings).length }}</span>
+                <span>模型归并</span>
               </button>
             </div>
           </div>
 
-          <div class="m26-models-grid" v-if="filteredModels.length">
+          <div class="m26-models-scroll-area">
+            <div class="m26-models-grid" v-if="filteredModels.length">
             <div v-for="m in filteredModels" :key="m.name" class="m26-model-card">
-              <!-- Top: Brand Badge + Status/Latency Pill -->
+              <!-- Top Header: Model Name + Copy Icon (left) and Status/Latency Pill (right) -->
               <div class="m26-model-card-top">
-                <div
-                  class="m26-model-brand-badge"
-                  :style="{
-                    color: getModelFamily(m.name).color,
-                    background: getModelFamily(m.name).bg,
-                    borderColor: getModelFamily(m.name).border
-                  }"
-                >
-                  <span class="m26-model-brand-dot" :style="{ background: getModelFamily(m.name).color }"></span>
-                  <span class="m26-model-brand-name">{{ getModelFamily(m.name).label }}</span>
+                <div class="m26-model-title-box">
+                  <span class="m26-model-canonical-name font-mono" :title="m.name">{{ m.name }}</span>
+                  <button
+                    class="m26-model-copy-icon-btn"
+                    @click.stop="copyModelId(m.name)"
+                    :title="'复制模型名称: ' + m.name"
+                    aria-label="复制模型名称"
+                  >
+                    <svg v-if="copiedModelId !== m.name" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <rect x="5" y="5" width="8" height="8" rx="1.5" />
+                      <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
+                    </svg>
+                    <svg v-else viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="#059669" stroke-width="2.2">
+                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
+                    </svg>
+                  </button>
                 </div>
 
                 <div class="m26-model-status-chip" :class="m.status">
                   <span class="m26-status-indicator-dot" :class="m.status"></span>
                   <span class="m26-status-indicator-text font-mono">
                     {{ m.status === 'healthy' ? m.latency : m.status === 'degraded' ? `${m.latency} 波动` : m.status === 'unknown' ? '待探活' : '离线' }}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Main Info: Canonical Name + Copy Action -->
-              <div class="m26-model-main-info">
-                <div class="m26-model-title-box">
-                  <span class="m26-model-canonical-name font-mono" :title="m.name">{{ m.name }}</span>
-                  <button
-                    class="m26-model-copy-btn"
-                    @click.stop="copyModelId(m.name)"
-                    :title="'复制模型名称: ' + m.name"
-                  >
-                    <svg v-if="copiedModelId !== m.name" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                      <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                    </svg>
-                    <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#059669" stroke-width="2.2">
-                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                    </svg>
-                    <span>{{ copiedModelId === m.name ? '已复制' : '复制' }}</span>
-                  </button>
-                </div>
-
-                <!-- Aliases Row: Compact & Clickable -->
-                <div
-                  v-if="m.aliases && m.aliases.length > 0"
-                  class="m26-model-aliases-bar clickable"
-                  @click.stop="openAliasModal(m)"
-                  :title="'点击查看全部 ' + m.aliases.length + ' 个上游别名与渠道路由映射'"
-                >
-                  <span class="m26-aliases-tag">
-                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2">
-                      <circle cx="18" cy="18" r="3" />
-                      <circle cx="6" cy="6" r="3" />
-                      <path d="M13 6h3a2 2 0 0 1 2 2v7" />
-                      <line x1="6" y1="9" x2="6" y2="21" />
-                    </svg>
-                    <span>{{ m.aliases.length }} 个上游别名</span>
-                  </span>
-                  <span class="m26-aliases-text truncate font-mono">
-                    {{ m.aliases.slice(0, 2).join(', ') }}{{ m.aliases.length > 2 ? ` 等 +${m.aliases.length - 2}` : '' }}
-                  </span>
-                  <span class="m26-aliases-more-btn">
-                    <span>查看全部</span>
-                    <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M6 12l4-4-4-4" />
-                    </svg>
-                  </span>
-                </div>
-                <div
-                  v-else
-                  class="m26-model-aliases-bar direct clickable"
-                  @click.stop="openAliasModal(m)"
-                  title="点击查看各渠道同名直通映射明细"
-                >
-                  <span class="m26-aliases-tag direct">
-                    <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                    <span>标准同名直通</span>
-                  </span>
-                  <span class="m26-aliases-text">各渠道模型名一致</span>
-                  <span class="m26-aliases-more-btn">
-                    <span>明细</span>
-                    <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M6 12l4-4-4-4" />
-                    </svg>
                   </span>
                 </div>
               </div>
@@ -3387,19 +3297,20 @@ function handleContextMenu(event: MouseEvent) {
                 </div>
               </div>
 
-              <!-- Footer: Test & Classify Actions -->
+              <!-- Footer: Detail / Test / Classify Actions -->
               <div class="m26-model-card-footer">
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-1.5">
                   <button
-                    v-if="m.name !== 'Auto'"
-                    class="m26-model-test-btn"
-                    @click="openModelSpeedTestFor(m.name)"
-                    title="在全部支持此模型的渠道中发起并发探活"
+                    class="m26-model-detail-btn"
+                    @click.stop="openAliasModal(m)"
+                    title="查看渠道调用与别名重写映射明细"
                   >
-                    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
-                      <polygon points="8 2 14 5 14 11 8 14 2 11 2 5" />
+                    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <rect x="2" y="3" width="12" height="10" rx="2" />
+                      <line x1="5" y1="7" x2="11" y2="7" />
+                      <line x1="5" y1="10" x2="9" y2="10" />
                     </svg>
-                    <span>探活此模型</span>
+                    <span>明细</span>
                   </button>
                   <button
                     v-if="m.name !== 'Auto'"
@@ -3420,11 +3331,13 @@ function handleContextMenu(event: MouseEvent) {
             <p v-if="channelSearch || selectedModelFamily !== 'all'">未找到匹配的模型条件。</p>
             <p v-else>暂无可用模型。请先在渠道管理中添加并配置模型。</p>
           </div>
-        </section>
+        </div>
+      </section>
 
         <!-- SECTION 4: LOGS -->
         <LogsView
           v-if="activeSection === 'logs'"
+          ref="logsViewRef"
           :logs="filteredLogs"
           :total-logs="desktopLogs.length"
           :search="channelSearch"
@@ -3938,7 +3851,7 @@ function handleContextMenu(event: MouseEvent) {
         @copy-aliases="copyAllAliases(activeAliasModalModel)"
         @copy-alias="copyAlias"
         @remove-mapping="handleRemoveCustomMapping"
-        @open-speed-test="openModelSpeedTestFor(activeAliasModalModel.name)"
+        @open-speed-test="openModelSpeedTestFromAlias(activeAliasModalModel.name)"
         @open-classify="openClassifyDialog('', activeAliasModalModel.name)"
         @close="closeAliasModal"
       />
@@ -4049,9 +3962,9 @@ function handleContextMenu(event: MouseEvent) {
               </svg>
             </div>
             <div>
-              <h3 id="m26-modal-title-9" class="m26-modal-title">请求流水详情 #{{ activeLogDetail.id }}</h3>
+              <h3 id="m26-modal-title-9" class="m26-modal-title">请求详情 #{{ activeLogDetail.id }}</h3>
               <p class="m26-modal-subtitle">
-                {{ formatLogTime(activeLogDetail.created_at) }} · 网关全链路诊断
+                {{ formatLogTime(activeLogDetail.created_at) }}
               </p>
             </div>
           </div>
@@ -4709,6 +4622,22 @@ function handleContextMenu(event: MouseEvent) {
   flex: 1;
   overflow-y: auto;
   padding: 24px 28px 48px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.m26-viewport::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+.m26-viewport.is-fixed-header-view,
+.m26-viewport.is-models-view {
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 28px 0;
+  box-sizing: border-box;
+  height: 100%;
 }
 .m26-section-view {
   display: flex;
@@ -4716,6 +4645,36 @@ function handleContextMenu(event: MouseEvent) {
   gap: 24px;
   max-width: 1400px;
   margin: 0 auto;
+}
+.m26-section-view.m26-channels-section,
+.m26-section-view.m26-models-section,
+.m26-section-view.m26-logs-section {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+.m26-channels-scroll-area,
+.m26-models-scroll-area {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 28px;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.m26-channels-scroll-area::-webkit-scrollbar,
+.m26-models-scroll-area::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 /* Bento Grid */
@@ -5251,74 +5210,80 @@ function handleContextMenu(event: MouseEvent) {
    Section 3: Models View (macOS 26 Glassmorphic Hub)
    ========================================================================== */
 .m26-models-page-header {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin-bottom: 6px;
+  flex-wrap: nowrap;
+  gap: 12px;
+  margin-bottom: 0;
 }
 
 .m26-models-title-area {
   display: flex;
   align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .m26-family-pill-group {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 3px;
-  background: rgba(0, 0, 0, 0.04);
-  padding: 3px;
-  border-radius: 9px;
-  border: 1px solid rgba(0, 0, 0, 0.05);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.03);
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  box-sizing: border-box;
+}
+.m26-family-pill-group::-webkit-scrollbar {
+  display: none;
 }
 
 .m26-family-pill-btn {
-  height: 26px;
-  padding: 0 9px;
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--m26-text-secondary);
-  background: transparent;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #64748b;
+  background: transparent;
+  border: none;
+  cursor: pointer;
   transition: all 0.15s ease;
+  font-weight: 500;
   user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .m26-family-pill-btn:hover {
-  color: var(--m26-text);
+  color: #1e293b;
   background: rgba(255, 255, 255, 0.5);
 }
 
 .m26-family-pill-btn.active {
-  color: var(--m26-text);
   background: #ffffff;
-  font-weight: 650;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  color: #0f172a;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  font-weight: 600;
 }
 
 .m26-family-count {
   font-size: 10px;
-  font-weight: 600;
-  opacity: 0.65;
-  background: rgba(0, 0, 0, 0.06);
-  padding: 0 4px;
-  border-radius: 4px;
-  min-width: 14px;
-  text-align: center;
+  opacity: 0.7;
+  padding: 0 3px;
+  background: transparent;
 }
 
 .m26-family-pill-btn.active .m26-family-count {
-  background: rgba(0, 0, 0, 0.08);
+  background: transparent;
   opacity: 0.85;
 }
 
@@ -5326,26 +5291,68 @@ function handleContextMenu(event: MouseEvent) {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
+}
+
+.m26-models-merge-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #4f46e5, #4338ca);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.25);
+  transition: all 0.16s ease;
+  white-space: nowrap;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.m26-models-merge-btn:hover {
+  filter: brightness(1.09);
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.38);
+  transform: translateY(-1px);
+}
+
+.m26-models-merge-btn:active {
+  transform: translateY(0);
+  filter: brightness(0.96);
+}
+
+.m26-models-merge-btn svg {
+  flex-shrink: 0;
+  color: #ffffff;
+  stroke: #ffffff;
+}
+
+.m26-models-merge-btn:hover svg {
+  color: #ffffff;
 }
 
 /* Models Grid */
 .m26-models-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
+  gap: 10px;
 }
 
 .m26-model-card {
   background: var(--m26-card-bg);
   border: 1px solid var(--m26-border);
-  border-radius: 14px;
-  padding: 14px 16px;
+  border-radius: 12px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  min-height: 200px;
+  min-height: 110px;
   user-select: none;
 }
 
@@ -5356,11 +5363,13 @@ function handleContextMenu(event: MouseEvent) {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.05);
 }
 
-/* Card Top: Brand Badge & Status Chip */
+/* Card Top: Canonical Name + Copy Icon (left) & Status Chip (right) */
 .m26-model-card-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
 }
 
 .m26-model-brand-badge {
@@ -5394,6 +5403,7 @@ function handleContextMenu(event: MouseEvent) {
   border-radius: 9999px;
   font-size: 11px;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 .m26-model-status-chip.healthy {
@@ -5445,7 +5455,7 @@ function handleContextMenu(event: MouseEvent) {
   background: #94a3b8;
 }
 
-/* Main Info: Canonical Name + Copy Button */
+/* Main Info: Aliases & Routing */
 .m26-model-main-info {
   display: flex;
   flex-direction: column;
@@ -5453,24 +5463,44 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 .m26-model-title-box {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
 }
 
 .m26-model-canonical-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--m26-text);
-  line-height: 1.35;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  line-height: 1.3;
   overflow: hidden;
-  word-break: break-word;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   letter-spacing: -0.01em;
+}
+
+.m26-model-copy-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: #94a3b8;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.m26-model-copy-icon-btn:hover {
+  color: var(--m26-accent);
+  background: rgba(79, 70, 229, 0.08);
+  border-color: rgba(79, 70, 229, 0.15);
 }
 
 .m26-model-copy-btn {
@@ -5597,18 +5627,57 @@ function handleContextMenu(event: MouseEvent) {
   color: var(--m26-text-muted);
 }
 
-/* Model Aliases Modal Styles */
-.m26-aliases-modal-sheet {
-  max-width: 680px;
+/* Model Aliases Modal Styles - aligned with supplier modal */
+.m26-modal-sheet.m26-aliases-modal-sheet {
+  width: 100%;
+  max-width: 720px !important;
+  max-height: 88vh;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  box-shadow: 0 25px 65px rgba(15, 23, 42, 0.16), 0 8px 24px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+}
+
+.m26-modal-sheet.mapping-sheet.mode-manage {
   width: 92%;
+  max-width: 860px !important;
+  height: 82vh;
+  max-height: 82vh;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  box-shadow: 0 25px 65px rgba(15, 23, 42, 0.16), 0 8px 24px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.m26-modal-sheet.mapping-sheet.mode-manage .m26-modal-body {
+  flex: 1;
+  min-height: 0;
+  max-height: none !important;
+  overflow-y: hidden !important;
+  padding: 14px 20px 16px;
+  gap: 12px;
+}
+
+.m26-aliases-modal-sheet .m26-modal-header {
+  padding: 12px 20px;
+  background: #ffffff;
+  border-bottom: 1px solid #eef2f6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .m26-alias-modal-body {
-  padding: 18px 20px;
+  padding: 18px 20px 22px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-height: calc(85vh - 160px);
+  max-height: calc(88vh - 56px);
   overflow-y: auto;
   box-sizing: border-box;
 }
@@ -5648,7 +5717,7 @@ function handleContextMenu(event: MouseEvent) {
 
 .m26-alias-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
 }
 
@@ -5718,10 +5787,10 @@ function handleContextMenu(event: MouseEvent) {
 .m26-model-classify-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 9px;
-  border-radius: 6px;
+  gap: 3.5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
   font-size: 11px;
   font-weight: 550;
   background: rgba(0, 0, 0, 0.04);
@@ -5882,13 +5951,13 @@ function handleContextMenu(event: MouseEvent) {
 .m26-mapping-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: 12px;
   text-align: left;
 }
 
 .m26-mapping-table th {
   background: #f8fafc;
-  padding: 8px 14px;
+  padding: 9px 16px;
   font-weight: 600;
   color: var(--m26-text-secondary);
   border-bottom: 1px solid rgba(15, 23, 42, 0.08);
@@ -5896,7 +5965,7 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 .m26-mapping-table td {
-  padding: 9px 14px;
+  padding: 10px 16px;
   border-bottom: 1px solid rgba(15, 23, 42, 0.04);
   white-space: nowrap;
 }
@@ -5919,6 +5988,44 @@ function handleContextMenu(event: MouseEvent) {
 
 .m26-table-copy-icon:hover {
   color: #6366f1;
+}
+
+.m26-strategy-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.m26-strategy-text.direct {
+  color: #059669;
+}
+
+.m26-strategy-text.rewrite {
+  color: #64748b;
+}
+
+.m26-strategy-text.manual {
+  color: #4f46e5;
+}
+
+.m26-table-unlink-link {
+  font-size: 11px;
+  color: #94a3b8;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0 1px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.15s ease;
+}
+
+.m26-table-unlink-link:hover {
+  color: #e11d48;
 }
 
 .m26-mapping-chip {
@@ -5952,10 +6059,6 @@ function handleContextMenu(event: MouseEvent) {
   border: 1px dashed rgba(15, 23, 42, 0.1);
 }
 
-.m26-aliases-modal-sheet .m26-modal-header {
-  padding: 16px 20px;
-}
-
 .m26-aliases-modal-sheet .m26-close-btn {
   width: 28px;
   height: 28px;
@@ -5970,37 +6073,6 @@ function handleContextMenu(event: MouseEvent) {
 .m26-aliases-modal-sheet .m26-close-btn:hover {
   background: rgba(0, 0, 0, 0.06);
   color: var(--m26-text);
-}
-
-.m26-aliases-modal-sheet .m26-modal-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 20px;
-}
-
-.m26-aliases-modal-sheet .m26-modal-tip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--m26-text-muted);
-}
-
-.m26-aliases-modal-sheet .m26-modal-tip svg {
-  flex-shrink: 0;
-}
-
-.m26-aliases-modal-sheet .m26-modal-footer .m26-action-btn {
-  white-space: nowrap;
-  flex-shrink: 0;
-  padding: 6px 18px;
-  font-size: 12px;
-  min-width: 64px;
-  text-align: center;
 }
 
 /* Model Multi-Provider Speed Test Modal Styles */
@@ -6197,17 +6269,39 @@ function handleContextMenu(event: MouseEvent) {
   align-items: center;
   justify-content: flex-end;
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 6px;
   border-top: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+.m26-model-detail-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3.5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 550;
+  background: rgba(99, 102, 241, 0.06);
+  color: #4f46e5;
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.m26-model-detail-btn:hover {
+  background: rgba(99, 102, 241, 0.14);
+  color: #4338ca;
+  border-color: rgba(99, 102, 241, 0.35);
 }
 
 .m26-model-test-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 6px;
+  gap: 3.5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
   font-size: 11px;
   font-weight: 550;
   background: rgba(79, 70, 229, 0.08);
@@ -8189,41 +8283,83 @@ function handleContextMenu(event: MouseEvent) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 16px;
-  padding: 4px 0 6px;
+  gap: 12px;
+  margin-bottom: -6px;
+  padding: 0;
+  flex-shrink: 0;
 }
 
 .m26-time-pills {
   display: inline-flex;
   align-items: center;
-  background: rgba(0, 0, 0, 0.04);
-  padding: 3px;
-  border-radius: 9px;
-  border: 1px solid var(--m26-border);
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.03);
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  box-sizing: border-box;
 }
 
 .m26-time-pill-btn {
-  padding: 4px 11px;
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--m26-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
   border-radius: 6px;
-  border: none;
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
   background: transparent;
+  border: none;
   cursor: pointer;
   transition: all 0.15s ease;
+  user-select: none;
+  white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .m26-time-pill-btn:hover {
-  color: var(--m26-text);
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .m26-time-pill-btn.active {
   background: #ffffff;
-  color: var(--m26-text);
+  color: #0f172a;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.m26-analytics-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  color: #475569;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.m26-analytics-refresh-btn:hover:not(:disabled) {
+  background: #f8fafc;
+  color: #0f172a;
+  border-color: rgba(0, 0, 0, 0.16);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.m26-analytics-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .m26-analytics-kpi-grid {

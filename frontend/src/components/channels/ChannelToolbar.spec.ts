@@ -6,7 +6,6 @@ import ChannelToolbar from './ChannelToolbar.vue'
 const props = {
   search: '',
   filterStatus: 'all' as const,
-  viewMode: 'grid' as const,
   totalCount: 4,
   healthyCount: 2,
   degradedCount: 1,
@@ -15,11 +14,10 @@ const props = {
 }
 
 describe('ChannelToolbar', () => {
-  it('emits search, filter, view and add actions', async () => {
+  it('emits search, filter and add actions', async () => {
     const wrapper = mount(ChannelToolbar, { props })
 
     await wrapper.get('input').setValue('openai')
-    await wrapper.get('button[title="高密度列表视图"]').trigger('click')
     const healthyFilter = wrapper
       .findAll('button')
       .find((button) => button.text().includes('就绪'))
@@ -27,7 +25,6 @@ describe('ChannelToolbar', () => {
     await wrapper.get('button[aria-label="添加渠道"]').trigger('click')
 
     expect(wrapper.emitted('update:search')).toEqual([['openai']])
-    expect(wrapper.emitted('update:viewMode')).toEqual([['list']])
     expect(wrapper.emitted('update:filterStatus')).toEqual([['healthy']])
     expect(wrapper.emitted('add-channel')).toHaveLength(1)
   })

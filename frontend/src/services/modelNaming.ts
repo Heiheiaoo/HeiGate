@@ -149,7 +149,9 @@ export function selectCanonicalDisplayName(models: string[], mappings: ModelMapp
     if (DATE_SUFFIX_RE.test(lower)) score -= 15
     if (lower.includes('-flash') || lower.includes('-pro') || lower.includes('-turbo')) score += 10
     score -= m.length
-    if (score > bestScore || !best) {
+    const isLower = m === lower
+    const bestIsLower = best === best.toLowerCase()
+    if (score > bestScore || !best || (score === bestScore && isLower && !bestIsLower)) {
       bestScore = score
       best = m
     }

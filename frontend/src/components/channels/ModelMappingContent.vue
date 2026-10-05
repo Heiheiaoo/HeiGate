@@ -49,7 +49,7 @@ function submit() {
           </svg>
         </div>
         <h3 :id="props.mode === 'classify' ? 'm26-modal-title-6' : 'm26-modal-title-7'" class="m26-modal-title">
-          {{ props.mode === 'classify' ? '模型归并' : '模型归并设置' }}
+          模型归并
         </h3>
       </div>
       <button class="m26-close-btn" aria-label="关闭" @click="emit('close')">✕</button>
@@ -57,63 +57,50 @@ function submit() {
 
     <!-- Body -->
     <div class="m26-modal-body mapping-body">
-      <!-- Manage Mode: Add Mapping Rule Box -->
-      <div v-if="props.mode === 'manage'" class="mapping-form-box">
-        <div class="mapping-form-header">
-          <span class="mapping-form-title">添加新归类映射</span>
-          <span class="mapping-form-tip">将渠道原始模型别名归并至统一标准聚合卡片</span>
+      <!-- Manage Mode: Add Mapping Rule Box (Fixed single-line toolbar) -->
+      <div v-if="props.mode === 'manage'" class="mapping-inline-bar">
+        <div class="mapping-field source-field">
+          <input
+            v-model="source"
+            type="text"
+            class="m26-input font-mono"
+            placeholder="原始上游模型 (例如: deepseek-v4-flash-0731-free-3)"
+            :list="`mapping-source-${props.mode}`"
+          />
+          <datalist :id="`mapping-source-${props.mode}`">
+            <option v-for="name in props.sourceSuggestions" :key="name" :value="name" />
+          </datalist>
         </div>
 
-        <div class="mapping-controls">
-          <!-- Source Model Input -->
-          <div class="mapping-field source-field">
-            <label class="field-label">原始上游模型</label>
+        <div class="mapping-arrow-col">
+          <span class="mapping-arrow">➔</span>
+        </div>
+
+        <div class="mapping-field target-field">
+          <div class="flex items-center gap-1.5 w-full">
+            <select v-model="selectedTarget" class="m26-select font-mono">
+              <option v-for="name in props.targetOptions" :key="name" :value="name">{{ name }}</option>
+              <option value="__custom__">+ 新目标模型...</option>
+            </select>
             <input
-              v-model="source"
+              v-if="selectedTarget === '__custom__'"
+              v-model="customTarget"
               type="text"
-              class="m26-input font-mono"
-              placeholder="例如: deepseek-v4-flash-0731-free-3"
-              :list="`mapping-source-${props.mode}`"
+              class="m26-input font-mono custom-target"
+              placeholder="目标模型规范名称"
+              autofocus
             />
-            <datalist :id="`mapping-source-${props.mode}`">
-              <option v-for="name in props.sourceSuggestions" :key="name" :value="name" />
-            </datalist>
           </div>
+        </div>
 
-          <!-- Arrow -->
-          <div class="mapping-arrow-col">
-            <span class="mapping-arrow">➔</span>
-          </div>
-
-          <!-- Target Model Selection -->
-          <div class="mapping-field target-field">
-            <label class="field-label">归入标准模型</label>
-            <div class="flex flex-col gap-1.5">
-              <select v-model="selectedTarget" class="m26-select font-mono">
-                <option v-for="name in props.targetOptions" :key="name" :value="name">{{ name }}</option>
-                <option value="__custom__">+ 新目标模型...</option>
-              </select>
-              <input
-                v-if="selectedTarget === '__custom__'"
-                v-model="customTarget"
-                type="text"
-                class="m26-input font-mono custom-target"
-                placeholder="目标模型规范名称"
-                autofocus
-              />
-            </div>
-          </div>
-
-          <!-- Add Button -->
-          <div class="mapping-action-col">
-            <button
-              class="m26-action-btn primary add-button"
-              :disabled="!canSubmit"
-              @click="submit"
-            >
-              添加
-            </button>
-          </div>
+        <div class="mapping-action-col">
+          <button
+            class="m26-action-btn primary add-button"
+            :disabled="!canSubmit"
+            @click="submit"
+          >
+            添加
+          </button>
         </div>
       </div>
 
@@ -152,15 +139,8 @@ function submit() {
         </div>
       </div>
 
-      <!-- Manage Mode: Rules List -->
+      <!-- Manage Mode: Rules List (Takes all remaining window space) -->
       <div v-if="props.mode === 'manage'" class="mapping-rules-section">
-        <div class="mapping-rules-header">
-          <span class="mapping-rules-title">已生效规则</span>
-          <span v-if="props.mappings && Object.keys(props.mappings).length" class="rules-count-badge">
-            {{ Object.keys(props.mappings).length }} 条
-          </span>
-        </div>
-
         <div v-if="props.mappings && Object.keys(props.mappings).length" class="m26-custom-mappings-table">
           <div class="m26-mapping-row header">
             <span class="col-source">原始上游模型名</span>
@@ -189,6 +169,9 @@ function submit() {
               </span>
             </div>
           </div>
+          <div class="m26-mapping-table-footer">
+            <span class="rules-count-text">共 {{ Object.keys(props.mappings).length }} 条归类规则</span>
+          </div>
         </div>
 
         <div v-else class="mapping-empty">
@@ -203,11 +186,10 @@ function submit() {
       </div>
     </div>
 
-    <!-- Footer -->
-    <div class="m26-modal-footer">
-      <button v-if="props.mode === 'classify'" class="m26-glass-btn" @click="emit('close')">取消</button>
-      <button v-if="props.mode === 'classify'" class="m26-action-btn primary" :disabled="!canSubmit" @click="submit">确认归并</button>
-      <button v-else class="m26-action-btn primary !px-5" @click="emit('close')">完成</button>
+    <!-- Footer (classify mode only) -->
+    <div v-if="props.mode === 'classify'" class="m26-modal-footer">
+      <button class="m26-glass-btn" @click="emit('close')">取消</button>
+      <button class="m26-action-btn primary" :disabled="!canSubmit" @click="submit">确认归并</button>
     </div>
   </div>
 </template>
@@ -218,7 +200,22 @@ function submit() {
   width: 100%;
 }
 .mapping-sheet.mode-manage {
-  max-width: 640px;
+  max-width: 860px;
+  width: 92%;
+  height: 82vh;
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mapping-sheet.mode-manage .mapping-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 14px 20px 16px;
+  gap: 12px;
 }
 .m26-modal-header {
   display: flex;
@@ -227,6 +224,7 @@ function submit() {
   padding: 12px 20px;
   border-bottom: 1px solid var(--m26-border);
   min-height: 48px;
+  flex-shrink: 0;
 }
 .mapping-title {
   display: flex;
@@ -270,34 +268,15 @@ function submit() {
   gap: 16px;
   padding: 16px 20px;
 }
-.mapping-form-box {
+.mapping-inline-bar {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 10px;
-  padding: 14px;
+  padding: 10px 14px;
   border: 1px solid var(--m26-border);
   border-radius: 10px;
   background: #f8fafc;
-}
-.mapping-form-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.mapping-form-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--m26-text-secondary);
-}
-.mapping-form-tip {
-  font-size: 11px;
-  color: var(--m26-text-muted);
-}
-.mapping-controls {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-shrink: 0;
 }
 .mapping-field {
   display: flex;
@@ -314,15 +293,17 @@ function submit() {
 .mapping-arrow-col {
   display: flex;
   align-items: center;
-  height: 34px;
+  justify-content: center;
+  flex-shrink: 0;
 }
 .mapping-arrow {
   color: var(--m26-text-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .mapping-action-col {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  flex-shrink: 0;
 }
 .classify-form {
   display: flex;
@@ -346,50 +327,47 @@ function submit() {
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12);
 }
 .custom-target {
-  margin-top: 2px;
+  margin-top: 0;
 }
 .add-button {
   height: 34px;
+  padding: 0 16px;
   white-space: nowrap;
 }
 .mapping-rules-section {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-.mapping-rules-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.mapping-rules-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--m26-text-secondary);
-}
-.rules-count-badge {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--m26-accent, #6366f1);
-  background: rgba(99, 102, 241, 0.08);
-  padding: 1px 7px;
-  border-radius: 10px;
+  overflow: hidden;
 }
 .m26-custom-mappings-table {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--m26-border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: #fff;
   overflow: hidden;
 }
 .m26-mapping-list-scroll {
-  max-height: 240px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.m26-mapping-list-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 .m26-mapping-row {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--m26-border);
+  padding: 9px 14px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
   font-size: 12px;
   transition: background 0.1s ease;
 }
@@ -400,10 +378,26 @@ function submit() {
   border-bottom: 0;
 }
 .m26-mapping-row.header {
+  flex-shrink: 0;
   background: #f8fafc;
   color: var(--m26-text-muted);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
+  border-bottom: 1px solid var(--m26-border);
+}
+.m26-mapping-table-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 8px 14px;
+  background: #f8fafc;
+  border-top: 1px solid var(--m26-border);
+}
+.rules-count-text {
+  font-size: 11.5px;
+  font-weight: 550;
+  color: var(--m26-text-muted);
 }
 .col-source {
   flex: 1;

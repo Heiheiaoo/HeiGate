@@ -21,22 +21,16 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* The native window provides its own scroll affordances. */
+  /* Hide all scrollbars while preserving scroll functionality */
+  * {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  *::-webkit-scrollbar,
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  ::-webkit-scrollbar-thumb {
-    border-radius: 9999px;
-    background: rgb(148 163 184 / 0.45);
-  }
-
-  ::-webkit-scrollbar-thumb:hover {
-    background: rgb(100 116 139 / 0.65);
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
   }
 }

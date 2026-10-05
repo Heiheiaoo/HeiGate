@@ -124,4 +124,12 @@ describe('selectCanonicalDisplayName', () => {
     const picked = selectCanonicalDisplayName(['raw-name'], mappings)
     expect(picked).toBe('Preferred Name')
   })
+
+  it('prefers standard lowercase model name when scores tie', () => {
+    const picked = selectCanonicalDisplayName(
+      ['DeepSeek-V4-Flash', 'deepseek-v4-flash'],
+      NO_MAPPINGS,
+    )
+    expect(picked).toBe('deepseek-v4-flash')
+  })
 })

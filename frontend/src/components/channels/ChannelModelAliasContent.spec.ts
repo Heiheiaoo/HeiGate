@@ -12,6 +12,8 @@ const model: AggregateModelView = {
 
 const channels: AggregateModelChannelDetail[] = [
   { name: 'Primary', status: 'healthy', latency: 320, protocol: 'openai-compatible', upstreamModel: 'gpt-4o' },
+  { name: 'CaseVariant', status: 'healthy', latency: 280, protocol: 'openai-compatible', upstreamModel: 'GPT-4O' },
+  { name: 'AutoRewrite', status: 'healthy', latency: 450, protocol: 'openai-compatible', upstreamModel: 'gpt-4o-latest' },
   { name: 'Backup', status: 'degraded', latency: 1500, protocol: 'anthropic', upstreamModel: 'gpt-4o-2024-08-06' },
 ]
 
@@ -41,29 +43,22 @@ describe('ChannelModelAliasContent', () => {
     expect(wrapper.text()).toContain('gpt-4o-2024-08-06')
     expect(wrapper.text()).toContain('别名重写')
     expect(wrapper.text()).toContain('同名直通')
-    expect(wrapper.text()).toContain('延迟较高')
+    expect(wrapper.text()).toContain('320ms')
+    expect(wrapper.text()).toContain('1.50s')
     expect(wrapper.text()).toContain('手动归类')
   })
 
-  it('emits search, copy, mapping, speed-test, classify, and close actions', async () => {
+  it('emits copy, mapping, and close actions', async () => {
     const wrapper = mountContent()
 
-    await wrapper.get('input').setValue('backup')
     await wrapper.get('button[title="复制模型名: gpt-4o"]').trigger('click')
-    await wrapper.get('button[title="复制全部上游别名（每行一个）"]').trigger('click')
-    await wrapper.get('button[title="复制别名: gpt-4o-2024-08-06"]').trigger('click')
+    await wrapper.get('button[title="在全部支持此模型的渠道中发起并发探活"]').trigger('click')
     await wrapper.get('button[title="解除手动归类，恢复为独立模型"]').trigger('click')
-    await wrapper.get('button[title="并发探活此模型全部供应商的可用性与延迟"]').trigger('click')
-    await wrapper.get('button[title="将其他渠道模型手动归并到此聚合模型"]').trigger('click')
     await wrapper.get('button[aria-label="关闭"]').trigger('click')
 
-    expect(wrapper.emitted('update:search')).toContainEqual(['backup'])
     expect(wrapper.emitted('copy-model')).toHaveLength(1)
-    expect(wrapper.emitted('copy-aliases')).toHaveLength(1)
-    expect(wrapper.emitted('copy-alias')).toContainEqual(['gpt-4o-2024-08-06'])
-    expect(wrapper.emitted('remove-mapping')).toEqual([['gpt-4o-2024-08-06']])
     expect(wrapper.emitted('open-speed-test')).toHaveLength(1)
-    expect(wrapper.emitted('open-classify')).toHaveLength(1)
+    expect(wrapper.emitted('remove-mapping')).toEqual([['gpt-4o-2024-08-06']])
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
 })

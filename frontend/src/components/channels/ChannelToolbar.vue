@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import type { ChannelFilterStatus, ChannelViewMode } from './types'
+import type { ChannelFilterStatus } from './types'
 
 defineProps<{
   search: string
   filterStatus: ChannelFilterStatus
-  viewMode: ChannelViewMode
   totalCount: number
   healthyCount: number
   degradedCount: number
@@ -16,7 +15,6 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'update:search', val: string): void
   (e: 'update:filterStatus', val: ChannelFilterStatus): void
-  (e: 'update:viewMode', val: ChannelViewMode): void
   (e: 'add-channel'): void
 }>()
 
@@ -34,33 +32,9 @@ defineExpose({
 
 <template>
   <div class="m26-ch-toolbar">
-    <!-- Left: Search input, status filter pills, and view mode segmented button -->
+    <!-- Left: Status filter pills FIRST, then Search input -->
     <div class="m26-ch-toolbar-left">
-      <!-- Search Input -->
-      <div class="m26-ch-search-box">
-        <svg class="m26-ch-search-icon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="6.5" cy="6.5" r="4.5" />
-          <line x1="10" y1="10" x2="14" y2="14" />
-        </svg>
-        <input
-          ref="searchInputRef"
-          :value="search"
-          type="text"
-          class="m26-ch-search-input"
-          placeholder="搜索渠道、端点或模型..."
-          @input="emit('update:search', ($event.target as HTMLInputElement).value)"
-        />
-        <button
-          v-if="search"
-          class="m26-ch-search-clear"
-          title="清空搜索"
-          @click="emit('update:search', '')"
-        >
-          ✕
-        </button>
-      </div>
-
-      <!-- Filter Status Pills -->
+      <!-- Filter Status Pills (Tabs placed FIRST) -->
       <div class="m26-ch-filter-pills">
         <button
           class="m26-ch-filter-pill"
@@ -116,37 +90,32 @@ defineExpose({
         </button>
       </div>
 
-      <!-- View Switcher (Grid vs List) -->
-      <div class="m26-ch-segmented">
+      <!-- Search Input (Placed AFTER tabs) -->
+      <div class="m26-ch-search-box">
+        <svg class="m26-ch-search-icon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="6.5" cy="6.5" r="4.5" />
+          <line x1="10" y1="10" x2="14" y2="14" />
+        </svg>
+        <input
+          ref="searchInputRef"
+          :value="search"
+          type="text"
+          class="m26-ch-search-input"
+          placeholder="搜索渠道、端点或模型..."
+          @input="emit('update:search', ($event.target as HTMLInputElement).value)"
+        />
         <button
-          class="m26-ch-seg-btn"
-          :class="{ active: viewMode === 'grid' }"
-          title="卡片网格视图"
-          @click="emit('update:viewMode', 'grid')"
+          v-if="search"
+          class="m26-ch-search-clear"
+          title="清空搜索"
+          @click="emit('update:search', '')"
         >
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
-            <rect x="2" y="2" width="5" height="5" rx="1.2" />
-            <rect x="9" y="2" width="5" height="5" rx="1.2" />
-            <rect x="2" y="9" width="5" height="5" rx="1.2" />
-            <rect x="9" y="9" width="5" height="5" rx="1.2" />
-          </svg>
-        </button>
-        <button
-          class="m26-ch-seg-btn"
-          :class="{ active: viewMode === 'list' }"
-          title="高密度列表视图"
-          @click="emit('update:viewMode', 'list')"
-        >
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="2" y1="4" x2="14" y2="4" />
-            <line x1="2" y1="8" x2="14" y2="8" />
-            <line x1="2" y1="12" x2="14" y2="12" />
-          </svg>
+          ✕
         </button>
       </div>
     </div>
 
-    <!-- Right: Actions (Batch Probe, Add Channel) -->
+    <!-- Right: Actions (Add Channel) -->
     <div class="m26-ch-toolbar-right">
       <button
         class="m26-ch-btn m26-ch-btn-primary icon-only"
@@ -169,7 +138,8 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 0;
+  flex-shrink: 0;
   flex-wrap: wrap;
 }
 
@@ -294,39 +264,6 @@ defineExpose({
 .pill-dot.amber { background: #f59e0b; }
 .pill-dot.rose { background: #ef4444; }
 .pill-dot.gray { background: #94a3b8; }
-
-.m26-ch-segmented {
-  display: flex;
-  align-items: center;
-  background: rgba(0, 0, 0, 0.04);
-  padding: 2px;
-  border-radius: 7px;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-}
-
-.m26-ch-seg-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 24px;
-  border-radius: 5px;
-  background: transparent;
-  border: none;
-  color: #64748b;
-  cursor: pointer;
-  transition: all 0.12s ease;
-}
-
-.m26-ch-seg-btn:hover {
-  color: #1e293b;
-}
-
-.m26-ch-seg-btn.active {
-  background: #ffffff;
-  color: #0f172a;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-}
 
 /* Action Buttons */
 .m26-ch-btn {

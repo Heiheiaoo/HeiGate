@@ -299,7 +299,12 @@ pub fn select_canonical_display_name(models: &[String]) -> String {
         }
         score -= m.len() as i32;
 
-        if score > best_score || best.is_empty() {
+        let is_lower = m.chars().all(|c| !c.is_uppercase());
+        let best_is_lower = best.chars().all(|c| !c.is_uppercase());
+        if score > best_score
+            || best.is_empty()
+            || (score == best_score && is_lower && !best_is_lower)
+        {
             best_score = score;
             best = m.to_string();
         }
@@ -415,6 +420,15 @@ mod tests {
             "qwen3.8-flash".to_string(),
         ];
         assert_eq!(select_canonical_display_name(&qwen), "qwen3.8-flash");
+
+        let deepseek = vec![
+            "DeepSeek-V4-Flash".to_string(),
+            "deepseek-v4-flash".to_string(),
+        ];
+        assert_eq!(
+            select_canonical_display_name(&deepseek),
+            "deepseek-v4-flash"
+        );
     }
 
     #[test]
