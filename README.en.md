@@ -16,7 +16,7 @@
 
 ## What it does
 
-If you juggle several AI API endpoints — official keys, a relay, a local Ollama — HeiGate puts them behind one local address. Your coding tools point at the desktop default `http://127.0.0.1:18080` and it handles the rest:
+If you juggle several AI API endpoints — official keys, a relay, a local Ollama — HeiGate puts them behind one local address. Your coding tools point at the desktop default `http://127.0.0.1:28888` and it handles the rest:
 
 - **Multi-channel routing** — pick a channel by latency, a quality score, or round robin
 - **Automatic failover** — when a channel errors, rate-limits, or times out, the request moves to the next one; repeated failures trip a circuit breaker with a cooldown
@@ -61,16 +61,16 @@ The gateway key shown in the UI authenticates clients. It is stored as `gateway.
 **Claude Code**
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:18080"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:28888/claude_code"
 export ANTHROPIC_AUTH_TOKEN="<gateway key from the UI>"
 ```
 
 **OpenAI-compatible clients** (Cursor, VS Code extensions, and so on)
 
-- Base URL: `http://127.0.0.1:18080/v1`
+- Base URL: `http://127.0.0.1:28888/v1` (client-specific paths supported, e.g. `http://127.0.0.1:28888/hermes/v1`)
 - API key: `<gateway key from the UI>`
 
-The gateway exposes `POST /v1/messages`, `POST /v1/chat/completions`, `POST /v1/responses`, and `GET /v1/models`.
+The gateway exposes `POST /v1/messages`, `POST /v1/chat/completions`, `POST /v1/responses`, and `GET /v1/models` (plus dedicated client routes `/{client}/v1/*`).
 
 ## Build from source
 
@@ -89,8 +89,8 @@ make help     # list every target
 For development it is easier to run the two halves separately:
 
 ```bash
-make run                          # terminal 1: desktop gateway on a local port starting at 18080
-pnpm --dir frontend run dev       # terminal 2: Vite on 5273, proxying to 18080
+make run                          # terminal 1: desktop gateway on a local port starting at 28888
+pnpm --dir frontend run dev       # terminal 2: Vite on 5273, proxying to 28888
 ```
 
 ## Configuration

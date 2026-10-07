@@ -16,7 +16,7 @@
 
 ## 这是什么
 
-你手上可能有好几个 AI API 渠道：官方的、中转的、自己搭的 Ollama。HeiGate 把它们收拢到一个本地地址后面，你的编程工具只需要连桌面版默认地址 `http://127.0.0.1:18080`，剩下的事情它来处理：
+你手上可能有好几个 AI API 渠道：官方的、中转的、自己搭的 Ollama。HeiGate 把它们收拢到一个本地地址后面，你的编程工具只需要连桌面版默认地址 `http://127.0.0.1:28888`，剩下的事情它来处理：
 
 - **多渠道路由** — 按延迟、质量评分或轮询挑选渠道
 - **自动故障转移** — 某个渠道报错、限流或超时，请求自动切到下一个；连续失败会触发熔断和冷却
@@ -61,16 +61,16 @@ xattr -dr com.apple.quarantine /Applications/HeiGate.app
 **Claude Code**
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:18080"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:28888/claude_code"
 export ANTHROPIC_AUTH_TOKEN="<界面里的网关密钥>"
 ```
 
 **OpenAI 兼容客户端**（Cursor、各类 VS Code 插件等）
 
-- Base URL：`http://127.0.0.1:18080/v1`
+- Base URL：`http://127.0.0.1:28888/v1`（各独立客户端可分别指定专属路径，如 Hermes 专享 `http://127.0.0.1:28888/hermes/v1`）
 - API Key：`<界面里的网关密钥>`
 
-网关提供这些端点：`POST /v1/messages`、`POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`。
+网关提供这些端点：`POST /v1/messages`、`POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`，以及各平台专享前缀端点（如 `/{client}/v1/*`）。
 
 ## 从源码构建
 
@@ -89,8 +89,8 @@ make help     # 看所有目标
 开发时前后端分开跑更方便：
 
 ```bash
-make run                          # 终端 1：桌面网关，监听 18080 起的本地端口
-pnpm --dir frontend run dev       # 终端 2：Vite，5273，API 请求代理到 18080
+make run                          # 终端 1：桌面网关，监听 28888 起的本地端口
+pnpm --dir frontend run dev       # 终端 2：Vite，5273，API 请求代理到 28888
 ```
 
 ## 配置

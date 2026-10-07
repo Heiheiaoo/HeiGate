@@ -496,6 +496,59 @@ export async function fetchUpstreamModels(
   }
 }
 
+export type DetectProtocolResult = {
+  ok: boolean
+  detectedProtocol?: 'openai-compatible' | 'anthropic' | 'openai-responses'
+  supportsOpenai?: boolean
+  supportsAnthropic?: boolean
+  supportsResponses?: boolean
+  models?: string[]
+  message?: string
+  error?: string
+}
+
+export async function detectChannelProtocol(
+  endpointUrl: string,
+  apiKey: string,
+  channelId?: number,
+): Promise<DetectProtocolResult> {
+  try {
+    const response = await request('/channels/detect-protocol', {
+      method: 'POST',
+      body: JSON.stringify({
+        endpoint: endpointUrl,
+        api_key: channelId ? undefined : apiKey,
+        channel_id: channelId,
+      }),
+    })
+    const payload = (await response.json()) as {
+      data?: {
+        detected_protocol: string
+        supports_openai: boolean
+        supports_anthropic: boolean
+        supports_responses?: boolean
+        models: string[]
+        message: string
+      }
+      error?: string
+    }
+    if (!response.ok || !payload.data) {
+      return { ok: false, error: payload.error || `HTTP ${response.status}` }
+    }
+    return {
+      ok: true,
+      detectedProtocol: payload.data.detected_protocol as any,
+      supportsOpenai: payload.data.supports_openai,
+      supportsAnthropic: payload.data.supports_anthropic,
+      supportsResponses: payload.data.supports_responses,
+      models: payload.data.models,
+      message: payload.data.message,
+    }
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : '无法连接到本地网关服务' }
+  }
+}
+
 function toPayload(channel: Partial<ApiChannel> & { apiKey?: string }) {
   return {
     name: channel.name,
@@ -616,3 +669,50 @@ export async function deleteCustomModelMapping(rawModel: string): Promise<Record
     return null
   }
 }
+
+export type ClientPlatformBackendConfig = {
+  strategy?: string
+  allowed_channels?: string[]
+  model?: string
+  small_model?: string
+  allowed_models?: string[]
+  auto_enabled?: boolean
+  auto_strategy?: string
+  auto_models?: string[]
+  apply_local?: boolean
+  restart?: boolean
+  launch_terminal?: boolean
+}
+
+export async function getClientConfigs(): Promise<Record<string, ClientPlatformBackendConfig>> {
+  try {
+    const response = await request('/clients/config')
+    if (!response.ok) return {}
+    const payload = await response.json() as { data?: Record<string, ClientPlatformBackendConfig> }
+    return payload.data ?? {}
+  } catch {
+    return {}
+  }
+}
+
+export interface ClientConfigUpdateResult {
+  ok: boolean
+  message?: string
+}
+
+export async function updateClientConfig(
+  clientId: string,
+  payload: ClientPlatformBackendConfig
+): Promise<ClientConfigUpdateResult> {
+  try {
+    const response = await request(`/clients/${encodeURIComponent(clientId)}/config`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+    const payloadJson = (await response.json().catch(() => ({}))) as { message?: string }
+    return { ok: response.ok, message: payloadJson.message }
+  } catch (err: any) {
+    return { ok: false, message: err?.message }
+  }
+}
+

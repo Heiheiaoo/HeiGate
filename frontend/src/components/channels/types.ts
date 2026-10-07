@@ -91,6 +91,9 @@ export type Channel = {
   injectionContent?: string
   injectionCheckedAt?: string | null
   modelHealth?: ModelHealth[]
+  supportsOpenai?: boolean | null
+  supportsAnthropic?: boolean | null
+  supportsResponses?: boolean | null
 }
 
 export type ChannelViewMode = 'grid' | 'list'

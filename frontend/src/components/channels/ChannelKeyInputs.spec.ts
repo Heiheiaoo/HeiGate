@@ -13,7 +13,7 @@ describe('ChannelKeyInputs', () => {
   it('adds masked rows and emits all keys together', async () => {
     const wrapper = mount(ChannelKeyInputs, { props: { modelValue: [] } })
     await wrapper.get('input[aria-label="Key 1"]').setValue('key-a')
-    await wrapper.findAll('button').find(b => b.text() === '添加一把 Key')!.trigger('click')
+    await wrapper.findAll('button').find(b => b.text() === '添加 Key')!.trigger('click')
     await wrapper.get('input[aria-label="Key 2"]').setValue('key-b')
     expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual<ChannelKeyDraft[][]>([[
       { name: 'Key 1', secret: 'key-a' },

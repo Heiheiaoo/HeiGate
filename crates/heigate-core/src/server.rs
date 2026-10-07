@@ -29,7 +29,7 @@ use crate::version::VERSION;
 pub const HOST: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 /// Preferred ports, mirroring the desktop shells' probing order.
-pub const PORT_CANDIDATES: std::ops::RangeInclusive<u16> = 18080..=18090;
+pub const PORT_CANDIDATES: std::ops::RangeInclusive<u16> = 28888..=28898;
 pub const MAX_REQUEST_BODY: usize = 16 << 20;
 
 /// A bound-but-not-yet-serving listener plus the port it landed on.
@@ -38,9 +38,20 @@ pub struct Bound {
     pub port: u16,
 }
 
-/// Binds a loopback listener, preferring 18080–18090 and falling back to an
-/// OS-assigned port.
+fn configured_port(value: Option<&str>) -> Option<u16> {
+    value
+        .and_then(|raw| raw.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+}
+
+/// Binds a loopback listener, trying `HEIGATE_PORT` first, then 28888–28898,
+/// and finally an OS-assigned port.
 pub fn bind() -> std::io::Result<Bound> {
+    if let Some(port) = configured_port(std::env::var("HEIGATE_PORT").ok().as_deref()) {
+        if let Ok(listener) = TcpListener::bind(SocketAddr::new(HOST.into(), port)) {
+            return Ok(Bound { listener, port });
+        }
+    }
     for port in PORT_CANDIDATES {
         if let Ok(listener) = TcpListener::bind(SocketAddr::new(HOST.into(), port)) {
             return Ok(Bound { listener, port });
@@ -52,7 +63,7 @@ pub fn bind() -> std::io::Result<Bound> {
 }
 
 /// Assembles the application state from the local data directory.
-pub fn build_state() -> std::io::Result<SharedState> {
+pub fn build_state(gateway_port: u16) -> std::io::Result<SharedState> {
     let dir = datadir::ensure()?;
     let store = Store::open(dir.join("heigate.sqlite"))
         .map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -76,6 +87,7 @@ pub fn build_state() -> std::io::Result<SharedState> {
         router,
         gateway,
         gateway_key,
+        gateway_port,
         version: VERSION.trim().to_string(),
     }))
 }
@@ -98,6 +110,7 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
             "/channels/upstream-models",
             post(handlers::fetch_upstream_models),
         )
+        .route("/channels/detect-protocol", post(handlers::detect_protocol))
         .route(
             "/channels/{id}",
             get(handlers::get_channel)
@@ -145,6 +158,8 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         .route("/logs/prune", post(handlers::prune_logs))
         .route("/system", get(handlers::system_info))
         .route("/settings", put(handlers::update_settings))
+        .route("/clients/config", get(handlers::get_client_configs))
+        .route("/clients/{id}/config", put(handlers::update_client_config))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn(same_origin_only));
 
@@ -156,6 +171,27 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         )
         .route("/v1/responses", post(handlers::forward_responses))
         .route("/v1/models", get(handlers::gateway_models))
+        .route(
+            "/{client}/v1/messages",
+            post(handlers::forward_client_messages),
+        )
+        .route(
+            "/{client}/v1/chat/completions",
+            post(handlers::forward_client_chat_completions),
+        )
+        .route(
+            "/{client}/v1/responses",
+            post(handlers::forward_client_responses),
+        )
+        .route("/{client}/v1/models", get(handlers::gateway_client_models))
+        .route(
+            "/{client}/messages",
+            post(handlers::forward_client_messages),
+        )
+        .route(
+            "/{client}/chat/completions",
+            post(handlers::forward_client_chat_completions),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn_with_state(GatewayKey(key), bearer_auth))
         .layer(middleware::from_fn(loopback_only));
@@ -226,7 +262,7 @@ pub async fn serve_with_ready(
 
 /// Convenience entry point: builds the default state and serves it.
 pub async fn run_default(bound: Bound, static_dir: PathBuf) -> std::io::Result<()> {
-    let state = build_state()?;
+    let state = build_state(bound.port)?;
     serve(bound, static_dir, state).await
 }
 
@@ -236,7 +272,7 @@ pub async fn run_default_with_ready(
     static_dir: PathBuf,
     ready: oneshot::Sender<Result<(), String>>,
 ) -> std::io::Result<()> {
-    let state = match build_state() {
+    let state = match build_state(bound.port) {
         Ok(state) => state,
         Err(err) => {
             let message = err.to_string();

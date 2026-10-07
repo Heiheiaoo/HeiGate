@@ -19,9 +19,6 @@ function formatErrorSummary(rawError?: string): string {
   if (rawError.includes('insufficient_user_quota') || rawError.includes('额度不足') || rawError.includes('预扣费')) {
     return '上游账户额度耗尽或余额不足 (insufficient_user_quota)'
   }
-  if (rawError.includes('冷却') || rawError.includes('暂避')) {
-    return 'Key 暂避保护中: 因上游上一轮请求报错，网关对该模型开启了临时避退冷却'
-  }
   if (rawError.includes('403')) return 'HTTP 403: 上游拒绝访问或无权限 (Forbidden / Quota Exceeded)'
   if (rawError.includes('404')) {
     if (rawError.includes('model route not found') || rawError.includes('NOT_FOUND')) return 'HTTP 404: 上游模型路由不存在 (NOT_FOUND)'
@@ -37,7 +34,6 @@ function formatErrorSummary(rawError?: string): string {
 function extractErrorCode(rawError?: string): string {
   if (!rawError) return 'ERROR'
   if (rawError.includes('insufficient_user_quota') || rawError.includes('额度')) return 'QUOTA'
-  if (rawError.includes('冷却') || rawError.includes('暂避')) return 'COOLDOWN'
   if (rawError.includes('403')) return 'HTTP 403'
   if (rawError.includes('404')) return 'HTTP 404'
   if (rawError.includes('401')) return 'HTTP 401'
@@ -55,9 +51,6 @@ function getTroubleshootingAdvice(channel: Channel): TroubleshootingAdvice[] {
   if (error.includes('insufficient_user_quota') || error.includes('额度') || error.includes('403')) {
     tips.push({ title: '检查服务商账户余额', detail: '上游返回余额不足或预扣费失败，请登录服务商后台确认是否有可用额度。' })
     tips.push({ title: '检查模型购买套餐', detail: '部分中转平台需要单独给该模型或分组充值后才能调用。' })
-  } else if (error.includes('冷却') || error.includes('暂避')) {
-    tips.push({ title: '稍等冷却期结束', detail: '网关为防止频繁重试被封禁，自动暂避该模型 2 分钟，请稍候再试。' })
-    tips.push({ title: '核对上游模型有效性', detail: '若该模型在上游确实不存在，建议在渠道设置中将其移除或更换为主模型。' })
   } else if (error.includes('404')) {
     tips.push({ title: '核对探活主模型', detail: `上游可能未开通当前主模型（${channel.primaryModel || channel.modelNames?.[0] || '未知'}），或者官方已经迭代该版本。` })
     tips.push({ title: '检查 Base URL 格式', detail: `当前为 ${channel.url}。请确认该地址是否缺少或多加了版本路径（例如 /v1）。` })

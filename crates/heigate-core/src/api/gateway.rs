@@ -19,11 +19,14 @@ use crate::api::forward::{
     parse_retry_after, request_model, GatewayProtocol, StreamTokenTracker,
 };
 use crate::api::policy::{
-    adapt_unsupported_reasoning_effort, best_auto_choice, best_auto_model, channel_serving_traffic,
-    channel_supports_model, parse_upstream_error_message, upstream_error_payload,
-    upstream_stream_error, upstream_stream_has_output, TraceStep, AUTO_MODEL_NAME,
+    adapt_unsupported_reasoning_effort, best_auto_choice_matching, best_auto_model_matching,
+    channel_serving_traffic, channel_supports_model, parse_upstream_error_message,
+    upstream_error_payload, upstream_stream_error, upstream_stream_has_output, TraceStep,
+    AUTO_MODEL_NAME,
 };
-use crate::canonical::find_channel_model_for_request;
+use crate::canonical::{
+    are_models_equivalent, channel_supports_model_or_canonical, find_channel_model_for_request,
+};
 use crate::key_pool::{KeyLease, KeyPool};
 use crate::probe::{normalize_endpoint, PROVIDER_OPENAI};
 use crate::protocol::{
@@ -149,6 +152,8 @@ pub struct RequestContext {
     pub user_agent: String,
     pub request_path: String,
     pub strategy: String,
+    pub allowed_channels: Option<Vec<String>>,
+    pub allowed_models: Option<Vec<String>>,
 }
 
 /// The gateway: candidate routing plus upstream forwarding.
@@ -208,7 +213,51 @@ impl Gateway {
             effective_model.clone()
         };
 
-        let matcher = |ch: &Channel| gateway_candidate_matcher(proto, ch);
+        if let Some(ref allowed_models) = ctx.allowed_models {
+            if !allowed_models.is_empty() && !is_auto {
+                let is_allowed = allowed_models.iter().any(|m| {
+                    are_models_equivalent(m, &model) || are_models_equivalent(m, &effective_model)
+                });
+                if !is_allowed {
+                    let err_msg = format!(
+                        "Model '{model}' is not allowed for this client. Allowed models: {}",
+                        allowed_models.join(", ")
+                    );
+                    if proto == GatewayProtocol::Anthropic {
+                        return anthropic_error(
+                            StatusCode::FORBIDDEN,
+                            "invalid_request_error",
+                            &err_msg,
+                        );
+                    } else {
+                        return json_error(StatusCode::FORBIDDEN, &err_msg);
+                    }
+                }
+            }
+        }
+
+        let allowed_channels = ctx.allowed_channels.clone();
+        let allowed_models = ctx.allowed_models.clone();
+        let matcher = move |ch: &Channel| {
+            if let Some(ref allowed) = allowed_channels {
+                if !allowed.is_empty() && !allowed.contains(&ch.name) {
+                    return false;
+                }
+            }
+            if is_auto {
+                if let Some(ref allowed_m) = allowed_models {
+                    if !allowed_m.is_empty() {
+                        let has_any = allowed_m
+                            .iter()
+                            .any(|m| channel_supports_model_or_canonical(ch, m));
+                        if !has_any {
+                            return false;
+                        }
+                    }
+                }
+            }
+            gateway_candidate_matcher(proto, ch)
+        };
         let mut candidates = match self.router.candidates_matching(
             &candidate_model,
             &ctx.strategy,
@@ -230,14 +279,61 @@ impl Gateway {
         };
 
         if is_auto {
+            let allowed_m = ctx.allowed_models.as_deref();
             candidates.sort_by(|a, b| {
-                let ca = best_auto_choice(Some(a));
-                let cb = best_auto_choice(Some(b));
-                ca.rank
-                    .cmp(&cb.rank)
-                    .then(ca.lat.cmp(&cb.lat))
-                    .then(a.name.cmp(&b.name))
+                let ca = best_auto_choice_matching(Some(a), allowed_m);
+                let cb = best_auto_choice_matching(Some(b), allowed_m);
+                match ctx.strategy.as_str() {
+                    crate::router::ROUTE_MANUAL_PRIORITY => {
+                        let ma = allowed_m
+                            .and_then(|list| {
+                                list.iter()
+                                    .position(|name| are_models_equivalent(name, &ca.name))
+                            })
+                            .unwrap_or(usize::MAX);
+                        let mb = allowed_m
+                            .and_then(|list| {
+                                list.iter()
+                                    .position(|name| are_models_equivalent(name, &cb.name))
+                            })
+                            .unwrap_or(usize::MAX);
+                        if ma != mb {
+                            return ma.cmp(&mb);
+                        }
+                        let pa = ctx
+                            .allowed_channels
+                            .as_ref()
+                            .and_then(|list| list.iter().position(|name| name == &a.name))
+                            .unwrap_or(usize::MAX);
+                        let pb = ctx
+                            .allowed_channels
+                            .as_ref()
+                            .and_then(|list| list.iter().position(|name| name == &b.name))
+                            .unwrap_or(usize::MAX);
+                        pa.cmp(&pb).then(ca.rank.cmp(&cb.rank))
+                    }
+                    crate::router::ROUTE_LATENCY => ca.lat.cmp(&cb.lat).then(ca.rank.cmp(&cb.rank)),
+                    crate::router::ROUTE_ROUND_ROBIN => {
+                        ca.rank.cmp(&cb.rank).then(ca.lat.cmp(&cb.lat))
+                    }
+                    _ => {
+                        // smart_quality
+                        ca.rank
+                            .cmp(&cb.rank)
+                            .then(ca.lat.cmp(&cb.lat))
+                            .then(a.name.cmp(&b.name))
+                    }
+                }
             });
+        } else if ctx.strategy == crate::router::ROUTE_MANUAL_PRIORITY {
+            if let Some(ref allowed_chans) = ctx.allowed_channels {
+                candidates.sort_by_key(|c| {
+                    allowed_chans
+                        .iter()
+                        .position(|name| name == &c.name)
+                        .unwrap_or(usize::MAX)
+                });
+            }
         }
 
         let initial_prompt_tokens = estimate_prompt_tokens(&body);
@@ -280,6 +376,10 @@ impl Gateway {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
         let mut attempts = 0;
         let mut blocked_retry = Duration::ZERO;
+        // (channel id, upstream model) pairs actually tried, so cooldown waits
+        // are computed for the model the key pool was keyed on, not the
+        // client-facing alias or `auto`.
+        let mut resolved_models: Vec<(i64, String)> = Vec::new();
 
         'candidates: for channel in &mut candidates {
             if attempts >= 3 {
@@ -292,7 +392,7 @@ impl Gateway {
                 claimed.ids.push(channel.id);
             }
             let upstream_model = if is_auto {
-                best_auto_model(Some(channel))
+                best_auto_model_matching(Some(channel), ctx.allowed_models.as_deref())
             } else {
                 find_channel_model_for_request(channel, &effective_model)
                     .map(|(actual, _)| actual)
@@ -302,6 +402,7 @@ impl Gateway {
             if upstream_model.is_empty() {
                 continue;
             }
+            resolved_models.push((channel.id, upstream_model.clone()));
             let mut excluded = std::collections::HashSet::new();
             for _ in 0..2 {
                 if attempts >= 3 {
@@ -314,7 +415,7 @@ impl Gateway {
                     {
                         Ok(Some(lease)) => lease,
                         Ok(None) => {
-                            let wait = self.key_pool.retry_after(channel.id);
+                            let wait = self.key_pool.retry_after_model(channel.id, &upstream_model);
                             if wait > Duration::ZERO
                                 && (blocked_retry == Duration::ZERO || wait < blocked_retry)
                             {
@@ -402,6 +503,17 @@ impl Gateway {
                                 channel.name, lease.key.name, info.status_code
                             ));
                             let _ = lease.failure(&info, &upstream_model);
+                            let _ = self.store.set_model_health(
+                                channel.id,
+                                &crate::store::ModelHealth {
+                                    model: upstream_model.clone(),
+                                    status: crate::probe::STATUS_ERROR.to_string(),
+                                    latency_ms: Some(latency),
+                                    ttft_ms: None,
+                                    error: message.clone(),
+                                    checked_at: Some(chrono::Utc::now()),
+                                },
+                            );
                             let key_fault = matches!(
                                 info.class,
                                 Some(
@@ -410,8 +522,16 @@ impl Gateway {
                                         | FailureClass::Model
                                 )
                             );
-                            if !key_fault {
+                            let channel_has_other_models = !channel.extra_models.is_empty();
+                            if !key_fault && !channel_has_other_models {
                                 self.penalize(channel, &err, &message, latency);
+                            } else if !key_fault {
+                                channel.last_error = format!("[{upstream_model}] {message}");
+                                let ch_id = channel.id;
+                                let err_msg = channel.last_error.clone();
+                                let _ = self.store.update_runtime(ch_id, move |fresh| {
+                                    fresh.last_error = err_msg;
+                                });
                             }
                             let client_fault = info.class == Some(FailureClass::Client);
                             last_error = Some(err);
@@ -429,8 +549,8 @@ impl Gateway {
         }
         if chosen.is_none() {
             // Include leases which just entered cooldown, not only channels initially exhausted.
-            for channel in &candidates {
-                let wait = self.key_pool.retry_after(channel.id);
+            for (channel_id, model) in &resolved_models {
+                let wait = self.key_pool.retry_after_model(*channel_id, model);
                 if wait > Duration::ZERO
                     && (blocked_retry == Duration::ZERO || wait < blocked_retry)
                 {
@@ -1296,7 +1416,11 @@ impl LoggingStream {
         }
         if let Some(lease) = self.key_lease.take() {
             if log.status_code == 200 {
-                let _ = lease.success(log.prompt_tokens, log.completion_tokens);
+                let _ = lease.success(
+                    log.prompt_tokens,
+                    log.completion_tokens,
+                    &log.upstream_model,
+                );
             } else if stream_error_status > 0 {
                 let _ = lease.failure(&classify_status(stream_error_status), &log.upstream_model);
             }

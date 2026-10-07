@@ -65,6 +65,31 @@ fn request() -> Vec<u8> {
     serde_json::to_vec(&json!({"model":"auto","messages":[{"role":"user","content":"remember 42"},{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"test","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call-1","content":"42"}]})).unwrap()
 }
 
+/// Models of `key_id` that are still cooling down, as
+/// `(model, unavailable_until, rate_limit_count)`.
+fn cooling_models(gateway: &Gateway, key_id: i64) -> Vec<(String, chrono::DateTime<Utc>, i64)> {
+    let conn = gateway.store.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT model,unavailable_until,rate_limit_count FROM channel_key_models \
+             WHERE key_id=? AND unavailable_until>? ORDER BY model",
+        )
+        .unwrap();
+    stmt.query_map(rusqlite::params![key_id, Utc::now().to_rfc3339()], |row| {
+        let until: String = row.get(1)?;
+        Ok((
+            row.get(0)?,
+            chrono::DateTime::parse_from_rfc3339(&until)
+                .unwrap()
+                .with_timezone(&Utc),
+            row.get(2)?,
+        ))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
 use axum::response::IntoResponse;
 
 #[tokio::test]
@@ -150,9 +175,7 @@ async fn stream_error_after_output_never_replays() {
         .unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("hello"));
     assert_eq!(calls.lock().unwrap().len(), 1);
-    assert!(gateway.store.list_keys(id).unwrap()[0]
-        .cooldown_until
-        .is_some());
+    assert!(!cooling_models(&gateway, gateway.store.list_keys(id).unwrap()[0].id).is_empty());
     assert_eq!(gateway.store.list_logs(10).unwrap()[0].status_code, 502);
 }
 
@@ -174,9 +197,7 @@ async fn global_attempt_budget_and_supplier_failover() {
         .await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 3);
-    assert!(gateway.store.list_keys(other.id).unwrap()[0]
-        .cooldown_until
-        .is_some());
+    assert!(!cooling_models(&gateway, gateway.store.list_keys(other.id).unwrap()[0].id).is_empty());
 }
 
 #[tokio::test]
@@ -216,7 +237,10 @@ async fn auto_retries_other_key_and_preserves_history() {
         .await
         .unwrap();
     let keys = gateway.store.list_keys(id).unwrap();
-    assert!(keys[0].cooldown_until.unwrap() > Utc::now() + chrono::Duration::seconds(290));
+    let cooling = cooling_models(&gateway, keys[0].id);
+    assert_eq!(cooling.len(), 1);
+    assert!(cooling[0].1 > Utc::now() + chrono::Duration::seconds(290));
+    assert!(keys[0].cooldown_until.is_none());
     assert_eq!(keys[1].successes, 1);
     assert_eq!(keys[1].prompt_tokens, 10);
     let calls = calls.lock().unwrap();
@@ -254,7 +278,9 @@ async fn all_cooling_keys_are_not_called_again() {
         );
     }
     assert_eq!(calls.lock().unwrap().len(), 2);
-    assert_eq!(gateway.store.list_keys(id).unwrap()[0].rate_limit_count, 1);
+    let cooling = cooling_models(&gateway, gateway.store.list_keys(id).unwrap()[0].id);
+    assert_eq!(cooling.len(), 1);
+    assert_eq!(cooling[0].2, 1);
 }
 
 #[tokio::test]
@@ -288,4 +314,89 @@ async fn ordinary_requests_rotate_keys() {
             "Bearer key-b"
         ]
     );
+}
+
+#[tokio::test]
+async fn model_error_does_not_affect_other_models_of_same_supplier() {
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(move |State(calls): State<Calls>, headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                let key = headers.get("authorization").unwrap().to_str().unwrap().to_string();
+                let model = body["model"].as_str().unwrap_or("").to_string();
+                calls.lock().unwrap().push((key.clone(), body));
+                if model == "broken-model" {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, "upstream model crashed");
+                }
+                Json(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+                })).into_response()
+            }),
+        )
+        .with_state(calls.clone());
+    let _server = Server(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap()
+    }));
+
+    let store = Store::open_in_memory().unwrap();
+    let mut channel = Channel {
+        name: "MultiModelSupplier".into(),
+        provider: "openai".into(),
+        api_mode: "chat_completions".into(),
+        endpoint: format!("http://{address}"),
+        api_key: "key-1".into(),
+        primary_model: "broken-model".into(),
+        extra_models: vec!["healthy-model".into()],
+        enabled: true,
+        ..Default::default()
+    };
+    store.save(&mut channel).unwrap();
+    let router = Arc::new(Router::new(store.clone()));
+    let gateway = Gateway::new(store.clone(), router);
+
+    // 1. Request broken-model: should fail
+    let req_broken = serde_json::to_vec(&json!({
+        "model": "broken-model",
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .unwrap();
+    let res_broken = gateway
+        .forward(
+            GatewayProtocol::Chat,
+            &HeaderMap::new(),
+            req_broken,
+            &RequestContext::default(),
+        )
+        .await;
+    assert!(res_broken.status().is_server_error());
+
+    // 2. Request healthy-model on the SAME supplier: MUST SUCCEED and NOT be blocked by broken-model cooldown
+    let req_healthy = serde_json::to_vec(&json!({
+        "model": "healthy-model",
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .unwrap();
+    let res_healthy = gateway
+        .forward(
+            GatewayProtocol::Chat,
+            &HeaderMap::new(),
+            req_healthy,
+            &RequestContext::default(),
+        )
+        .await;
+    assert_eq!(res_healthy.status(), StatusCode::OK);
+
+    // 3. Probing the cooling key/model is never blocked by temporary retreat
+    let runner =
+        crate::runner::ProbeRunner::with_key_pool(gateway.store.clone(), gateway.key_pool.clone());
+    let probe_results = runner
+        .probe_model_now(channel.id, "healthy-model")
+        .await
+        .unwrap();
+    assert_eq!(probe_results.len(), 1);
+    assert!(!probe_results[0].message.contains("没有可用于探活的 Key"));
 }

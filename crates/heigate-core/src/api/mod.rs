@@ -16,7 +16,8 @@ pub use forward::{
     is_hop_by_hop_header, parse_retry_after, request_model, GatewayProtocol, StreamTokenTracker,
 };
 pub use policy::{
-    adapt_unsupported_reasoning_effort, best_auto_choice, best_auto_model, channel_serving_traffic,
-    channel_supports_model, parse_upstream_error_message, truncate_echoed, upstream_error_payload,
-    upstream_stream_error, upstream_stream_has_output, AutoModelChoice, TraceStep, AUTO_MODEL_NAME,
+    adapt_unsupported_reasoning_effort, best_auto_choice, best_auto_choice_matching,
+    best_auto_model, best_auto_model_matching, channel_serving_traffic, channel_supports_model,
+    parse_upstream_error_message, truncate_echoed, upstream_error_payload, upstream_stream_error,
+    upstream_stream_has_output, AutoModelChoice, TraceStep, AUTO_MODEL_NAME,
 };

@@ -208,7 +208,7 @@ impl Store {
         let new_id = insert_channel(&tx, &config)?;
         for key in keys {
             tx.execute("UPDATE channel_keys SET auth_invalid=?,cooldown_until=?,rate_limit_count=?,last_error=?,generation=? WHERE channel_id=? AND secret=?",params![key.auth_invalid,key.cooldown_until.map(|t|t.to_rfc3339()),key.rate_limit_count,key.last_error,key.generation,new_id,key.secret])?;
-            tx.execute("INSERT INTO channel_key_models(key_id,model,unavailable_until) SELECT target.id,m.model,m.unavailable_until FROM channel_key_models m JOIN channel_keys target ON target.channel_id=? AND target.secret=? WHERE m.key_id=?", params![new_id,key.secret,key.id])?;
+            tx.execute("INSERT INTO channel_key_models(key_id,model,unavailable_until,rate_limit_count) SELECT target.id,m.model,m.unavailable_until,m.rate_limit_count FROM channel_key_models m JOIN channel_keys target ON target.channel_id=? AND target.secret=? WHERE m.key_id=?", params![new_id,key.secret,key.id])?;
         }
         tx.commit()?;
         Ok(new_id)

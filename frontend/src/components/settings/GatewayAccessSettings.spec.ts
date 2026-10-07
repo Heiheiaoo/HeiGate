@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 import GatewayAccessSettings from './GatewayAccessSettings.vue'
 
 const props = {
-  gatewayBaseUrl: 'http://127.0.0.1:18080',
+  gatewayBaseUrl: 'http://127.0.0.1:28888',
   gatewayApiKey: 'test-only-gateway-secret',
   maskedOverviewApiKey: 'test-onl••••••••secret',
   showApiKey: false,

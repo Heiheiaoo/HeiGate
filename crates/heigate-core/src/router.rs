@@ -20,6 +20,7 @@ use crate::store::{Channel, Store};
 pub const ROUTE_SMART_QUALITY: &str = "smart_quality";
 pub const ROUTE_LATENCY: &str = "latency";
 pub const ROUTE_ROUND_ROBIN: &str = "round_robin";
+pub const ROUTE_MANUAL_PRIORITY: &str = "manual_priority";
 
 #[derive(Default)]
 struct RouterState {
@@ -310,6 +311,19 @@ impl Router {
                     std::cmp::Ordering::Greater
                 };
             }
+
+            // Quality safeguard: Channels with detected prompt injection or degraded
+            // reasoning are penalized behind safe channels across all strategies.
+            let a_detected = a.injection_state == "detected";
+            let b_detected = b.injection_state == "detected";
+            if a_detected != b_detected {
+                return if a_detected {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                };
+            }
+
             match strategy {
                 ROUTE_LATENCY | ROUTE_ROUND_ROBIN => {
                     responsiveness_of(a).cmp(&responsiveness_of(b))
@@ -347,6 +361,14 @@ fn quality_score(channel: &Channel) -> i64 {
 
     if channel.last_error.contains("429") || channel.last_error.contains("Too Many") {
         score -= 3000;
+    }
+
+    // Integrity & anti-degradation benchmark score modifier
+    match channel.injection_state.as_str() {
+        "clean" => score += 3000,
+        "suspected" => score -= 3000,
+        "detected" => score -= 20000,
+        _ => {}
     }
 
     let lat = responsiveness_of(channel);
@@ -515,6 +537,26 @@ mod tests {
         let candidates = router.candidates("gpt-4o", ROUTE_SMART_QUALITY).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].circuit_state, CIRCUIT_HALF_OPEN);
+    }
+
+    #[test]
+    fn detected_injection_channels_are_deprioritized() {
+        let store = Store::open_in_memory().unwrap();
+        let mut degraded = seed(&store, "degraded_injected", "gpt-4o", STATUS_OPERATIONAL);
+        degraded.injection_state = "detected".to_string();
+        degraded.last_latency_ms = Some(100); // Very fast, but fake/injected!
+        store.save(&mut degraded).unwrap();
+
+        let mut clean = seed(&store, "clean_model", "gpt-4o", STATUS_OPERATIONAL);
+        clean.injection_state = "clean".to_string();
+        clean.last_latency_ms = Some(500); // Slower, but clean full-blood
+        store.save(&mut clean).unwrap();
+
+        let router = Router::new(store);
+        let candidates = router.candidates("gpt-4o", ROUTE_SMART_QUALITY).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "clean_model");
+        assert_eq!(candidates[1].name, "degraded_injected");
     }
 
     /// A minimal forward error mirroring the gateway's failure classification.

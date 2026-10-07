@@ -21,6 +21,22 @@ const emit = defineEmits<{
 
 const c = computed(() => props.channel)
 
+const cardTooltip = computed(() => {
+  const parts = [c.value.name]
+  const supported: string[] = []
+  if (c.value.supportsOpenai === true) supported.push('OpenAI 兼容')
+  if (c.value.supportsAnthropic === true) supported.push('Anthropic 原生')
+  if (c.value.supportsResponses === true) supported.push('Responses 规范')
+
+  if (supported.length > 0) {
+    parts.push(`支持协议: ${supported.join('、')} (当前生效: ${c.value.protocol})`)
+  } else {
+    parts.push(`协议: ${c.value.protocol}`)
+  }
+  if (c.value.url) parts.push(c.value.url)
+  return parts.join('\n')
+})
+
 function formatLatencySec(ms: number | null | undefined): string {
   if (ms == null) return '超时'
   if (ms < 1000) return `${ms}ms`
@@ -99,8 +115,14 @@ function onModelHighlightClick() {
     <!-- Top Row: Name, Status Pill, and Toggle Switch -->
     <div class="m26-card-header">
       <div class="m26-card-title-box">
-        <h4 class="m26-card-title" :title="`${c.name}\n协议: ${c.protocol}\n${c.url}`">{{ c.name }}</h4>
-        <span v-if="c.keyCount" class="text-xs text-muted">{{ c.keyCount }} Key · {{ c.keyAvailableCount }} 可用<span v-if="c.keyCoolingCount"> · {{ c.keyCoolingCount }} 冷却</span></span>
+        <h4 class="m26-card-title" :title="cardTooltip">{{ c.name }}</h4>
+        <span
+          v-if="c.keyCount"
+          class="m26-card-key-pill"
+          :title="c.keyCoolingCount ? `已配置 ${c.keyCount} 把 Key（${c.keyCoolingCount} 把冷却中）` : `已配置 ${c.keyCount} 把 Key`"
+        >
+          {{ c.keyCount }} Key
+        </span>
       </div>
 
       <div class="m26-card-ctrl-box" @click.stop>
@@ -318,9 +340,27 @@ function onModelHighlightClick() {
   min-width: 0;
 }
 
-.m26-card-title-box .text-muted {
+.m26-card-key-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #64748b;
+  background: #f1f5f9;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  padding: 1px 6px;
+  border-radius: 4px;
+  line-height: 1.35;
   white-space: nowrap;
   flex-shrink: 0;
+  letter-spacing: -0.1px;
+  transition: all 0.12s ease;
+}
+
+.m26-channel-card:hover .m26-card-key-pill {
+  background: #e2e8f0;
+  color: #334155;
+  border-color: rgba(15, 23, 42, 0.12);
 }
 
 .m26-card-ctrl-box {

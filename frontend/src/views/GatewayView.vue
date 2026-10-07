@@ -8,6 +8,7 @@ import {
   deleteChannel,
   duplicateChannel as apiDuplicateChannel,
   fetchUpstreamModels as apiFetchUpstreamModels,
+  detectChannelProtocol,
   getGatewayKey,
   injectionCheck,
   type ModelInjectionResult,
@@ -23,6 +24,7 @@ import {
   getCustomModelMappings,
   setCustomModelMapping,
   deleteCustomModelMapping,
+  updateClientConfig,
   type ApiChannel,
   type RequestLog,
   type SystemInfo,
@@ -37,6 +39,11 @@ import { vFocusTrap, openModalCount } from '@/directives/focusTrap'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelKeyManager from '@/components/channels/ChannelKeyManager.vue'
 import ChannelKeyInputs, { type ChannelKeyDraft } from '@/components/channels/ChannelKeyInputs.vue'
+import {
+  getChannelDetectedProtocols,
+  saveChannelDetectedProtocols,
+  linkChannelIdProtocols,
+} from '@/services/channelProtocols'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticContent.vue'
@@ -51,11 +58,11 @@ import AnalyticsChannelPerformance from '@/components/analytics/AnalyticsChannel
 import AnalyticsTrendCharts from '@/components/analytics/AnalyticsTrendCharts.vue'
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import LogsView from '@/components/logs/LogsView.vue'
-import RoutingSettings from '@/components/settings/RoutingSettings.vue'
-import GatewayAccessSettings from '@/components/settings/GatewayAccessSettings.vue'
 import StorageSettings from '@/components/settings/StorageSettings.vue'
 import ModelRulesSettings from '@/components/settings/ModelRulesSettings.vue'
 import DesktopGeneralSettings from '@/components/settings/DesktopGeneralSettings.vue'
+import ClientsView from '@/components/clients/ClientsView.vue'
+import type { PlatformSaveEvent } from '@/components/clients/types'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
 // canonical definition lives in components/channels/types.ts.
@@ -66,8 +73,8 @@ export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
 // (the Vite dev server) it is absent and the UI draws its own window chrome.
 const isDesktop = ref(typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__))
 const savedSection = typeof localStorage !== 'undefined' ? (localStorage.getItem('heigate_active_section') as any) : null
-const activeSection = ref<'analytics' | 'channels' | 'models' | 'logs' | 'settings'>(
-  savedSection && ['analytics', 'channels', 'models', 'logs', 'settings'].includes(savedSection) ? savedSection : 'analytics'
+const activeSection = ref<'clients' | 'analytics' | 'channels' | 'models' | 'logs' | 'settings'>(
+  savedSection && ['clients', 'analytics', 'channels', 'models', 'logs', 'settings'].includes(savedSection) ? savedSection : 'clients'
 )
 watch(activeSection, async (val) => {
   if (typeof localStorage !== 'undefined') {
@@ -78,6 +85,8 @@ watch(activeSection, async (val) => {
   if (val === 'analytics') {
     void loadAnalytics()
     void refreshGatewayHealth()
+  } else if (val === 'clients') {
+    void refreshChannels()
   } else if (val === 'logs') {
     void refreshLogs()
   } else if (val === 'settings') {
@@ -99,7 +108,6 @@ function checkTabsFit() {
 const showAddChannel = ref(false)
 const showEditChannel = ref(false)
 const editingChannel = ref<Channel | null>(null)
-const showApiKey = ref(false)
 const channelSearch = ref('')
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const protocolFilter = ref<'all' | 'anthropic' | 'openai-compatible' | 'openai-responses'>('all')
@@ -214,6 +222,13 @@ const newChannelEnabled = ref(true)
 const newChannelPrimaryModel = ref('')
 const newChannelModelNames = ref<string[]>([])
 const isFetchingNewModels = ref(false)
+const isDetectingNewProtocol = ref(false)
+const newProtocolDetectMessage = ref<{ type: 'success' | 'warn' | 'error'; text: string } | null>(null)
+const newProtoSupportsOpenai = ref<boolean | null>(null)
+const newProtoSupportsAnthropic = ref<boolean | null>(null)
+const newProtoSupportsResponses = ref<boolean | null>(null)
+const hasManuallyChangedNewProtocol = ref(false)
+const showManualNewProto = ref(false)
 
 // Edit Channel Form State
 const editChannelName = ref('')
@@ -223,6 +238,19 @@ const editChannelEnabled = ref(true)
 const editChannelPrimaryModel = ref('')
 const editChannelModelNames = ref<string[]>([])
 const isFetchingEditModels = ref(false)
+const isDetectingEditProtocol = ref(false)
+const editProtocolDetectMessage = ref<{ type: 'success' | 'warn' | 'error'; text: string } | null>(null)
+const editProtoSupportsOpenai = ref<boolean | null>(null)
+const editProtoSupportsAnthropic = ref<boolean | null>(null)
+const editProtoSupportsResponses = ref<boolean | null>(null)
+const hasManuallyChangedEditProtocol = ref(false)
+const showManualEditProto = ref(false)
+
+function formatProtocolName(protocol: Channel['protocol'] | string): string {
+  if (protocol === 'anthropic') return 'Anthropic 原生协议'
+  if (protocol === 'openai-responses') return 'OpenAI Responses 规范'
+  return 'OpenAI 兼容协议'
+}
 
 const configInput = ref<HTMLInputElement | null>(null)
 const gatewayApiActive = ref(false)
@@ -231,12 +259,6 @@ const gatewayLatency = ref<number | null>(null)
 const appVersion = ref<string>(__HEIGATE_APP_VERSION__)
 const gatewayLastChecked = ref('尚未检测')
 const gatewayApiKey = ref('')
-const maskedOverviewApiKey = computed(() => {
-  const k = gatewayApiKey.value
-  if (!k) return '••••••••'
-  if (k.length <= 16) return '••••••••'
-  return `${k.slice(0, 8)}••••••••${k.slice(-6)}`
-})
 
 // System Info & Storage & Logs
 const systemInfo = ref<SystemInfo | null>(null)
@@ -254,17 +276,6 @@ const logsTableWrapRef = ref<HTMLDivElement | null>(null)
 const logsViewRef = ref<InstanceType<typeof LogsView> | null>(null)
 const copiedModelId = ref('')
 
-const copiedTarget = ref<'url' | 'key' | ''>('')
-let copiedTimer: number | undefined
-
-function markCopied(target: 'url' | 'key') {
-  copiedTarget.value = target
-  if (copiedTimer) window.clearTimeout(copiedTimer)
-  copiedTimer = window.setTimeout(() => {
-    copiedTarget.value = ''
-  }, 2000)
-}
-
 const toastMessage = ref('')
 let toastTimer: number | undefined
 function showToast(msg: string) {
@@ -275,9 +286,35 @@ function showToast(msg: string) {
   }, 2400)
 }
 
+function onClientPlatformSave(event: PlatformSaveEvent) {
+  const isHermes = event.platformId === 'hermes'
+  const applyLocal = event.applyLocal ?? isHermes
+  const restart = event.restart ?? (isHermes && !event.launchAfterSave)
+  const launchTerminal = event.launchTerminal ?? (isHermes && Boolean(event.launchAfterSave))
+
+  void updateClientConfig(event.platformId, {
+    strategy: event.gateway.strategy,
+    allowed_channels: event.gateway.allowedChannels,
+    model: event.gateway.model,
+    small_model: event.direct.smallModel,
+    allowed_models: event.gateway.allowedModels,
+    apply_local: applyLocal,
+    restart: restart,
+    launch_terminal: launchTerminal,
+  }).then((res) => {
+    if (res?.message) {
+      showToast(res.message)
+    } else if (event.launchAfterSave) {
+      showToast(`配置已保存，正在启动 ${event.platformId}...`)
+    } else {
+      showToast(`${event.platformId} 配置已成功保存到网关与本地`)
+    }
+  })
+}
+
 const gatewayBaseUrl = computed(() => {
   if (import.meta.env.DEV) return __HEIGATE_DEV_GATEWAY_URL__
-  if (typeof window === 'undefined') return 'http://127.0.0.1:18080/v1'
+  if (typeof window === 'undefined') return 'http://127.0.0.1:28888/v1'
   return `${window.location.origin}/v1`
 })
 
@@ -469,40 +506,7 @@ const models = computed(() => {
     })
   })
 
-  const autoChannels = enabledChannels.value
-  if (autoChannels.length > 0) {
-    const details = autoChannels.map((channel) => ({
-      name: channel.name,
-      status: channel.status,
-      latency: channel.ttft ?? channel.latency,
-      protocol: channel.protocol,
-      upstreamModel: channel.primaryModel || channel.modelNames?.[0] || '',
-    }))
-    const latencies = details.map((item) => item.latency).filter((value): value is number => value != null && value > 0)
-    const status = details.some((item) => item.status === 'healthy')
-      ? 'healthy'
-      : details.some((item) => item.status === 'degraded') ? 'degraded'
-        : details.some((item) => item.status === 'unknown') ? 'unknown' : 'offline'
-    const avgLatency = latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : null
-    list.unshift({
-      name: 'Auto',
-      canonicalKey: 'auto',
-      rawNames: ['Auto'],
-      aliases: [],
-      providerCount: details.length,
-      status,
-      latencies,
-      providers: details.map((item) => item.name),
-      channelDetails: details,
-      avgLatency,
-      latency: formatLatencySec(avgLatency),
-    })
-  }
-
   return list.sort((a, b) => {
-    if (a.name.toLowerCase() === 'auto' || a.canonicalKey === 'auto') return -1
-    if (b.name.toLowerCase() === 'auto' || b.canonicalKey === 'auto') return 1
-
     const statusWeight = (s: AggregateModelCard['status']) => (s === 'healthy' ? 0 : s === 'degraded' ? 1 : s === 'unknown' ? 2 : 3)
     const swA = statusWeight(a.status)
     const swB = statusWeight(b.status)
@@ -819,6 +823,7 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     .filter((s) => s && s !== primary)
   const uniqueExtras = Array.from(new Set(extras))
   const modelNames = primary ? [primary, ...uniqueExtras] : uniqueExtras
+  const protoInfo = getChannelDetectedProtocols(item.id, item.url)
   return {
     name: item.name,
     url: item.url,
@@ -847,6 +852,9 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     keyCount: item.keyCount,
     keyAvailableCount: item.keyAvailableCount,
     keyCoolingCount: item.keyCoolingCount,
+    supportsOpenai: protoInfo?.supportsOpenai ?? (item.provider === 'openai-compatible' ? true : null),
+    supportsAnthropic: protoInfo?.supportsAnthropic ?? (item.provider === 'anthropic' ? true : null),
+    supportsResponses: protoInfo?.supportsResponses ?? (item.provider === 'openai-responses' ? true : null),
   }
 }
 
@@ -890,6 +898,9 @@ async function refreshChannels() {
   gatewayApiActive.value = true
   channels.value = remote.map(fromDesktopChannel)
   for (const channel of channels.value) {
+    if (channel.gatewayId && channel.url) {
+      linkChannelIdProtocols(channel.gatewayId, channel.url)
+    }
     for (const health of channel.modelHealth ?? []) {
       const key = getModelKey(channel, health.model)
       if (!modelLatencies.value[key]?.probing) {
@@ -1305,6 +1316,10 @@ async function runInjectionCheck(all: boolean) {
 }
 
 async function openEditChannel(channel: Channel) {
+  isDetectingEditProtocol.value = false
+  editProtocolDetectMessage.value = null
+  hasManuallyChangedEditProtocol.value = false
+  showManualEditProto.value = false
   editingChannel.value = channel
   editChannelName.value = channel.name
   editChannelUrl.value = channel.url
@@ -1314,6 +1329,31 @@ async function openEditChannel(channel: Channel) {
   const primary = channel.primaryModel || channel.modelNames?.[0] || 'gpt-4o-mini'
   editChannelPrimaryModel.value = primary
   editChannelModelNames.value = channel.modelNames?.length ? [...channel.modelNames] : [primary]
+  const cached = getChannelDetectedProtocols(channel.gatewayId, channel.url)
+  if (cached) {
+    editProtoSupportsOpenai.value = cached.supportsOpenai
+    editProtoSupportsAnthropic.value = cached.supportsAnthropic
+    editProtoSupportsResponses.value = cached.supportsResponses
+    const supportedList: string[] = []
+    if (cached.supportsOpenai === true) supportedList.push('OpenAI 兼容')
+    if (cached.supportsAnthropic === true) supportedList.push('Anthropic 原生')
+    if (cached.supportsResponses === true) supportedList.push('Responses 规范')
+    if (supportedList.length >= 2) {
+      editProtocolDetectMessage.value = {
+        type: 'success',
+        text: `已保存探测记录：端点同时支持 ${supportedList.join('、')} 协议（双向免转换直通）`,
+      }
+    } else if (supportedList.length === 1) {
+      editProtocolDetectMessage.value = {
+        type: 'success',
+        text: `已保存探测记录：端点支持 ${supportedList[0]} 协议`,
+      }
+    }
+  } else {
+    editProtoSupportsOpenai.value = channel.protocol === 'openai-compatible' ? true : null
+    editProtoSupportsAnthropic.value = channel.protocol === 'anthropic' ? true : null
+    editProtoSupportsResponses.value = channel.protocol === 'openai-responses' ? true : null
+  }
   showEditChannel.value = true
 }
 
@@ -1370,6 +1410,14 @@ async function saveEditChannel() {
       showToast('保存失败，表单已保留，请重试')
       return
     }
+    saveChannelDetectedProtocols({
+      channelId: target.gatewayId,
+      url: target.url,
+      supportsOpenai: editProtoSupportsOpenai.value,
+      supportsAnthropic: editProtoSupportsAnthropic.value,
+      supportsResponses: editProtoSupportsResponses.value,
+      detectedProtocol: editChannelProtocol.value,
+    })
     await refreshChannels()
     showEditChannel.value = false
     editingChannel.value = null
@@ -2434,6 +2482,153 @@ function modelsFromText(value: string): string[] {
   return [...new Set(value.split(/[\s,;，；]+/).map((item) => item.trim()).filter(Boolean))]
 }
 
+function inferProtocolFromUrl(url: string): Channel['protocol'] | null {
+  if (!url) return null
+  const lower = url.toLowerCase().trim()
+  if (lower.includes('anthropic.com') || lower.includes('claude.ai') || lower.includes('/anthropic')) {
+    return 'anthropic'
+  }
+  return null
+}
+
+watch(newChannelUrl, (url) => {
+  if (hasManuallyChangedNewProtocol.value) return
+  const inferred = inferProtocolFromUrl(url)
+  if (inferred) {
+    newChannelProtocol.value = inferred
+  }
+})
+
+watch(editChannelUrl, (url) => {
+  if (hasManuallyChangedEditProtocol.value) return
+  const inferred = inferProtocolFromUrl(url)
+  if (inferred) {
+    editChannelProtocol.value = inferred
+  }
+})
+
+async function runDetectProtocol(mode: 'new' | 'edit') {
+  const url = mode === 'new' ? newChannelUrl.value.trim() : editChannelUrl.value.trim()
+  const apiKey = mode === 'new' ? newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '' : ''
+  const channelId = mode === 'edit' ? editingChannel.value?.gatewayId : undefined
+
+  if (!url) {
+    showToast('请先填写 Base URL，再进行协议识别')
+    return
+  }
+
+  if (mode === 'new') {
+    isDetectingNewProtocol.value = true
+    newProtocolDetectMessage.value = null
+  } else {
+    isDetectingEditProtocol.value = true
+    editProtocolDetectMessage.value = null
+  }
+
+  try {
+    const res = await detectChannelProtocol(url, apiKey, channelId)
+    if (!res.ok) {
+      const msg = res.error || '识别失败，请检查网络或 URL'
+      showToast(msg)
+      if (mode === 'new') {
+        newProtocolDetectMessage.value = { type: 'error', text: `识别失败: ${msg}` }
+      } else {
+        editProtocolDetectMessage.value = { type: 'error', text: `识别失败: ${msg}` }
+      }
+      return
+    }
+
+    const supportsOpenai = res.supportsOpenai ?? false
+    const supportsAnthropic = res.supportsAnthropic ?? false
+    const supportsResponses = res.supportsResponses ?? false
+
+    if (mode === 'new') {
+      newProtoSupportsOpenai.value = supportsOpenai
+      newProtoSupportsAnthropic.value = supportsAnthropic
+      newProtoSupportsResponses.value = supportsResponses
+    } else {
+      editProtoSupportsOpenai.value = supportsOpenai
+      editProtoSupportsAnthropic.value = supportsAnthropic
+      editProtoSupportsResponses.value = supportsResponses
+    }
+
+    saveChannelDetectedProtocols({
+      channelId: mode === 'edit' ? channelId : undefined,
+      url,
+      supportsOpenai,
+      supportsAnthropic,
+      supportsResponses,
+      detectedProtocol: res.detectedProtocol,
+      models: res.models,
+    })
+
+    if (res.detectedProtocol) {
+      if (mode === 'new') {
+        newChannelProtocol.value = res.detectedProtocol
+        hasManuallyChangedNewProtocol.value = false
+      } else {
+        editChannelProtocol.value = res.detectedProtocol
+        hasManuallyChangedEditProtocol.value = false
+      }
+    }
+
+    // If models were discovered, auto-populate when model list is empty
+    if (res.models && res.models.length > 0) {
+      if (mode === 'new' && newChannelModelNames.value.length === 0) {
+        newChannelModelNames.value = res.models
+        if (!newChannelPrimaryModel.value) {
+          newChannelPrimaryModel.value = res.models[0]
+        }
+      } else if (mode === 'edit' && editChannelModelNames.value.length === 0) {
+        editChannelModelNames.value = res.models
+        if (!editChannelPrimaryModel.value) {
+          editChannelPrimaryModel.value = res.models[0]
+        }
+      }
+    }
+
+    const protoName = formatProtocolName(res.detectedProtocol || 'openai-compatible')
+
+    const supportedList: string[] = []
+    if (supportsOpenai) supportedList.push('OpenAI 兼容')
+    if (supportsAnthropic) supportedList.push('Anthropic 原生')
+    if (supportsResponses) supportedList.push('OpenAI Responses')
+
+    let summary = ''
+    if (supportedList.length >= 2) {
+      summary = `端点同时支持 ${supportedList.join('、')} 协议（双向免转换直通）`
+    } else if (supportedList.length === 1) {
+      summary = `端点支持 ${supportedList[0]} 协议`
+    } else {
+      summary = `已识别为 ${protoName}`
+    }
+
+    const countInfo = res.models?.length ? ` · 发现 ${res.models.length} 个模型` : ''
+    const successText = `${summary}${countInfo}`
+    showToast(`✓ ${successText}`)
+
+    if (mode === 'new') {
+      newProtocolDetectMessage.value = { type: 'success', text: successText }
+    } else {
+      editProtocolDetectMessage.value = { type: 'success', text: successText }
+    }
+  } catch (err: unknown) {
+    const errText = err instanceof Error ? err.message : '自动识别请求异常'
+    showToast(errText)
+    if (mode === 'new') {
+      newProtocolDetectMessage.value = { type: 'error', text: errText }
+    } else {
+      editProtocolDetectMessage.value = { type: 'error', text: errText }
+    }
+  } finally {
+    if (mode === 'new') {
+      isDetectingNewProtocol.value = false
+    } else {
+      isDetectingEditProtocol.value = false
+    }
+  }
+}
+
 type UpstreamModelsPayload = {
   data?: Array<{ id?: string; name?: string } | string>
   models?: Array<{ id?: string; name?: string } | string>
@@ -2579,6 +2774,14 @@ async function addChannel() {
         keys: keyDrafts.map(({ name: keyName, secret }, position) => ({ name: keyName, secret, enabled: true, position })),
       }],
     })
+    saveChannelDetectedProtocols({
+      url: normalizeEndpointUrl(rawUrl),
+      supportsOpenai: newProtoSupportsOpenai.value,
+      supportsAnthropic: newProtoSupportsAnthropic.value,
+      supportsResponses: newProtoSupportsResponses.value,
+      detectedProtocol: newChannelProtocol.value,
+      models: newChannelModelNames.value,
+    })
     await refreshChannels()
     showToast(`渠道“${name}”创建成功，共 ${keyDrafts.length} 把 Key`)
   } catch (error) {
@@ -2591,12 +2794,25 @@ async function addChannel() {
   newChannelPrimaryModel.value = ''
   newChannelModelNames.value = []
   newChannelProtocol.value = 'openai-compatible'
+  newProtocolDetectMessage.value = null
+  newProtoSupportsOpenai.value = null
+  newProtoSupportsAnthropic.value = null
+  newProtoSupportsResponses.value = null
+  hasManuallyChangedNewProtocol.value = false
+  showManualNewProto.value = false
   showAddChannel.value = false
   newChannelEnabled.value = true
   activeSection.value = 'channels'
 }
 
 function openAddChannel() {
+  isDetectingNewProtocol.value = false
+  newProtocolDetectMessage.value = null
+  newProtoSupportsOpenai.value = null
+  newProtoSupportsAnthropic.value = null
+  newProtoSupportsResponses.value = null
+  hasManuallyChangedNewProtocol.value = false
+  showManualNewProto.value = false
   showAddChannel.value = true
 }
 
@@ -2792,31 +3008,6 @@ function getCompactFailoverNodes(str?: string): string[] {
   })
 }
 
-async function copyGatewayUrl() {
-  try {
-    await navigator.clipboard.writeText(gatewayBaseUrl.value)
-    markCopied('url')
-    showToast('已复制本地网关 Base URL！')
-  } catch {
-    showToast('复制失败，请手动复制')
-  }
-}
-
-async function copyApiKey() {
-  try {
-    const key = gatewayApiKey.value || await getGatewayKey()
-    if (!key) {
-      showToast('本地网关尚未生成有效密钥')
-      return
-    }
-    await navigator.clipboard.writeText(key)
-    markCopied('key')
-    showToast('已复制本地 API Key！')
-  } catch {
-    showToast('复制失败')
-  }
-}
-
 let backdropMouseDownPos = { x: 0, y: 0 }
 
 // A modal backdrop (z-index ≥ 999) covers the top navigation bar, which is the
@@ -2889,7 +3080,24 @@ function handleContextMenu(event: MouseEvent) {
       <!-- Center: FLOATING PILL CAPSULE NAV (Flex centered & Auto collapse text when constrained) -->
       <div class="m26-nav-center" ref="navCenterRef">
         <nav class="m26-floating-nav" :class="{ 'compact-tabs': isCompactTabs }">
-          <!-- 1. 看板 -->
+          <!-- 1. 客户端 -->
+          <button
+            class="m26-pill-item"
+            :class="{ active: activeSection === 'clients' }"
+            @click="activeSection = 'clients'"
+            title="客户端"
+          >
+            <svg class="m26-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="2" y="4" width="20" height="16" rx="2" />
+              <path d="M10 4v4" />
+              <path d="M2 8h20" />
+              <path d="m6 14 2 2-2 2" />
+              <line x1="12" y1="18" x2="16" y2="18" />
+            </svg>
+            <span class="m26-pill-text">客户端</span>
+          </button>
+
+          <!-- 2. 看板 -->
           <button
             class="m26-pill-item"
             :class="{ active: activeSection === 'analytics' }"
@@ -2904,7 +3112,7 @@ function handleContextMenu(event: MouseEvent) {
             <span class="m26-pill-text">看板</span>
           </button>
 
-          <!-- 2. 供应商 -->
+          <!-- 3. 供应商 -->
           <button
             class="m26-pill-item"
             :class="{ active: activeSection === 'channels' }"
@@ -2921,7 +3129,7 @@ function handleContextMenu(event: MouseEvent) {
             <span v-if="channels.length" class="m26-pill-badge">{{ channels.length }}</span>
           </button>
 
-          <!-- 3. 模型 -->
+          <!-- 4. 模型 -->
           <button
             class="m26-pill-item"
             :class="{ active: activeSection === 'models' }"
@@ -2937,7 +3145,7 @@ function handleContextMenu(event: MouseEvent) {
             <span v-if="models.length" class="m26-pill-badge">{{ models.length }}</span>
           </button>
 
-          <!-- 4. 日志 -->
+          <!-- 5. 日志 -->
           <button
             class="m26-pill-item"
             :class="{ active: activeSection === 'logs' }"
@@ -2981,7 +3189,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- Main Content Workspace (Full Width, No Left Sidebar) -->
     <main class="m26-workspace">
       <!-- Scrollable Main Viewport -->
-      <div class="m26-viewport" :class="{ 'is-fixed-header-view': activeSection === 'models' || activeSection === 'channels' || activeSection === 'logs' }">
+      <div class="m26-viewport" :class="{ 'is-fixed-header-view': activeSection === 'models' || activeSection === 'channels' || activeSection === 'logs' || activeSection === 'clients' }">
         <!-- SECTION: DATA DASHBOARD (KANBAN) -->
         <section v-if="activeSection === 'analytics'" class="m26-section-view">
           <AnalyticsOverviewMetrics
@@ -3334,6 +3542,19 @@ function handleContextMenu(event: MouseEvent) {
         </div>
       </section>
 
+        <!-- SECTION: CLIENTS -->
+        <section v-if="activeSection === 'clients'" class="m26-section-view m26-clients-section">
+          <ClientsView
+            :channels="channels"
+            :gateway-base-url="gatewayBaseUrl"
+            :gateway-key="gatewayApiKey"
+            :routing-strategy="routingStrategy"
+            :custom-model-mappings="customModelMappings"
+            @save="onClientPlatformSave"
+            @update-routing-strategy="setRoutingStrategy"
+          />
+        </section>
+
         <!-- SECTION 4: LOGS -->
         <LogsView
           v-if="activeSection === 'logs'"
@@ -3492,17 +3713,6 @@ function handleContextMenu(event: MouseEvent) {
               @update:hide-dock-icon="handleSetHideDockIcon"
             />
 
-            <RoutingSettings :routing-strategy="routingStrategy" @select="setRoutingStrategy" />
-
-            <GatewayAccessSettings
-              :gateway-base-url="gatewayBaseUrl"
-              :gateway-api-key="gatewayApiKey"
-              :masked-overview-api-key="maskedOverviewApiKey"
-              v-model:show-api-key="showApiKey"
-              @copy-url="copyGatewayUrl"
-              @copy-key="copyApiKey"
-            />
-
             <StorageSettings
               :system-info="systemInfo"
               :fallback-logs-count="desktopLogs.length"
@@ -3564,8 +3774,8 @@ function handleContextMenu(event: MouseEvent) {
         </div>
 
         <div class="m26-modal-body supplier-modal-body">
-          <!-- 供应商名称与接口协议 -->
-          <div class="supplier-form-row-2col">
+          <!-- 1. 基本信息: 供应商名称 与 Base URL (按自然填写顺序第一行) -->
+          <div class="supplier-basic-row-2col">
             <div class="m26-form-group">
               <label class="m26-label">供应商名称</label>
               <input
@@ -3577,37 +3787,103 @@ function handleContextMenu(event: MouseEvent) {
             </div>
 
             <div class="m26-form-group">
-              <label class="m26-label">接口协议</label>
-              <select v-model="newChannelProtocol" class="m26-select supplier-select">
-                <option value="openai-compatible">OpenAI Compatible</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="openai-responses">OpenAI Responses</option>
-              </select>
+              <div class="supplier-label-row">
+                <label class="m26-label">Base URL (API 端点)</label>
+                <span class="supplier-field-hint">无需填写 /v1，网关自动拼装</span>
+              </div>
+              <input
+                v-model="newChannelUrl"
+                type="text"
+                class="m26-input supplier-input font-mono text-xs"
+                placeholder="https://api.openai.com"
+                @blur="newChannelUrl.trim() && !hasManuallyChangedNewProtocol && runDetectProtocol('new')"
+              />
             </div>
           </div>
 
-          <!-- Base URL -->
-          <div class="m26-form-group">
-            <div class="supplier-label-row">
-              <label class="m26-label">Base URL (API 端点)</label>
-              <span class="supplier-field-hint">无需填写 /v1 或 /chat/completions，网关会自动拼装</span>
-            </div>
-            <input
-              v-model="newChannelUrl"
-              type="text"
-              class="m26-input supplier-input font-mono text-xs"
-              placeholder="https://api.openai.com"
-            />
-          </div>
-
-          <!-- API 密钥 -->
-          <div class="supplier-form-divider"></div>
+          <!-- 2. API 密钥 (按自然填写顺序第二行) -->
           <div class="supplier-keys-wrap">
             <ChannelKeyInputs v-model="newChannelKeys" />
           </div>
 
-          <!-- 模型管理 -->
-          <div class="supplier-form-divider"></div>
+          <!-- 3. 接口协议 (按自然填写顺序第三行：有了 Base URL & 密钥后自动识别全部支持) -->
+          <div class="supplier-proto-section">
+            <div class="supplier-proto-label-row">
+              <label class="m26-label">接口协议</label>
+              <button
+                type="button"
+                class="supplier-detect-btn"
+                :disabled="isDetectingNewProtocol"
+                title="向 Base URL 发送探测，自动识别端点支持的全部协议与模型"
+                @click="runDetectProtocol('new')"
+              >
+                <span v-if="isDetectingNewProtocol" class="m26-spin-dot mini"></span>
+                <span v-else>⚡️ 重新探测</span>
+              </button>
+            </div>
+
+            <!-- 全部协议支持状态卡片列表 (整行全宽展开) -->
+            <div class="supplier-proto-cards-row">
+              <!-- OpenAI 兼容协议 -->
+              <div
+                class="supplier-proto-card"
+                :class="{
+                  'supported': newProtoSupportsOpenai === true,
+                  'unsupported': newProtoSupportsOpenai === false,
+                  'active': newChannelProtocol === 'openai-compatible',
+                }"
+                @click="newChannelProtocol = 'openai-compatible'; hasManuallyChangedNewProtocol = true"
+              >
+                <div class="supplier-proto-card-top">
+                  <span class="supplier-proto-card-name">OpenAI 兼容</span>
+                  <span v-if="newProtoSupportsOpenai === true" class="supplier-card-badge ok">✓ 支持</span>
+                  <span v-else-if="newProtoSupportsOpenai === false" class="supplier-card-badge no">✕ 不支持</span>
+                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                </div>
+                <span class="supplier-proto-card-sub">/v1/chat/completions</span>
+              </div>
+
+              <!-- Anthropic 原生协议 -->
+              <div
+                class="supplier-proto-card"
+                :class="{
+                  'supported': newProtoSupportsAnthropic === true,
+                  'unsupported': newProtoSupportsAnthropic === false,
+                  'active': newChannelProtocol === 'anthropic',
+                }"
+                @click="newChannelProtocol = 'anthropic'; hasManuallyChangedNewProtocol = true"
+              >
+                <div class="supplier-proto-card-top">
+                  <span class="supplier-proto-card-name">Anthropic 原生</span>
+                  <span v-if="newProtoSupportsAnthropic === true" class="supplier-card-badge ok">✓ 支持</span>
+                  <span v-else-if="newProtoSupportsAnthropic === false" class="supplier-card-badge no">✕ 不支持</span>
+                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                </div>
+                <span class="supplier-proto-card-sub">/v1/messages (Claude)</span>
+              </div>
+
+              <!-- Responses 规范 -->
+              <div
+                class="supplier-proto-card"
+                :class="{
+                  'supported': newProtoSupportsResponses === true,
+                  'unsupported': newProtoSupportsResponses === false,
+                  'active': newChannelProtocol === 'openai-responses',
+                }"
+                @click="newChannelProtocol = 'openai-responses'; hasManuallyChangedNewProtocol = true"
+              >
+                <div class="supplier-proto-card-top">
+                  <span class="supplier-proto-card-name">Responses 规范</span>
+                  <span v-if="newProtoSupportsResponses === true" class="supplier-card-badge ok">✓ 支持</span>
+                  <span v-else-if="newProtoSupportsResponses === false" class="supplier-card-badge no">✕ 不支持</span>
+                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                </div>
+                <span class="supplier-proto-card-sub">/v1/responses</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. 模型管理 (按自然填写顺序第四行) -->
           <div class="supplier-models-wrap">
             <ChannelModelManager
               v-model:primary-model="newChannelPrimaryModel"
@@ -3652,8 +3928,8 @@ function handleContextMenu(event: MouseEvent) {
         </div>
 
         <div class="m26-modal-body supplier-modal-body">
-          <!-- 供应商名称与接口协议 -->
-          <div class="supplier-form-row-2col">
+          <!-- 1. 基本信息: 供应商名称 与 Base URL (按自然填写顺序第一行) -->
+          <div class="supplier-basic-row-2col">
             <div class="m26-form-group">
               <label class="m26-label">供应商名称</label>
               <input
@@ -3664,31 +3940,20 @@ function handleContextMenu(event: MouseEvent) {
             </div>
 
             <div class="m26-form-group">
-              <label class="m26-label">接口协议</label>
-              <select v-model="editChannelProtocol" class="m26-select supplier-select">
-                <option value="openai-compatible">OpenAI Compatible</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="openai-responses">OpenAI Responses</option>
-              </select>
+              <div class="supplier-label-row">
+                <label class="m26-label">Base URL (API 端点)</label>
+                <span class="supplier-field-hint">无需填写 /v1，网关自动拼装</span>
+              </div>
+              <input
+                v-model="editChannelUrl"
+                type="text"
+                class="m26-input supplier-input font-mono text-xs"
+                placeholder="https://api.openai.com"
+              />
             </div>
           </div>
 
-          <!-- Base URL -->
-          <div class="m26-form-group">
-            <div class="supplier-label-row">
-              <label class="m26-label">Base URL (API 端点)</label>
-              <span class="supplier-field-hint">无需填写 /v1 或 /chat/completions，网关会自动拼装</span>
-            </div>
-            <input
-              v-model="editChannelUrl"
-              type="text"
-              class="m26-input supplier-input font-mono text-xs"
-              placeholder="https://api.openai.com"
-            />
-          </div>
-
-          <!-- 密钥管理 -->
-          <div class="supplier-form-divider"></div>
+          <!-- 2. 密钥管理 (按自然填写顺序第二行) -->
           <div class="supplier-keys-wrap">
             <ChannelKeyManager
               v-if="editingChannel?.gatewayId"
@@ -3699,8 +3964,84 @@ function handleContextMenu(event: MouseEvent) {
             />
           </div>
 
-          <!-- 模型管理 -->
-          <div class="supplier-form-divider"></div>
+          <!-- 3. 接口协议 (按自然填写顺序第三行：有了 Base URL & 密钥后自动识别全部支持) -->
+          <div class="supplier-proto-section">
+            <div class="supplier-proto-label-row">
+              <label class="m26-label">接口协议</label>
+              <button
+                type="button"
+                class="supplier-detect-btn"
+                :disabled="isDetectingEditProtocol"
+                title="向 Base URL 发送探测，自动识别端点支持的全部协议与模型"
+                @click="runDetectProtocol('edit')"
+              >
+                <span v-if="isDetectingEditProtocol" class="m26-spin-dot mini"></span>
+                <span v-else>⚡️ 重新探测</span>
+              </button>
+            </div>
+
+            <!-- 全部协议支持状态卡片列表 (整行全宽展开) -->
+            <div class="supplier-proto-cards-row">
+              <!-- OpenAI 兼容协议 -->
+              <div
+                class="supplier-proto-card"
+                :class="{
+                  'supported': editProtoSupportsOpenai === true,
+                  'unsupported': editProtoSupportsOpenai === false,
+                  'active': editChannelProtocol === 'openai-compatible',
+                }"
+                @click="editChannelProtocol = 'openai-compatible'; hasManuallyChangedEditProtocol = true"
+              >
+                <div class="supplier-proto-card-top">
+                  <span class="supplier-proto-card-name">OpenAI 兼容</span>
+                  <span v-if="editProtoSupportsOpenai === true" class="supplier-card-badge ok">✓ 支持</span>
+                  <span v-else-if="editProtoSupportsOpenai === false" class="supplier-card-badge no">✕ 不支持</span>
+                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                </div>
+                <span class="supplier-proto-card-sub">/v1/chat/completions</span>
+              </div>
+
+              <!-- Anthropic 原生协议 -->
+              <div
+                class="supplier-proto-card"
+                :class="{
+                  'supported': editProtoSupportsAnthropic === true,
+                  'unsupported': editProtoSupportsAnthropic === false,
+                  'active': editChannelProtocol === 'anthropic',
+                }"
+                @click="editChannelProtocol = 'anthropic'; hasManuallyChangedEditProtocol = true"
+              >
+                <div class="supplier-proto-card-top">
+                  <span class="supplier-proto-card-name">Anthropic 原生</span>
+                  <span v-if="editProtoSupportsAnthropic === true" class="supplier-card-badge ok">✓ 支持</span>
+                  <span v-else-if="editProtoSupportsAnthropic === false" class="supplier-card-badge no">✕ 不支持</span>
+                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                </div>
+                <span class="supplier-proto-card-sub">/v1/messages (Claude)</span>
+              </div>
+
+              <!-- Responses 规范 -->
+              <div
+                class="supplier-proto-card"
+                :class="{
+                  'supported': editProtoSupportsResponses === true,
+                  'unsupported': editProtoSupportsResponses === false,
+                  'active': editChannelProtocol === 'openai-responses',
+                }"
+                @click="editChannelProtocol = 'openai-responses'; hasManuallyChangedEditProtocol = true"
+              >
+                <div class="supplier-proto-card-top">
+                  <span class="supplier-proto-card-name">Responses 规范</span>
+                  <span v-if="editProtoSupportsResponses === true" class="supplier-card-badge ok">✓ 支持</span>
+                  <span v-else-if="editProtoSupportsResponses === false" class="supplier-card-badge no">✕ 不支持</span>
+                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                </div>
+                <span class="supplier-proto-card-sub">/v1/responses</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. 模型管理 (按自然填写顺序第四行) -->
           <div class="supplier-models-wrap">
             <ChannelModelManager
               v-model:primary-model="editChannelPrimaryModel"
@@ -4088,10 +4429,10 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 .supplier-modal-body {
-  padding: 18px 22px;
+  padding: 16px 22px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   background: #ffffff;
   overflow-y: auto;
   max-height: calc(90vh - 128px);
@@ -4101,6 +4442,18 @@ function handleContextMenu(event: MouseEvent) {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 14px;
+}
+
+.supplier-basic-row-2col {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 14px;
+}
+
+.supplier-proto-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .supplier-label-row {
@@ -4131,10 +4484,199 @@ function handleContextMenu(event: MouseEvent) {
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
 }
 
-.supplier-form-divider {
-  height: 1px;
+.supplier-proto-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.supplier-proto-label-row .m26-label {
+  margin-bottom: 0;
+}
+
+.supplier-proto-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.supplier-proto-detected-summary {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 400;
+}
+
+.supplier-detect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #4f46e5;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+}
+
+.supplier-detect-btn:hover:not(:disabled) {
+  background: #e0e7ff;
+  border-color: #a5b4fc;
+  color: #3730a3;
+  transform: translateY(-0.5px);
+}
+
+.supplier-detect-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.supplier-proto-cards-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+}
+
+.supplier-proto-card {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+  min-height: 44px;
+}
+
+.supplier-proto-card:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+/* Supported state */
+.supplier-proto-card.supported {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.supplier-proto-card.supported:hover {
+  border-color: #4ade80;
+  background: #ecfdf5;
+}
+
+/* Unsupported state */
+.supplier-proto-card.unsupported {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  opacity: 0.65;
+}
+
+/* Active / Selected state */
+.supplier-proto-card.active {
+  border-color: #6366f1;
+  background: #eef2ff;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18);
+}
+
+.supplier-proto-card.supported.active {
+  border-color: #10b981;
+  background: #ecfdf5;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.22);
+}
+
+.supplier-proto-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.supplier-proto-card-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e293b;
+  white-space: nowrap;
+}
+
+.supplier-card-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.supplier-card-badge.ok {
+  background: #10b981;
+  color: #ffffff;
+}
+
+.supplier-card-badge.no {
+  background: #e2e8f0;
+  color: #94a3b8;
+}
+
+.supplier-card-badge.maybe {
   background: #f1f5f9;
-  margin: 2px 0;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+}
+
+.supplier-card-badge.active {
+  background: #6366f1;
+  color: #ffffff;
+}
+
+.supplier-proto-card-sub {
+  font-size: 10px;
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.supplier-proto-inline-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #475569;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.supplier-proto-inline-hint.detecting {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+
+.supplier-proto-inline-hint.success {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #d1fae5;
+}
+
+.supplier-proto-inline-hint.error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fee2e2;
 }
 
 .supplier-keys-wrap,
@@ -4182,9 +4724,14 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 @media (max-width: 640px) {
-  .supplier-form-row-2col {
+  .supplier-form-row-2col,
+  .supplier-basic-row-2col {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+  .supplier-proto-cards-row {
+    flex-direction: column;
+    gap: 6px;
   }
   .supplier-modal-footer {
     flex-direction: column-reverse;
@@ -4648,6 +5195,7 @@ function handleContextMenu(event: MouseEvent) {
 }
 .m26-section-view.m26-channels-section,
 .m26-section-view.m26-models-section,
+.m26-section-view.m26-clients-section,
 .m26-section-view.m26-logs-section {
   flex: 1;
   height: 100%;
@@ -4659,6 +5207,12 @@ function handleContextMenu(event: MouseEvent) {
   max-width: 1400px;
   width: 100%;
   margin: 0 auto;
+}
+.m26-section-view.m26-clients-section {
+  gap: 0;
+  border-radius: 14px;
+  background: transparent;
+  border: none;
 }
 .m26-channels-scroll-area,
 .m26-models-scroll-area {

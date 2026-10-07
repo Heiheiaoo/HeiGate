@@ -19,8 +19,8 @@ describe('ChannelModelManager', () => {
     expect(wrapper.text()).not.toContain('周期探活')
     expect(wrapper.text()).not.toContain('可用模型')
     expect(wrapper.find('.m26-primary-model-box').exists()).toBe(false)
-    expect(wrapper.get('.m26-mgr-left-group .m26-mgr-fetch-btn').text()).toBe('获取模型')
-    expect(wrapper.get('.m26-mgr-left-group .m26-count-pill').text()).toBe('2')
+    expect(wrapper.get('.m26-add-bar .m26-mgr-fetch-btn').text()).toBe('获取模型')
+    expect(wrapper.get('.m26-count-pill').text()).toBe('2')
     expect(wrapper.get('.m26-add-bar input').attributes('placeholder')).toContain('输入模型名称')
   })
   it('adds pasted model names, removes duplicates, and keeps the existing primary', async () => {

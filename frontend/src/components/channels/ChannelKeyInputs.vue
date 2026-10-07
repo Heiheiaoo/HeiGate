@@ -71,27 +71,19 @@ function remove(index: number) {
 
 <template>
   <section class="key-inputs" aria-label="API 密钥列表">
-    <div class="key-inputs-header">
-      <label class="m26-label">API Key</label>
-      <span class="key-count-hint">已添加 {{ rows.length }} 把 Key</span>
-    </div>
-
-    <div class="key-cols-hint" aria-hidden="true">
-      <span class="key-col-name">名称</span>
-      <span class="key-col-secret">Key</span>
-      <span class="key-col-action"></span>
+    <div class="key-header-grid">
+      <div class="key-header-col-key">
+        <label class="m26-label">API Key</label>
+      </div>
+      <div class="key-header-col-remark">
+        <label class="m26-label">备注</label>
+        <span class="key-count-hint">已添加 {{ rows.length }} 把 Key</span>
+      </div>
+      <div class="key-header-col-action" aria-hidden="true"></div>
     </div>
 
     <div v-for="(row, index) in rows" :key="row.id" class="key-input-row">
-      <input
-        v-model="row.name"
-        :aria-label="`Key ${index + 1} 名称`"
-        type="text"
-        class="m26-input key-name-input text-xs"
-        placeholder="例如：主 Key、备用 Key"
-        autocomplete="off"
-        @input="update"
-      />
+      <!-- 1. API Key (放前面) -->
       <div class="key-secret-field">
         <input
           v-model="row.secret"
@@ -120,49 +112,72 @@ function remove(index: number) {
           </svg>
         </button>
       </div>
+
+      <!-- 2. 备注 (放后面) -->
+      <input
+        v-model="row.name"
+        :aria-label="`Key ${index + 1} 名称`"
+        type="text"
+        class="m26-input key-name-input text-xs"
+        placeholder="例如：主 Key、备用 Key"
+        autocomplete="off"
+        @input="update"
+      />
+
+      <!-- 3. 红色删除图标按钮 -->
       <button
         type="button"
-        class="key-del-btn"
+        class="key-del-icon-btn"
         :disabled="rows.length === 1"
         :aria-label="`移除 Key ${index + 1}`"
         title="移除此 Key"
         @click="remove(index)"
       >
-        移除
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7">
+          <path d="M2.5 4.5h11M5.5 4.5V3a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5M6 7.5v4M10 7.5v4M4 4.5l.7 8.5a1.5 1.5 0 0 0 1.5 1.5h3.6a1.5 1.5 0 0 0 1.5-1.5l.7-8.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span class="sr-only">移除</span>
       </button>
     </div>
 
     <div class="key-actions-row">
-      <button type="button" class="key-add-dashed-btn" @click="addRow">添加一把 Key</button>
+      <button type="button" class="key-add-dashed-btn" @click="addRow">添加 Key</button>
     </div>
   </section>
 </template>
 
 <style scoped>
 .key-inputs { display: flex; flex-direction: column; gap: 8px; width: 100%; }
-.key-inputs-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
-.key-count-hint { font-size: 11px; color: #64748b; font-weight: 500; }
-.key-cols-hint {
+.key-header-grid {
   display: grid;
-  grid-template-columns: 140px 1fr 52px;
-  gap: 8px;
+  grid-template-columns: 1fr 220px 36px;
+  gap: 12px;
   align-items: center;
-  font-size: 11px;
-  color: #94a3b8;
-  font-weight: 600;
+  margin-bottom: 2px;
 }
-.key-col-name,
-.key-col-secret {
-  min-width: 0;
-  padding-left: 2px;
+.key-header-col-key {
+  display: flex;
+  align-items: center;
 }
-.key-col-action {
-  min-width: 0;
+.key-header-col-remark {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
+.key-header-col-action {
+  width: 36px;
+  height: 1px;
+}
+.key-header-col-key .m26-label,
+.key-header-col-remark .m26-label {
+  margin-bottom: 0;
+}
+.key-count-hint { font-size: 11px; color: #64748b; font-weight: 500; }
 .key-input-row {
   display: grid;
-  grid-template-columns: 140px 1fr 52px;
-  gap: 8px;
+  grid-template-columns: 1fr 220px 36px;
+  gap: 12px;
   align-items: center;
 }
 .key-name-input {
@@ -211,32 +226,46 @@ function remove(index: number) {
 .key-visibility-btn:hover { background: #eef2ff; color: #4338ca; }
 .key-visibility-btn svg { width: 15px; height: 15px; }
 
-.key-del-btn {
-  width: 52px;
+.key-del-icon-btn {
+  width: 36px;
   height: 36px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #fee2e2;
   border-radius: 8px;
-  background: #ffffff;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 500;
+  background: #fef2f2;
+  color: #ef4444;
   cursor: pointer;
   transition: all 0.15s ease;
   box-sizing: border-box;
+  flex-shrink: 0;
 }
-.key-del-btn:hover:not(:disabled) {
+.key-del-icon-btn:hover:not(:disabled) {
   border-color: #fca5a5;
   color: #dc2626;
-  background: #fef2f2;
+  background: #fee2e2;
+  transform: translateY(-0.5px);
 }
-.key-del-btn:disabled {
-  opacity: 0.45;
+.key-del-icon-btn:disabled {
+  opacity: 0.35;
   cursor: not-allowed;
   border-color: #f1f5f9;
+  background: #f8fafc;
+  color: #94a3b8;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .key-actions-row { margin-top: 4px; }
@@ -262,11 +291,17 @@ function remove(index: number) {
   color: #4338ca;
 }
 
-@media (max-width: 540px) {
-  .key-cols-hint { display: none; }
-  .key-input-row { display: flex; flex-wrap: wrap; }
-  .key-name-input { width: 100% !important; }
-  .key-secret-field { flex: 1 1 calc(100% - 60px); }
-  .key-del-btn { width: 52px; }
+@media (max-width: 640px) {
+  .key-header-grid {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .key-input-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .key-del-icon-btn {
+    width: 100%;
+  }
 }
 </style>

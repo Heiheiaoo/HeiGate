@@ -169,33 +169,25 @@ async function submitNewKey() {
 <template>
   <div class="key-manager">
     <div class="key-embedded-container">
-      <div class="key-inputs-header">
-        <div class="key-header-left">
-          <label class="m26-label">API Key</label>
-          <span class="key-note-badge">更改立即生效</span>
+      <div class="key-header-grid">
+        <div class="key-header-col-key">
+          <div class="key-header-left">
+            <label class="m26-label">API Key</label>
+            <span class="key-note-badge">更改立即生效</span>
+          </div>
         </div>
-        <span class="key-count-hint">已添加 {{ keys.length }} 把 Key</span>
+        <div class="key-header-col-remark">
+          <label class="m26-label">备注</label>
+          <span class="key-count-hint">已添加 {{ keys.length }} 把 Key</span>
+        </div>
+        <div class="key-header-col-action" aria-hidden="true"></div>
       </div>
 
       <p v-if="channelDisabled" class="key-error">当前渠道已停用，Key 不会参与转发或测试。</p>
       <p v-if="error" role="alert" class="key-error">{{ error }}</p>
 
-      <div class="key-cols-hint" aria-hidden="true">
-        <span class="key-col-name">名称</span>
-        <span class="key-col-secret">Key</span>
-        <span class="key-col-action"></span>
-      </div>
-
       <div v-for="key in keys" :key="key.id" class="key-input-row">
-        <input
-          :value="key.name"
-          type="text"
-          class="m26-input key-name-input text-xs"
-          placeholder="名称"
-          :disabled="busy"
-          @change="onNameChange(key, ($event.target as HTMLInputElement).value, $event)"
-        />
-
+        <!-- 1. API Key (放前面) -->
         <div class="key-secret-field">
           <input
             :value="revealedKeys[key.id] ?? key.masked_secret"
@@ -243,6 +235,17 @@ async function submitNewKey() {
           </div>
         </div>
 
+        <!-- 2. 备注 (放后面) -->
+        <input
+          :value="key.name"
+          type="text"
+          class="m26-input key-name-input text-xs"
+          placeholder="备注，例如：主 Key"
+          :disabled="busy"
+          @change="onNameChange(key, ($event.target as HTMLInputElement).value, $event)"
+        />
+
+        <!-- 3. 红色删除图标按钮 -->
         <div class="key-col-action-cell">
           <template v-if="deleteId === key.id">
             <button
@@ -266,12 +269,16 @@ async function submitNewKey() {
           <template v-else>
             <button
               type="button"
-              class="key-del-btn"
+              class="key-del-icon-btn"
               :disabled="busy || keys.length <= 1"
-              :title="keys.length <= 1 ? '至少需要保留 1 把 Key' : '移除这把 Key'"
+              :title="keys.length <= 1 ? '至少需要保留 1 把 Key' : '删除这把 Key'"
+              :aria-label="`删除 ${key.name}`"
               @click="deleteId = key.id"
             >
-              删除
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7">
+                <path d="M2.5 4.5h11M5.5 4.5V3a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5M6 7.5v4M10 7.5v4M4 4.5l.7 8.5a1.5 1.5 0 0 0 1.5 1.5h3.6a1.5 1.5 0 0 0 1.5-1.5l.7-8.5" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              <span class="sr-only">删除</span>
             </button>
           </template>
         </div>
@@ -279,12 +286,7 @@ async function submitNewKey() {
 
       <!-- Add key row -->
       <div v-if="isAddingRow" class="key-input-row key-new-row">
-        <input
-          v-model="newKeyName"
-          type="text"
-          class="m26-input key-name-input text-xs"
-          :placeholder="`Key ${keys.length + 1}`"
-        />
+        <!-- 1. 新 Key 密钥 (放前面) -->
         <div class="key-secret-field">
           <input
             v-model="newKeySecret"
@@ -295,7 +297,16 @@ async function submitNewKey() {
             @keydown.esc="cancelNewKey"
           />
         </div>
-        <div class="key-new-row-actions">
+
+        <!-- 2. 新 Key 备注 (放后面) -->
+        <input
+          v-model="newKeyName"
+          type="text"
+          class="m26-input key-name-input text-xs"
+          :placeholder="`Key ${keys.length + 1}`"
+        />
+
+        <div class="key-col-action-cell key-new-row-actions">
           <button
             type="button"
             class="key-save-btn"
@@ -325,7 +336,7 @@ async function submitNewKey() {
         <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M8 3v10M3 8h10" />
         </svg>
-        <span>添加一把 Key</span>
+        <span>添加 Key</span>
       </button>
     </div>
   </div>
@@ -343,11 +354,34 @@ async function submitNewKey() {
   width: 100%;
 }
 
-.key-inputs-header {
+.key-header-grid {
+  display: grid;
+  grid-template-columns: 1fr 220px auto;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 2px;
+}
+
+.key-header-col-key {
+  display: flex;
+  align-items: center;
+}
+
+.key-header-col-remark {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 2px;
+  gap: 8px;
+}
+
+.key-header-col-action {
+  width: 36px;
+  height: 1px;
+}
+
+.key-header-col-key .m26-label,
+.key-header-col-remark .m26-label {
+  margin-bottom: 0;
 }
 
 .key-header-left {
@@ -369,25 +403,10 @@ async function submitNewKey() {
   color: #64748b;
 }
 
-.key-cols-hint {
-  display: grid;
-  grid-template-columns: 130px 1fr 88px;
-  gap: 8px;
-  font-size: 11px;
-  color: #64748b;
-  padding: 0 4px;
-}
-
-.key-col-name,
-.key-col-secret,
-.key-col-action {
-  user-select: none;
-}
-
 .key-input-row {
   display: grid;
-  grid-template-columns: 130px 1fr 88px;
-  gap: 8px;
+  grid-template-columns: 1fr 220px auto;
+  gap: 12px;
   align-items: center;
 }
 
@@ -462,7 +481,51 @@ async function submitNewKey() {
   display: flex;
   align-items: center;
   gap: 4px;
-  width: 88px;
+  min-width: 36px;
+}
+
+.key-del-icon-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #fee2e2;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #ef4444;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+.key-del-icon-btn:hover:not(:disabled) {
+  border-color: #fca5a5;
+  color: #dc2626;
+  background: #fee2e2;
+  transform: translateY(-0.5px);
+}
+
+.key-del-icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  border-color: #f1f5f9;
+  background: #f8fafc;
+  color: #94a3b8;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .key-del-btn {
@@ -592,5 +655,20 @@ async function submitNewKey() {
   border-color: #818cf8;
   background: #eef2ff;
   color: #4338ca;
+}
+
+@media (max-width: 640px) {
+  .key-header-grid {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .key-input-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .key-col-action-cell,
+  .key-new-row-actions {
+    width: 100%;
+  }
 }
 </style>

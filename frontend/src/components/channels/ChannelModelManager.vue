@@ -125,31 +125,9 @@ function selectPrimary(m: string) {
   <div class="m26-model-mgr-wrap" aria-label="模型配置">
     <!-- 可用模型池 -->
     <div class="m26-models-pool-section">
-      <div class="m26-mgr-row-header">
-        <div class="m26-mgr-left-group">
-          <button
-            type="button"
-            class="m26-mgr-fetch-btn"
-            :disabled="isFetching"
-            title="从上游接口自动拉取模型列表"
-            @click="emit('fetchUpstream')"
-          >
-            <span v-if="isFetching" class="m26-spin-dot mini"></span>
-            <span>{{ isFetching ? '拉取中...' : '获取模型' }}</span>
-          </button>
-          <span class="m26-count-pill" title="已添加模型数量">{{ modelList.length }}</span>
-        </div>
-        <button
-          type="button"
-          class="m26-mode-toggle"
-          @click="isTextMode = !isTextMode"
-        >
-          {{ isTextMode ? '标签模式' : '多行文本' }}
-        </button>
-      </div>
-
       <!-- 标签模式 -->
-      <div v-if="!isTextMode" class="m26-tag-mode-wrap">
+      <template v-if="!isTextMode">
+        <!-- 1. 添加模型栏 (输入框 + 添加 + 获取模型 一行展示) -->
         <div class="m26-add-bar">
           <input
             v-model="newTagText"
@@ -168,42 +146,67 @@ function selectPrimary(m: string) {
           >
             添加
           </button>
-        </div>
-
-        <div class="m26-tags-scroll-area">
-          <div
-            v-for="m in modelList"
-            :key="m"
-            class="m26-tag-capsule"
-            :class="{ 'is-primary': m === currentPrimary }"
+          <button
+            type="button"
+            class="m26-mgr-fetch-btn"
+            :disabled="isFetching"
+            title="从上游接口自动拉取模型列表"
+            @click="emit('fetchUpstream')"
           >
-            <span v-if="m === currentPrimary" class="tag-primary-badge">主模型</span>
-            <button
-              v-else
-              type="button"
-              class="tag-set-btn"
-              title="点击设为主模型"
-              @click.stop="selectPrimary(m)"
-            >
-              设为主模型
-            </button>
-            <span class="tag-text font-mono truncate" :title="m">{{ m }}</span>
-            <button
-              type="button"
-              class="tag-del-btn"
-              :aria-label="`移除模型 ${m}`"
-              title="移除此模型"
-              @click.stop="removeModel(m)"
-            >
-              ✕
-            </button>
-          </div>
+            <span v-if="isFetching" class="m26-spin-dot mini"></span>
+            <span>{{ isFetching ? '拉取中...' : '获取模型' }}</span>
+          </button>
+        </div>
 
-          <div v-if="modelList.length === 0" class="m26-empty-tags-hint">
-            暂无模型。可在此输入添加或点击上方“获取模型”
+        <!-- 2. 模型标签列表 -->
+        <div class="m26-tag-mode-wrap">
+          <div class="m26-tags-scroll-area">
+            <div
+              v-for="m in modelList"
+              :key="m"
+              class="m26-tag-capsule"
+              :class="{ 'is-primary': m === currentPrimary }"
+            >
+              <span v-if="m === currentPrimary" class="tag-primary-badge">主模型</span>
+              <button
+                v-else
+                type="button"
+                class="tag-set-btn"
+                title="点击设为主模型"
+                @click.stop="selectPrimary(m)"
+              >
+                设为主模型
+              </button>
+              <span class="tag-text font-mono truncate" :title="m">{{ m }}</span>
+              <button
+                type="button"
+                class="tag-del-btn"
+                :aria-label="`移除模型 ${m}`"
+                title="移除此模型"
+                @click.stop="removeModel(m)"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div v-if="modelList.length === 0" class="m26-empty-tags-hint">
+              暂无模型。可在此输入添加或点击上方“获取模型”
+            </div>
           </div>
         </div>
-      </div>
+
+        <!-- 3. 工具栏 (放模型底部：多行文本在左边，数量在右边) -->
+        <div class="m26-mgr-row-header">
+          <button
+            type="button"
+            class="m26-mode-toggle"
+            @click="isTextMode = !isTextMode"
+          >
+            多行文本
+          </button>
+          <span class="m26-count-pill" title="已添加模型数量">{{ modelList.length }}</span>
+        </div>
+      </template>
 
       <!-- 多行文本模式 -->
       <div v-else class="m26-text-mode-wrap">
@@ -215,7 +218,19 @@ function selectPrimary(m: string) {
           aria-label="多行模型列表"
           @input="onTextModeChange(($event.target as HTMLTextAreaElement).value)"
         ></textarea>
-        <span class="m26-text-mode-hint">每行一个模型名称，重复项自动去重</span>
+        <div class="m26-mgr-row-header">
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class="m26-mode-toggle"
+              @click="isTextMode = !isTextMode"
+            >
+              标签模式
+            </button>
+            <span class="m26-text-mode-hint">每行一个模型名称，重复项自动去重</span>
+          </div>
+          <span class="m26-count-pill" title="已添加模型数量">{{ modelList.length }}</span>
+        </div>
       </div>
     </div>
   </div>
@@ -262,16 +277,18 @@ function selectPrimary(m: string) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 26px;
-  padding: 0 9px;
-  font-size: 11px;
+  height: 36px;
+  padding: 0 13px;
+  font-size: 12px;
   font-weight: 600;
   color: #4338ca;
   background: #eef2ff;
   border: 1px solid #c7d2fe;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .m26-mgr-fetch-btn:hover:not(:disabled) {

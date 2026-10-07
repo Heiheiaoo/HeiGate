@@ -129,7 +129,7 @@ pub async fn probe(
         Ok(results) => Json(json!({"data":results})).into_response(),
         Err(_) => (
             StatusCode::CONFLICT,
-            Json(json!({"error":"Key 不可用于测试：冷却、禁用、权限限制或已有测试运行中"})),
+            Json(json!({"error":"Key 不可用于测试：禁用、权限限制或已有测试运行中"})),
         )
             .into_response(),
     }
@@ -170,6 +170,7 @@ mod tests {
             router,
             store: store.clone(),
             gateway_key: "test".into(),
+            gateway_port: 28888,
             version: "test".into(),
         });
         let app = Router::new()

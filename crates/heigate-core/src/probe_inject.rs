@@ -83,10 +83,36 @@ pub async fn check_injection_model(cfg: &Config, model: &str) -> InjectionReport
     report.prompt_tokens = tokens;
 
     if tokens <= INJECTION_CLEAN_TOKENS {
-        report.state = INJECTION_CLEAN.to_string();
+        let logic_res = inject_request(
+            &cfg,
+            "How many times does the letter r appear in the word strawberry? Reply with just the digit.",
+            16,
+        )
+        .await;
+
+        match logic_res {
+            Ok((_tok, answer)) => {
+                let trimmed = answer.trim();
+                if trimmed.contains('3') {
+                    report.state = INJECTION_CLEAN.to_string();
+                    report.content = "满血原厂：无隐藏注入，逻辑推理校验通过".to_string();
+                } else {
+                    report.state = INJECTION_DETECTED.to_string();
+                    report.content = format!(
+                        "疑似降智/偷换弱模型：strawberry 计数测试未通过 (回复: '{}'，预期为 3)",
+                        truncate(trimmed, 40)
+                    );
+                }
+            }
+            Err(_) => {
+                report.state = INJECTION_CLEAN.to_string();
+                report.content = "满血原厂：无系统提示词注入".to_string();
+            }
+        }
         return report;
     } else if tokens <= INJECTION_DETECTED_TOKENS {
         report.state = INJECTION_SUSPECTED.to_string();
+        report.content = format!("轻度提示词消耗：前置模板消耗 {} tokens", tokens);
     } else {
         report.state = INJECTION_DETECTED.to_string();
     }

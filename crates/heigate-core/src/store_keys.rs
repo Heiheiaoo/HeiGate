@@ -136,11 +136,29 @@ impl Store {
                 key_id INTEGER NOT NULL REFERENCES channel_keys(id) ON DELETE CASCADE,
                 model TEXT NOT NULL,
                 unavailable_until TEXT NOT NULL,
+                rate_limit_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(key_id,model)
             );
             INSERT INTO channel_keys(channel_id,name,secret,cooldown_until,last_error)
                 SELECT id,'Key 1',api_key,cooldown_until,last_error FROM desktop_channels
                 WHERE id NOT IN (SELECT channel_id FROM channel_keys);",
+        )?;
+        if let Err(err) = tx.execute(
+            "ALTER TABLE channel_key_models ADD COLUMN rate_limit_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        ) {
+            if !err.to_string().to_lowercase().contains("duplicate column") {
+                return Err(StoreError::Db(err));
+            }
+        }
+        // Older releases mirrored model-specific 429s into the global Key
+        // cooldown. Remove only that recognizable legacy state so an upgrade
+        // immediately restores access to the Key's other models.
+        tx.execute(
+            "UPDATE channel_keys SET cooldown_until=NULL,rate_limit_count=0 \
+             WHERE last_error='429：限流冷却' \
+             AND EXISTS(SELECT 1 FROM channel_key_models WHERE key_id=channel_keys.id)",
+            [],
         )?;
         tx.commit()?;
         Ok(())

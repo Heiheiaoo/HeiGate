@@ -429,6 +429,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn clear_key_model_cooldown(&self, key_id: i64, model: &str) -> Result<()> {
+        self.lock().execute(
+            "DELETE FROM channel_key_models WHERE key_id=? AND model=?",
+            params![key_id, model],
+        )?;
+        Ok(())
+    }
+
     pub fn save(&self, channel: &mut Channel) -> Result<()> {
         let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
         self.save_locked(channel)

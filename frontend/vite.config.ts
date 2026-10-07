@@ -8,7 +8,7 @@ const appVersion = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').
 // During `pnpm dev` the UI runs on Vite's port and proxies API calls to a
 // locally running gateway (`make run`). In production the Rust core serves the
 // built files itself, so everything is same-origin.
-const gateway = process.env.HEIGATE_DEV_TARGET ?? 'http://127.0.0.1:18080'
+const gateway = process.env.HEIGATE_DEV_TARGET ?? 'http://127.0.0.1:28888'
 const devGatewayURL = `${gateway.replace(/\/+$/, '')}/v1`
 
 export default defineConfig({

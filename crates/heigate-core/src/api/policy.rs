@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::canonical::are_models_equivalent;
 use crate::probe::{STATUS_DEGRADED, STATUS_ERROR, STATUS_FAILED, STATUS_OPERATIONAL};
 use crate::resilience::CIRCUIT_OPEN;
 use crate::store::Channel;
@@ -55,8 +56,11 @@ pub struct AutoModelChoice {
 
 const RANK_UNKNOWN: i64 = 99;
 
-/// Selects the best configured model for a channel.
-pub fn best_auto_choice(ch: Option<&Channel>) -> AutoModelChoice {
+/// Selects the best configured model for a channel, optionally constrained by allowed models.
+pub fn best_auto_choice_matching(
+    ch: Option<&Channel>,
+    allowed: Option<&[String]>,
+) -> AutoModelChoice {
     let Some(ch) = ch else {
         return AutoModelChoice {
             name: String::new(),
@@ -68,6 +72,27 @@ pub fn best_auto_choice(ch: Option<&Channel>) -> AutoModelChoice {
 
     let mut models = vec![ch.primary_model.clone()];
     models.extend(ch.extra_models.clone());
+
+    if let Some(allowed) = allowed {
+        if !allowed.is_empty() {
+            models.retain(|m| allowed.iter().any(|a| are_models_equivalent(a, m)));
+            models.sort_by_key(|m| {
+                allowed
+                    .iter()
+                    .position(|a| are_models_equivalent(a, m))
+                    .unwrap_or(usize::MAX)
+            });
+        }
+    }
+
+    if models.is_empty() {
+        return AutoModelChoice {
+            name: String::new(),
+            rank: RANK_UNKNOWN,
+            lat: i64::MAX,
+            order: 0,
+        };
+    }
 
     let mut best = AutoModelChoice {
         name: String::new(),
@@ -130,9 +155,19 @@ pub fn best_auto_choice(ch: Option<&Channel>) -> AutoModelChoice {
     best
 }
 
+/// Selects the best configured model for a channel.
+pub fn best_auto_choice(ch: Option<&Channel>) -> AutoModelChoice {
+    best_auto_choice_matching(ch, None)
+}
+
+/// The best configured upstream model name for a channel, optionally constrained by allowed models.
+pub fn best_auto_model_matching(ch: Option<&Channel>, allowed: Option<&[String]>) -> String {
+    best_auto_choice_matching(ch, allowed).name
+}
+
 /// The best configured upstream model name for a channel.
 pub fn best_auto_model(ch: Option<&Channel>) -> String {
-    best_auto_choice(ch).name
+    best_auto_choice_matching(ch, None).name
 }
 
 /// One attempt in the routing and failover process.

@@ -22,8 +22,8 @@ make bundle   # 构建当前平台的全部打包产物（dmg/msi/deb/…）
 前后端分开开发时：
 
 ```bash
-make run                       # 终端 1：应用（网关默认 18080）
-pnpm --dir frontend run dev    # 终端 2：Vite，5273，API 代理到 8080
+make run                       # 终端 1：应用（网关默认 28888）
+pnpm --dir frontend run dev    # 终端 2：Vite，5273，API 代理到 28888
 ```
 
 提交前请跑 `make check`：它等价于 `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace` + 前端 typecheck/lint/vitest/build，与 CI 保持一致。
@@ -93,7 +93,7 @@ frontend                 Vue 3 单页界面
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HEIGATE_PORT` | 18080，被占用时顺延到 18090 再随机 | 监听端口（源码里保留 flags 兼容） |
+| `HEIGATE_PORT` | 28888，被占用时顺延到 28898 再随机 | 监听端口（源码里保留 flags 兼容） |
 | `DATA_DIR` | macOS `~/Library/Application Support/HeiGate`，Windows `%APPDATA%\HeiGate`，Linux `~/.local/share/heigate` | 数据库和网关密钥位置 |
 | `HEIGATE_STATIC_DIR` | 打包资源目录 | 覆盖前端静态目录（调试用） |
 

@@ -10,10 +10,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 
 use crate::probe::{self, Config, ProbeResult, STATUS_DEGRADED, STATUS_ERROR, STATUS_OPERATIONAL};
-use crate::resilience::{
-    failure_cooldown, failure_is_circuit_eligible, FailureClass, FailureInfo, CIRCUIT_CLOSED,
-    CIRCUIT_OPEN,
-};
+use crate::resilience::{FailureClass, FailureInfo, CIRCUIT_CLOSED};
 use crate::store::{ModelHealth, Store};
 
 /// Returned when a probe is already in flight for the channel.
@@ -130,10 +127,10 @@ impl ProbeRunner {
         for model in models {
             let lease = self
                 .key_pool
-                .acquire(id, &model, &HashSet::new(), key_id)
+                .acquire_for_probe(id, &model, key_id)
                 .map_err(|e| RunnerError::Store(e.to_string()))?
                 .ok_or_else(|| {
-                    RunnerError::Store("没有可用于探活的 Key（冷却、停用或权限限制）".into())
+                    RunnerError::Store("没有可用于探活的 Key（未配置或已停用）".into())
                 })?;
             let cfg = Config {
                 provider: channel.provider.clone(),
@@ -151,25 +148,17 @@ impl ProbeRunner {
                 result.message = result.message.replace(&lease.key.secret, "[REDACTED]");
             }
             let success = matches!(result.status.as_str(), STATUS_OPERATIONAL | STATUS_DEGRADED);
-            let info = probe_failure_info(&result);
             if success {
-                let _ = lease.success(0, 0);
-            } else {
-                let _ = lease.failure(&info, &model);
+                let _ = lease.success(0, 0, &model);
+                let _ = self.store.clear_key_model_cooldown(lease.key.id, &model);
             }
-            let key_fault = !success
-                && matches!(
-                    info.class,
-                    Some(FailureClass::RateLimit | FailureClass::Auth | FailureClass::Model)
-                );
-            // A credential failure must not bench the other keys or label their model unavailable.
-            if !key_fault {
-                let _ = self
-                    .store
-                    .set_model_health(id, &model_health_from_probe(&result));
-                if model == probed_primary {
-                    self.persist_probe_results(id, &probed_primary, std::slice::from_ref(&result));
-                }
+            // CRITICAL: Probes must NEVER call lease.failure or engage temporary retreat cooldown on the key or model.
+            // Upstream diagnostic results are saved directly to model_health and channel headline.
+            let _ = self
+                .store
+                .set_model_health(id, &model_health_from_probe(&result));
+            if model == probed_primary {
+                self.persist_probe_results(id, &probed_primary, std::slice::from_ref(&result));
             }
             results.push(result);
         }
@@ -242,12 +231,7 @@ impl ProbeRunner {
                     };
                     fresh.failure_count += 1;
                     fresh.probe_streak = 0;
-                    let info = probe_failure_info(&primary);
-                    let until = Utc::now() + failure_cooldown(&info, fresh.failure_count);
-                    fresh.cooldown_until = Some(until);
-                    if failure_is_circuit_eligible(&info) && fresh.failure_count >= 3 {
-                        fresh.circuit_state = CIRCUIT_OPEN.to_string();
-                    }
+                    // Probes are diagnostic tests and must NOT engage cooldown_until or circuit breaker on the channel.
                 }
             }
         });
@@ -281,6 +265,7 @@ impl Drop for ChannelGuard<'_> {
 }
 
 /// Maps an upstream failure message to a failure class, detecting rate limits.
+#[allow(dead_code)]
 fn probe_failure_info(result: &ProbeResult) -> FailureInfo {
     if result.http_status >= 400 {
         let mut info = crate::resilience::classify_status(result.http_status);
