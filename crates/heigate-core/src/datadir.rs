@@ -101,7 +101,7 @@ fn restrict_permissions(dir: &std::path::Path) {
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         if !home.is_empty() {
             return Some(PathBuf::from(home));

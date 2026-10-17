@@ -35,25 +35,27 @@ pub struct CodexApplyOptions {
     pub direct_models: Vec<String>,
 }
 
-fn codex_home() -> PathBuf {
+const CODEX_HOME_UNAVAILABLE: &str =
+    "无法确定 Codex 用户目录；请设置 HOME、USERPROFILE 或 CODEX_HOME";
+
+fn codex_home() -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("CODEX_HOME") {
         let path = path.trim();
         if !path.is_empty() {
-            return PathBuf::from(path);
+            return Ok(PathBuf::from(path));
         }
     }
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".codex")
+    crate::datadir::home_dir()
+        .map(|home| home.join(".codex"))
+        .ok_or_else(|| CODEX_HOME_UNAVAILABLE.to_string())
 }
 
-pub fn config_path() -> PathBuf {
-    codex_home().join("config.toml")
+pub fn config_path() -> Result<PathBuf, String> {
+    Ok(codex_home()?.join("config.toml"))
 }
 
-pub fn catalog_path() -> PathBuf {
-    codex_home().join("heigate-models.json")
+pub fn catalog_path() -> Result<PathBuf, String> {
+    Ok(codex_home()?.join("heigate-models.json"))
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -122,9 +124,22 @@ fn managed(doc: &DocumentMut) -> bool {
 }
 
 pub fn status() -> CodexConfigStatus {
-    let path = config_path();
+    let Ok(home) = codex_home() else {
+        return CodexConfigStatus {
+            path: "未找到 Codex 用户目录".into(),
+            exists: false,
+            managed: false,
+            modified: false,
+            backup_exists: false,
+            parse_error: Some(CODEX_HOME_UNAVAILABLE.into()),
+            provider: None,
+            catalog_path: "".into(),
+            catalog_managed: false,
+        };
+    };
+    let path = home.join("config.toml");
     let backup = backup_path(&path);
-    let catalog = catalog_path();
+    let catalog = home.join("heigate-models.json");
     let exists = path.exists();
     if !exists {
         return CodexConfigStatus {
@@ -175,9 +190,10 @@ pub fn status() -> CodexConfigStatus {
 }
 
 pub fn apply(options: &CodexApplyOptions) -> Result<CodexConfigStatus, String> {
-    let path = config_path();
+    let home = codex_home()?;
+    let path = home.join("config.toml");
     let backup = backup_path(&path);
-    let catalog = catalog_path();
+    let catalog = home.join("heigate-models.json");
     let catalog_backup = catalog_backup_path(&catalog);
     let original = if path.exists() {
         Some(std::fs::read_to_string(&path).map_err(|e| format!("读取 Codex 配置失败: {e}"))?)
@@ -386,9 +402,10 @@ fn render_catalog(models: &[String], mode: &str) -> String {
 }
 
 pub fn restore() -> Result<CodexConfigStatus, String> {
-    let path = config_path();
+    let home = codex_home()?;
+    let path = home.join("config.toml");
     let backup = backup_path(&path);
-    let catalog = catalog_path();
+    let catalog = home.join("heigate-models.json");
     let catalog_backup = catalog_backup_path(&catalog);
     let config_content = if backup.exists() {
         let raw =

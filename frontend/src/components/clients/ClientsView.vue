@@ -197,6 +197,19 @@ const orderedPlatforms = computed(() => PLATFORM_ORDER.map((id) => platforms.val
 
 // 本地草稿恢复
 const STORAGE_KEY = 'heigate_client_platforms_draft'
+function persistClientDraft() {
+  if (typeof localStorage === 'undefined') return
+  try {
+    // Channel keys are already available from the in-memory channel list.
+    // Never persist them with client preferences in browser storage.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(platforms.value, (key, value) => {
+      return key === 'apiKey' ? undefined : value
+    }))
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 if (typeof localStorage !== 'undefined') {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -205,28 +218,23 @@ if (typeof localStorage !== 'undefined') {
       for (const key of Object.keys(parsed) as ClientPlatformId[]) {
         if (platforms.value[key]) {
           platforms.value[key].activeMode = parsed[key].activeMode || platforms.value[key].activeMode
-          platforms.value[key].direct = { ...platforms.value[key].direct, ...parsed[key].direct }
+          platforms.value[key].direct = { ...platforms.value[key].direct, ...parsed[key].direct, apiKey: '' }
           platforms.value[key].gateway = { ...platforms.value[key].gateway, ...parsed[key].gateway }
         }
       }
     }
   } catch {
     // 忽略解析错误
+  } finally {
+    // Remove secrets written by previous versions as soon as this view loads.
+    persistClientDraft()
   }
 }
 
 // 自动持久化草稿
 watch(
   platforms,
-  (val) => {
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(val))
-      } catch {
-        // 忽略存储错误
-      }
-    }
-  },
+  persistClientDraft,
   { deep: true }
 )
 
@@ -288,8 +296,13 @@ watch(
   [activePlatformId, compatibleChannels],
   ([platId, compChans]) => {
     const plat = platforms.value[platId]
-    if (plat && plat.supportedModes.includes('direct') && !plat.direct.channelName && compChans.length > 0) {
-      selectDirectChannel(compChans[0].name)
+    if (plat && plat.supportedModes.includes('direct')) {
+      if (!plat.direct.channelName && compChans.length > 0) {
+        selectDirectChannel(compChans[0].name)
+      } else {
+        const selected = compChans.find(channel => channel.name === plat.direct.channelName)
+        plat.direct.apiKey = selected?.apiKey || ''
+      }
     }
   },
   { immediate: true }
@@ -353,7 +366,7 @@ async function handleSave() {
   saveMessage.value[plat.id] = ''
   try {
     if (plat.activeMode === 'direct') {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(platforms.value))
+      persistClientDraft()
       saveMessage.value[plat.id] = '直连草稿已保存在此设备，请在客户端中手动配置并启动。'
     } else {
       const res = await updateClientConfig(plat.id, {
@@ -439,7 +452,7 @@ async function applyCodexClientConfig() {
     codexConfigStatus.value = result.config || await getCodexConfigStatus()
     saveState.value.codex = 'success'
     saveMessage.value.codex = result.message || (direct ? '已配置直连并重启 Codex' : '已配置网关并重启 Codex')
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(platforms.value))
+    persistClientDraft()
   } catch (error) {
     saveState.value.codex = 'error'
     saveMessage.value.codex = error instanceof Error ? error.message : '应用 Codex 配置失败'

@@ -9,7 +9,7 @@ on:
         description: 'Existing tag to package (for example v1.0.0)'
         required: true
         type: string
-        default: v2.0.3
+        default: v2.0.4
 
 permissions:
   contents: write
@@ -122,9 +122,26 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: |
-          find . -maxdepth 1 -type f ! -name checksums.txt -print0 \
-            | sort -z \
-            | xargs -0 sha256sum > checksums.txt
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          files = sorted(path for path in Path('.').rglob('*') if path.is_file() and path.name != 'checksums.txt')
+          names = [path.name for path in files]
+          if not files:
+              raise SystemExit('No release assets found for checksum generation')
+          if len(names) != len(set(names)):
+              raise SystemExit('Release assets must have unique filenames after flattening')
+
+          with open('checksums.txt', 'w', encoding='utf-8', newline='\n') as output:
+              for path in files:
+                  digest = hashlib.sha256()
+                  with path.open('rb') as source:
+                      for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                          digest.update(chunk)
+                  # GitHub Release assets are downloaded by basename.
+                  output.write(f'{digest.hexdigest()}  {path.name}\n')
+          PY
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
