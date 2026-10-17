@@ -56,6 +56,8 @@ xattr -dr com.apple.quarantine /Applications/HeiGate.app
 
 启动 HeiGate 后，在界面里添加渠道，然后将设置页显示的网关地址和 API Key 填入客户端。支持任何兼容 OpenAI、Responses 或 Anthropic 协议的工具。
 
+客户端页中，Hermes 支持写入本地配置并重启；其他客户端的「保存网关设置」只更新 HeiGate 路由策略，「保存直连草稿」只保存此设备上的草稿，需要手动配置和启动客户端。连通性测试会用所选地址、密钥和模型发起一次真实推理请求。
+
 界面上的「网关密钥」用于客户端认证，它保存在数据目录下的 `gateway.key`（macOS：`~/Library/Application Support/HeiGate/gateway.key`，权限 `0600`；Windows：`%APPDATA%\HeiGate\gateway.key`）。
 
 **Claude Code**

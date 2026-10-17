@@ -56,6 +56,8 @@ xattr -dr com.apple.quarantine /Applications/HeiGate.app
 
 Start HeiGate, add a channel in the UI, then copy the gateway URL and API key from Settings into your client. Manual setup works with any OpenAI-, Responses-, or Anthropic-compatible tool.
 
+The client page can write local settings and restart Hermes. For other clients, saving gateway settings only updates HeiGate routing, while saving a direct-connection draft stores it on this device; configure and launch the client manually. Connection tests make one real inference request using the selected endpoint, key, and model.
+
 The gateway key shown in the UI authenticates clients. It is stored as `gateway.key` in the data directory (macOS: `~/Library/Application Support/HeiGate/gateway.key` with `0600` permissions; Windows: `%APPDATA%\HeiGate\gateway.key`).
 
 **Claude Code**

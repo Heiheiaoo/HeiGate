@@ -91,6 +91,64 @@ pub struct Channel {
     pub effective_interval_seconds: i64,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub model_health: Vec<ModelHealth>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub model_performance: Vec<ModelPerformance>,
+}
+
+pub const MODEL_PERFORMANCE_MAX_AGE_SECS: i64 = 30 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPerformance {
+    pub model: String,
+    pub ttft_ms: f64,
+    pub last_ttft_ms: i64,
+    pub samples: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Channel {
+    pub(crate) fn same_upstream(&self, other: &Channel) -> bool {
+        (self.endpoint == other.endpoint
+            || crate::probe::same_endpoint(&self.endpoint, &other.endpoint))
+            && self.provider == other.provider
+            && self.api_mode == other.api_mode
+    }
+
+    pub(crate) fn has_model(&self, model: &str) -> bool {
+        self.primary_model == model || self.extra_models.iter().any(|m| m == model)
+    }
+
+    fn reset_upstream_runtime(&mut self) {
+        self.reset_primary_runtime();
+        self.failure_count = 0;
+        self.circuit_state = "closed".into();
+        self.cooldown_until = None;
+        self.model_health.clear();
+        self.model_performance.clear();
+    }
+
+    fn reset_primary_runtime(&mut self) {
+        self.last_status = "unknown".into();
+        self.last_latency_ms = None;
+        self.last_ttft_ms = None;
+        self.last_ping_latency_ms = None;
+        self.last_error.clear();
+        self.last_checked_at = None;
+        self.probe_streak = 0;
+        self.injection_state = "unknown".into();
+        self.injection_tokens = None;
+        self.injection_content.clear();
+        self.injection_checked_at = None;
+    }
+
+    pub fn fresh_model_performance(&self, model: &str) -> Option<&ModelPerformance> {
+        let now = Utc::now();
+        self.model_performance.iter().find(|p| {
+            let age = now.signed_duration_since(p.updated_at).num_seconds();
+            p.model.eq_ignore_ascii_case(model)
+                && (0..MODEL_PERFORMANCE_MAX_AGE_SECS).contains(&age)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -218,6 +276,16 @@ CREATE TABLE IF NOT EXISTS desktop_model_health (
   ttft_ms INTEGER,
   error TEXT NOT NULL DEFAULT '',
   checked_at TEXT,
+  PRIMARY KEY (channel_id, model),
+  FOREIGN KEY (channel_id) REFERENCES desktop_channels(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS desktop_model_performance (
+  channel_id INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  ttft_ms REAL NOT NULL,
+  last_ttft_ms INTEGER NOT NULL,
+  samples INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
   PRIMARY KEY (channel_id, model),
   FOREIGN KEY (channel_id) REFERENCES desktop_channels(id) ON DELETE CASCADE
 );
@@ -405,6 +473,119 @@ impl Store {
             })
         })?;
         channel.model_health = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = conn.prepare("SELECT model, ttft_ms, last_ttft_ms, samples, updated_at FROM desktop_model_performance WHERE channel_id=? ORDER BY model")?;
+        let rows = stmt.query_map([channel.id], |row| {
+            let updated: String = row.get(4)?;
+            Ok(ModelPerformance {
+                model: row.get(0)?,
+                ttft_ms: row.get(1)?,
+                last_ttft_ms: row.get(2)?,
+                samples: row.get(3)?,
+                updated_at: parse_time(Some(&updated)).unwrap_or_default(),
+            })
+        })?;
+        channel.model_performance = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(())
+    }
+
+    pub(crate) fn record_live_model_ttft(
+        &self,
+        channel: &Channel,
+        model: &str,
+        ttft_ms: i64,
+        observed_at: DateTime<Utc>,
+        lease: &crate::key_pool::KeyLease,
+        started_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.record_model_ttft_checked(
+            channel,
+            model,
+            ttft_ms,
+            observed_at,
+            Some((lease, started_at)),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_model_ttft(
+        &self,
+        channel: &Channel,
+        model: &str,
+        ttft_ms: i64,
+        observed_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.record_model_ttft_checked(channel, model, ttft_ms, observed_at, None)
+    }
+
+    fn record_model_ttft_checked(
+        &self,
+        channel: &Channel,
+        model: &str,
+        ttft_ms: i64,
+        observed_at: DateTime<Utc>,
+        expected: Option<(&crate::key_pool::KeyLease, DateTime<Utc>)>,
+    ) -> Result<()> {
+        if !(1..=600_000).contains(&ttft_ms) {
+            return Ok(());
+        }
+        let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let sql = format!("SELECT {CHANNEL_COLUMNS} FROM desktop_channels WHERE id=?");
+        let Some(current) = tx
+            .query_row(&sql, [channel.id], scan_channel_row)
+            .optional()?
+        else {
+            return Ok(());
+        };
+        if !current.same_upstream(channel) || !current.has_model(model) {
+            return Ok(());
+        }
+        if let Some((lease, started_at)) = expected {
+            if !current.enabled || !lease.is_current_in(&tx, model)? {
+                return Ok(());
+            }
+            let checked: Option<String> = tx
+                .query_row(
+                    "SELECT checked_at FROM desktop_model_health WHERE channel_id=? AND model=?",
+                    params![channel.id, model],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            if parse_time(checked.as_deref()).is_some_and(|time| time > started_at) {
+                return Ok(());
+            }
+        }
+        let previous: Option<(f64, i64, String)> = tx.query_row(
+            "SELECT ttft_ms, samples, updated_at FROM desktop_model_performance WHERE channel_id=? AND model=?",
+            params![channel.id, model], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+        ).optional()?;
+        if previous.as_ref().is_some_and(|(_, _, updated)| {
+            parse_time(Some(updated)).is_some_and(|time| time > observed_at)
+        }) {
+            return Ok(());
+        }
+        let (average, samples, updated) = previous
+            .map(|(average, samples, updated)| {
+                let updated = parse_time(Some(&updated)).unwrap_or_default();
+                if observed_at.signed_duration_since(updated).num_seconds()
+                    >= MODEL_PERFORMANCE_MAX_AGE_SECS
+                {
+                    (ttft_ms as f64, 1, observed_at)
+                } else {
+                    (
+                        average * 0.8 + ttft_ms as f64 * 0.2,
+                        samples + 1,
+                        observed_at.max(updated),
+                    )
+                }
+            })
+            .unwrap_or((ttft_ms as f64, 1, observed_at));
+        tx.execute("INSERT INTO desktop_model_performance(channel_id,model,ttft_ms,last_ttft_ms,samples,updated_at) VALUES(?,?,?,?,?,?) \
+            ON CONFLICT(channel_id,model) DO UPDATE SET ttft_ms=excluded.ttft_ms,last_ttft_ms=excluded.last_ttft_ms,samples=excluded.samples,updated_at=excluded.updated_at",
+            params![channel.id,model,average,ttft_ms,samples,format_time(updated)])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -429,12 +610,70 @@ impl Store {
         Ok(())
     }
 
-    pub fn clear_key_model_cooldown(&self, key_id: i64, model: &str) -> Result<()> {
-        self.lock().execute(
-            "DELETE FROM channel_key_models WHERE key_id=? AND model=?",
-            params![key_id, model],
+    /// Whether a reply still belongs to the channel's configured upstream and model.
+    pub fn channel_config_is_current(&self, channel: &Channel, model: &str) -> Result<bool> {
+        let conn = self.lock();
+        let sql = format!("SELECT {CHANNEL_COLUMNS} FROM desktop_channels WHERE id=?");
+        Ok(conn
+            .query_row(&sql, [channel.id], scan_channel_row)
+            .optional()?
+            .is_some_and(|current| {
+                current.enabled
+                    && current.same_upstream(channel)
+                    && (model.is_empty() || current.has_model(model))
+            }))
+    }
+
+    /// Live requests update health without replacing independent probe timings.
+    pub fn record_model_outcome(
+        &self,
+        channel: &Channel,
+        model: &str,
+        succeeded: bool,
+        error: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let _guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let sql = format!("SELECT {CHANNEL_COLUMNS} FROM desktop_channels WHERE id=?");
+        let Some(current) = tx
+            .query_row(&sql, [channel.id], scan_channel_row)
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        if !current.enabled
+            || current.endpoint != channel.endpoint
+            || current.provider != channel.provider
+            || current.api_mode != channel.api_mode
+            || !(current.primary_model == model || current.extra_models.iter().any(|m| m == model))
+        {
+            return Ok(false);
+        }
+        let checked_at: Option<String> = tx
+            .query_row(
+                "SELECT checked_at FROM desktop_model_health WHERE channel_id=? AND model=?",
+                params![channel.id, model],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if parse_time(checked_at.as_deref()).is_some_and(|checked| checked > started_at) {
+            return Ok(false);
+        }
+        let status = if succeeded {
+            crate::probe::STATUS_OPERATIONAL
+        } else {
+            crate::probe::STATUS_ERROR
+        };
+        tx.execute(
+            "INSERT INTO desktop_model_health(channel_id,model,status,error,checked_at) VALUES(?,?,?,?,?) \
+             ON CONFLICT(channel_id,model) DO UPDATE SET status=excluded.status,error=excluded.error,checked_at=excluded.checked_at",
+            params![channel.id, model, status, if succeeded { "" } else { error }, format_time(started_at)],
         )?;
-        Ok(())
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn save(&self, channel: &mut Channel) -> Result<()> {
@@ -519,6 +758,53 @@ impl Store {
                 )?;
                 channel.id = conn.last_insert_rowid();
             } else {
+                let sql = format!("SELECT {CHANNEL_COLUMNS} FROM desktop_channels WHERE id=?");
+                let previous = conn.query_row(&sql, [channel.id], scan_channel_row)?;
+                if !previous.same_upstream(channel) {
+                    channel.reset_upstream_runtime();
+                    conn.execute(
+                        "DELETE FROM desktop_model_performance WHERE channel_id=?",
+                        [channel.id],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM desktop_model_health WHERE channel_id=?",
+                        [channel.id],
+                    )?;
+                    conn.execute("UPDATE channel_keys SET auth_invalid=0,rate_limit_count=0,cooldown_until=NULL,last_error='',generation=generation+1 WHERE channel_id=?", [channel.id])?;
+                    conn.execute("DELETE FROM channel_key_models WHERE key_id IN (SELECT id FROM channel_keys WHERE channel_id=?)", [channel.id])?;
+                } else {
+                    if previous.primary_model != channel.primary_model {
+                        // Primary diagnostics belong to the model; supplier cooldowns stay in force.
+                        channel.reset_primary_runtime();
+                        let health: Option<ModelHealth> = conn.query_row(
+                            "SELECT status,latency_ms,ttft_ms,error,checked_at FROM desktop_model_health WHERE channel_id=? AND model=?",
+                            params![channel.id, channel.primary_model], |row| {
+                                let checked: Option<String> = row.get(4)?;
+                                Ok(ModelHealth {
+                                    model: channel.primary_model.clone(), status: row.get(0)?,
+                                    latency_ms: row.get(1)?, ttft_ms: row.get(2)?, error: row.get(3)?,
+                                    checked_at: parse_time(checked.as_deref()),
+                                })
+                            },
+                        ).optional()?;
+                        if let Some(health) = health {
+                            channel.last_status = health.status;
+                            channel.last_latency_ms = health.latency_ms;
+                            channel.last_ttft_ms = health.ttft_ms;
+                            channel.last_error = health.error;
+                            channel.last_checked_at = health.checked_at;
+                        }
+                    }
+                    for model in
+                        std::iter::once(&previous.primary_model).chain(&previous.extra_models)
+                    {
+                        if !channel.has_model(model) {
+                            // Retain the epoch when removing a model, fencing old replies if it is added again.
+                            conn.execute("UPDATE channel_key_models SET unavailable_until='',rate_limit_count=0,generation=generation+1 WHERE key_id IN (SELECT id FROM channel_keys WHERE channel_id=?) AND model=?", params![channel.id, model])?;
+                            conn.execute("INSERT OR IGNORE INTO channel_key_models(key_id,model,unavailable_until,generation) SELECT id,?,'',1 FROM channel_keys WHERE channel_id=?", params![model, channel.id])?;
+                        }
+                    }
+                }
                 conn.execute(
                     "UPDATE desktop_channels SET
                      name=?, provider=?, api_mode=?, endpoint=?, api_key=?, primary_model=?, extra_models_json=?,
@@ -586,6 +872,10 @@ impl Store {
                 "DELETE FROM desktop_model_health WHERE channel_id = ?",
                 params![channel_id],
             )?;
+            conn.execute(
+                "DELETE FROM desktop_model_performance WHERE channel_id=?",
+                [channel_id],
+            )?;
             return Ok(());
         }
         let placeholders = vec!["?"; kept.len()].join(",");
@@ -599,6 +889,8 @@ impl Store {
         }
         let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         conn.execute(&sql, refs.as_slice())?;
+        let sql = format!("DELETE FROM desktop_model_performance WHERE channel_id=? AND model NOT IN ({placeholders})");
+        conn.execute(&sql, refs.as_slice())?;
         Ok(())
     }
 
@@ -611,21 +903,123 @@ impl Store {
         self.save_locked(&mut fresh)
     }
 
-    /// Persists an injection-check result without racing a concurrent edit.
-    pub fn set_injection(&self, id: i64, state: &str, tokens: i64, content: &str) -> Result<()> {
-        let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
-        let now = format_time(Utc::now());
+    pub(crate) fn record_probe_result<F: FnOnce(&mut Channel)>(
+        &self,
+        expected: &Channel,
+        health: &ModelHealth,
+        lease: &crate::key_pool::KeyLease,
+        mutate_headline: F,
+    ) -> Result<bool> {
+        let _guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let sql = format!("SELECT {CHANNEL_COLUMNS} FROM desktop_channels WHERE id=?");
+        let Some(mut fresh) = tx
+            .query_row(&sql, [expected.id], scan_channel_row)
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        let Some(checked_at) = health.checked_at else {
+            return Ok(false);
+        };
+        if !fresh.enabled
+            || !fresh.same_upstream(expected)
+            || !fresh.has_model(&health.model)
+            || !lease.is_current_in(&tx, &health.model)?
+        {
+            return Ok(false);
+        }
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT checked_at FROM desktop_model_health WHERE channel_id=? AND model=?",
+                params![expected.id, health.model],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if parse_time(previous.as_deref()).is_some_and(|time| time > checked_at) {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO desktop_model_health(channel_id,model,status,latency_ms,ttft_ms,error,checked_at) VALUES(?,?,?,?,?,?,?) \
+             ON CONFLICT(channel_id,model) DO UPDATE SET status=excluded.status,latency_ms=excluded.latency_ms,ttft_ms=excluded.ttft_ms,error=excluded.error,checked_at=excluded.checked_at",
+            params![expected.id, health.model, health.status, health.latency_ms, health.ttft_ms, health.error, format_time(checked_at)],
+        )?;
+        if fresh.primary_model == expected.primary_model
+            && fresh.primary_model == health.model
+            && !fresh.last_checked_at.is_some_and(|time| time > checked_at)
+        {
+            mutate_headline(&mut fresh);
+            tx.execute(
+                "UPDATE desktop_channels SET last_status=?,last_latency_ms=?,last_ttft_ms=?,last_ping_latency_ms=?,last_error=?,last_checked_at=?,probe_streak=?,failure_count=?,circuit_state=?,cooldown_until=? WHERE id=?",
+                params![fresh.last_status, fresh.last_latency_ms, fresh.last_ttft_ms, fresh.last_ping_latency_ms, fresh.last_error, fresh.last_checked_at.map(format_time), fresh.probe_streak, fresh.failure_count, fresh.circuit_state, fresh.cooldown_until.map(format_time), fresh.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Persist only diagnostics for the same upstream, credential epoch and primary model.
+    pub(crate) fn diagnostic_is_current(
+        &self,
+        expected: &Channel,
+        model: &str,
+        lease: &crate::key_pool::KeyLease,
+    ) -> Result<bool> {
+        let _guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
         let conn = self.lock();
-        let affected = conn.execute(
+        let sql = format!("SELECT {CHANNEL_COLUMNS} FROM desktop_channels WHERE id=?");
+        let Some(current) = conn
+            .query_row(&sql, [expected.id], scan_channel_row)
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        Ok(current.enabled
+            && current.same_upstream(expected)
+            && current.primary_model == expected.primary_model
+            && current.has_model(model)
+            && lease.is_current_in(&conn, model)?)
+    }
+
+    pub fn set_injection(
+        &self,
+        expected: &Channel,
+        lease: &crate::key_pool::KeyLease,
+        checked_at: DateTime<Utc>,
+        state: &str,
+        tokens: i64,
+        content: &str,
+    ) -> Result<bool> {
+        let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let sql = format!("SELECT {CHANNEL_COLUMNS} FROM desktop_channels WHERE id=?");
+        let Some(current) = tx
+            .query_row(&sql, [expected.id], scan_channel_row)
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        if !current.enabled
+            || !current.same_upstream(expected)
+            || current.primary_model != expected.primary_model
+            || current
+                .injection_checked_at
+                .is_some_and(|time| time > checked_at)
+            || !lease.is_current_in(&tx, &expected.primary_model)?
+        {
+            return Ok(false);
+        }
+        tx.execute(
             "UPDATE desktop_channels
              SET injection_state = ?, injection_tokens = ?, injection_content = ?, injection_checked_at = ?, updated_at = ?
              WHERE id = ?",
-            params![state, tokens, content, now, now, id],
+            params![state, tokens, content, format_time(checked_at), format_time(Utc::now()), expected.id],
         )?;
-        if affected == 0 {
-            return Err(StoreError::NotFound(id));
-        }
-        Ok(())
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn delete(&self, id: i64) -> Result<()> {
@@ -657,6 +1051,11 @@ impl Store {
         (rx, id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn log_subscriber_count(&self) -> usize {
+        self.subscribers.read().unwrap().len()
+    }
+
     pub fn unsubscribe(&self, id: u64) {
         self.subscribers
             .write()
@@ -666,10 +1065,11 @@ impl Store {
 
     /// Non-blocking broadcast so slow consumers never block gateway work.
     pub fn broadcast_log(&self, event: LogEvent) {
-        let subscribers = self.subscribers.read().unwrap_or_else(|p| p.into_inner());
-        for (_, tx) in subscribers.iter() {
-            let _ = tx.try_send(event.clone());
-        }
+        let mut subscribers = self.subscribers.write().unwrap_or_else(|p| p.into_inner());
+        subscribers.retain(|(_, tx)| match tx.try_send(event.clone()) {
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+        });
     }
 
     pub fn record_log(&self, log: &mut RequestLog) -> Result<()> {
@@ -1343,6 +1743,7 @@ fn scan_channel_row(row: &Row<'_>) -> rusqlite::Result<Channel> {
         updated_at: parse_time(updated.as_deref()),
         effective_interval_seconds: effective_interval_seconds(),
         model_health: Vec::new(),
+        model_performance: Vec::new(),
     })
 }
 
@@ -1375,6 +1776,495 @@ pub fn format_time(value: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_edits_reset_runtime_preserve_identity_and_fence_old_leases() {
+        use crate::{
+            key_pool::KeyPool,
+            resilience::{FailureClass, FailureInfo},
+        };
+        for field in ["endpoint", "provider", "api_mode"] {
+            let store = Store::open_in_memory().unwrap();
+            let mut channel = channel("source");
+            channel.enabled = true;
+            store.save(&mut channel).unwrap();
+            let pool = KeyPool::new(store.clone());
+            let old = pool
+                .acquire_for_channel(&channel, &channel.primary_model, &HashSet::new(), None)
+                .unwrap()
+                .unwrap();
+            old.failure(
+                &FailureInfo::new(FailureClass::RateLimit),
+                &channel.primary_model,
+            )
+            .unwrap();
+            let auth = pool
+                .acquire_probe_for_channel(&channel, &channel.primary_model, None)
+                .unwrap()
+                .unwrap();
+            auth.failure(
+                &crate::resilience::classify_status(401),
+                &channel.primary_model,
+            )
+            .unwrap();
+            channel.last_status = "error".into();
+            channel.last_error = "old upstream".into();
+            channel.last_latency_ms = Some(500);
+            channel.last_ttft_ms = Some(100);
+            channel.last_checked_at = Some(Utc::now());
+            channel.cooldown_until = Some(Utc::now() + chrono::Duration::minutes(5));
+            channel.circuit_state = "open".into();
+            channel.failure_count = 3;
+            channel.injection_state = "detected".into();
+            channel.injection_tokens = Some(500);
+            store.save(&mut channel).unwrap();
+            store
+                .set_model_health(
+                    channel.id,
+                    &ModelHealth {
+                        model: channel.primary_model.clone(),
+                        status: "error".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store
+                .record_model_ttft(&channel, &channel.primary_model, 100, Utc::now())
+                .unwrap();
+            let before = store.list_keys(channel.id).unwrap().remove(0);
+            channel.name = "renamed".into();
+            store.save(&mut channel).unwrap();
+            assert!(store.list_keys(channel.id).unwrap()[0].auth_invalid);
+            assert!(store.get(channel.id).unwrap().cooldown_until.is_some());
+            let previous = channel.clone();
+            match field {
+                "endpoint" => channel.endpoint = "https://new.test".into(),
+                "provider" => channel.provider = "anthropic".into(),
+                _ => channel.api_mode = "responses".into(),
+            }
+            store.save(&mut channel).unwrap();
+            let fresh = store.get(channel.id).unwrap();
+            assert_eq!(fresh.last_status, "unknown");
+            assert!(fresh.last_error.is_empty());
+            assert_eq!(fresh.failure_count, 0);
+            assert!(fresh.cooldown_until.is_none());
+            assert_eq!(fresh.circuit_state, "closed");
+            assert_eq!(fresh.injection_state, "unknown");
+            assert!(fresh.model_health.is_empty() && fresh.model_performance.is_empty());
+            let after = store.list_keys(channel.id).unwrap().remove(0);
+            assert_eq!(
+                (
+                    after.id,
+                    after.name,
+                    after.enabled,
+                    after.secret,
+                    after.attempts,
+                    after.rate_limits
+                ),
+                (
+                    before.id,
+                    before.name,
+                    before.enabled,
+                    before.secret,
+                    before.attempts,
+                    before.rate_limits
+                )
+            );
+            assert!(!after.auth_invalid && after.cooldown_until.is_none());
+            assert!(after.generation > before.generation);
+            assert!(!old.is_current(&channel.primary_model).unwrap());
+            assert!(pool
+                .acquire_for_channel(&previous, &channel.primary_model, &HashSet::new(), None)
+                .unwrap()
+                .is_none());
+            old.failure(
+                &FailureInfo::new(FailureClass::RateLimit),
+                &channel.primary_model,
+            )
+            .unwrap();
+            old.success(100, 20, &channel.primary_model).unwrap();
+            assert!(pool
+                .retry_after_model(channel.id, &channel.primary_model)
+                .is_zero());
+            assert!(pool
+                .acquire_for_channel(&fresh, &channel.primary_model, &HashSet::new(), None)
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                store.list_keys(channel.id).unwrap()[0].successes,
+                before.successes
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_cannot_overwrite_newer_live_health_or_edited_upstreams() {
+        use crate::{
+            key_pool::KeyPool,
+            resilience::{FailureClass, FailureInfo},
+        };
+        let store = Store::open_in_memory().unwrap();
+        let mut channel = channel("source");
+        channel.enabled = true;
+        store.save(&mut channel).unwrap();
+        let pool = KeyPool::new(store.clone());
+        let lease = pool
+            .acquire_probe_for_channel(&channel, &channel.primary_model, None)
+            .unwrap()
+            .unwrap();
+        let health = ModelHealth {
+            model: channel.primary_model.clone(),
+            status: "operational".into(),
+            checked_at: Some(Utc::now() - chrono::Duration::seconds(2)),
+            ..Default::default()
+        };
+        store
+            .record_model_outcome(
+                &channel,
+                &channel.primary_model,
+                false,
+                "new live failure",
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(!store
+            .record_probe_result(&channel, &health, &lease, |_| panic!("stale headline"))
+            .unwrap());
+        lease
+            .failure(
+                &FailureInfo::new(FailureClass::RateLimit),
+                &channel.primary_model,
+            )
+            .unwrap();
+        let newer = ModelHealth {
+            checked_at: Some(Utc::now()),
+            ..health.clone()
+        };
+        assert!(!store
+            .record_probe_result(&channel, &newer, &lease, |_| panic!("old epoch"))
+            .unwrap());
+        let fresh_lease = pool
+            .acquire_probe_for_channel(&channel, &channel.primary_model, None)
+            .unwrap()
+            .unwrap();
+        let old_channel = channel.clone();
+        channel.endpoint = "https://new.test".into();
+        store.save(&mut channel).unwrap();
+        assert!(!store
+            .record_probe_result(&old_channel, &newer, &fresh_lease, |_| panic!(
+                "old upstream"
+            ))
+            .unwrap());
+        assert!(!store
+            .set_injection(
+                &old_channel,
+                &fresh_lease,
+                Utc::now(),
+                "detected",
+                500,
+                "old"
+            )
+            .unwrap());
+        let fresh = pool
+            .acquire_probe_for_channel(&channel, &channel.primary_model, None)
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .set_injection(&channel, &fresh, Utc::now(), "clean", 20, "")
+            .unwrap());
+        assert!(!store
+            .set_injection(
+                &channel,
+                &fresh,
+                Utc::now() - chrono::Duration::seconds(2),
+                "detected",
+                500,
+                "old"
+            )
+            .unwrap());
+        assert_eq!(store.get(channel.id).unwrap().injection_state, "clean");
+        assert!(store.get(channel.id).unwrap().model_health.is_empty());
+    }
+
+    #[test]
+    fn cosmetic_endpoint_edits_keep_cooldowns_but_removed_models_fence_old_replies() {
+        use crate::{
+            key_pool::KeyPool,
+            resilience::{FailureClass, FailureInfo},
+        };
+        let store = Store::open_in_memory().unwrap();
+        let mut channel = channel("source");
+        channel.enabled = true;
+        channel.extra_models = vec!["extra".into()];
+        store.save(&mut channel).unwrap();
+        let pool = KeyPool::new(store.clone());
+        let lease = pool
+            .acquire_for_channel(&channel, "extra", &HashSet::new(), None)
+            .unwrap()
+            .unwrap();
+        let old = pool
+            .acquire_for_channel(&channel, "extra", &HashSet::new(), None)
+            .unwrap()
+            .unwrap();
+        lease
+            .failure(&FailureInfo::new(FailureClass::RateLimit), "extra")
+            .unwrap();
+        channel.endpoint += "/v1/";
+        store.save(&mut channel).unwrap();
+        assert!(!pool.retry_after_model(channel.id, "extra").is_zero());
+        channel.extra_models.clear();
+        store.save(&mut channel).unwrap();
+        assert!(pool.retry_after_model(channel.id, "extra").is_zero());
+        channel.extra_models.push("extra".into());
+        store.save(&mut channel).unwrap();
+        assert!(!old.is_current("extra").unwrap());
+        old.failure(&FailureInfo::new(FailureClass::RateLimit), "extra")
+            .unwrap();
+        assert!(pool
+            .acquire_for_channel(&channel, "extra", &HashSet::new(), None)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn live_ttft_is_smoothed_isolated_and_keeps_probe_data() {
+        let store = Store::open_in_memory().unwrap();
+        let mut ch = channel("one");
+        ch.extra_models = vec!["extra".into()];
+        store.save(&mut ch).unwrap();
+        let now = Utc::now();
+        store
+            .set_model_health(
+                ch.id,
+                &ModelHealth {
+                    model: "extra".into(),
+                    ttft_ms: Some(900),
+                    status: "operational".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.record_model_ttft(&ch, "extra", 100, now).unwrap();
+        store.record_model_ttft(&ch, "extra", 300, now).unwrap();
+        let saved = store.get(ch.id).unwrap();
+        let p = saved.fresh_model_performance("extra").unwrap();
+        assert_eq!(p.ttft_ms, 140.0);
+        assert_eq!(p.samples, 2);
+        assert_eq!(p.last_ttft_ms, 300);
+        assert_eq!(saved.model_health[0].ttft_ms, Some(900));
+        assert!(saved.fresh_model_performance(&ch.primary_model).is_none());
+        let mut other = channel("two");
+        store.save(&mut other).unwrap();
+        assert!(store.get(other.id).unwrap().model_performance.is_empty());
+        store.record_model_ttft(&ch, "extra", 0, now).unwrap();
+        store.record_model_ttft(&ch, "removed", 100, now).unwrap();
+        assert_eq!(store.get(ch.id).unwrap().model_performance[0].samples, 2);
+    }
+
+    #[test]
+    fn live_ttft_expires_resets_and_rejects_old_configuration() {
+        let store = Store::open_in_memory().unwrap();
+        let mut ch = channel("one");
+        store.save(&mut ch).unwrap();
+        let now = Utc::now();
+        store
+            .record_model_ttft(
+                &ch,
+                &ch.primary_model,
+                100,
+                now - chrono::Duration::minutes(31),
+            )
+            .unwrap();
+        assert!(store
+            .get(ch.id)
+            .unwrap()
+            .fresh_model_performance(&ch.primary_model)
+            .is_none());
+        store
+            .record_model_ttft(&ch, &ch.primary_model, 400, now)
+            .unwrap();
+        let saved = store.get(ch.id).unwrap();
+        assert_eq!(saved.model_performance[0].ttft_ms, 400.0);
+        assert_eq!(saved.model_performance[0].samples, 1);
+        ch.endpoint = "https://changed.test".into();
+        store.save(&mut ch).unwrap();
+        store
+            .record_model_ttft(&saved, &saved.primary_model, 200, now)
+            .unwrap();
+        assert!(store.get(ch.id).unwrap().model_performance.is_empty());
+        store
+            .record_model_ttft(&ch, &ch.primary_model, 200, now)
+            .unwrap();
+        ch.primary_model = "replacement".into();
+        store.save(&mut ch).unwrap();
+        assert!(store.get(ch.id).unwrap().model_performance.is_empty());
+    }
+
+    #[test]
+    fn primary_model_switch_resets_diagnostics_and_preserves_supplier_and_model_state() {
+        for has_health in [false, true] {
+            let store = Store::open_in_memory().unwrap();
+            let mut ch = channel("source");
+            let old_model = ch.primary_model.clone();
+            let now = Utc::now();
+            ch.extra_models = vec!["extra".into()];
+            ch.last_status = "operational".into();
+            ch.last_latency_ms = Some(900);
+            ch.last_ttft_ms = Some(800);
+            ch.last_ping_latency_ms = Some(100);
+            ch.last_checked_at = Some(now);
+            ch.probe_streak = 4;
+            ch.failure_count = 3;
+            ch.circuit_state = "open".into();
+            ch.cooldown_until = Some(now + chrono::Duration::minutes(5));
+            ch.injection_state = "detected".into();
+            ch.injection_tokens = Some(900);
+            ch.injection_content = "old primary content".into();
+            ch.injection_checked_at = Some(now);
+            store.save(&mut ch).unwrap();
+            store
+                .set_model_health(
+                    ch.id,
+                    &ModelHealth {
+                        model: old_model.clone(),
+                        status: "operational".into(),
+                        latency_ms: Some(900),
+                        ttft_ms: Some(800),
+                        checked_at: Some(now),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            if has_health {
+                store
+                    .set_model_health(
+                        ch.id,
+                        &ModelHealth {
+                            model: "extra".into(),
+                            status: "degraded".into(),
+                            latency_ms: Some(200),
+                            ttft_ms: Some(150),
+                            error: "slow extra model".into(),
+                            checked_at: Some(now),
+                        },
+                    )
+                    .unwrap();
+            }
+            store.record_model_ttft(&ch, &old_model, 80, now).unwrap();
+            store.record_model_ttft(&ch, "extra", 15, now).unwrap();
+            let pool = crate::key_pool::KeyPool::new(store.clone());
+            let lease = pool
+                .acquire_probe_for_channel(&ch, "extra", None)
+                .unwrap()
+                .unwrap();
+            lease
+                .failure(
+                    &crate::resilience::FailureInfo::new(
+                        crate::resilience::FailureClass::RateLimit,
+                    ),
+                    "extra",
+                )
+                .unwrap();
+            ch.primary_model = "extra".into();
+            ch.extra_models = vec![old_model.clone()];
+            store.save(&mut ch).unwrap();
+            let saved = store.get(ch.id).unwrap();
+            assert_eq!(
+                saved.last_status,
+                if has_health { "degraded" } else { "unknown" }
+            );
+            assert_eq!(saved.last_latency_ms, has_health.then_some(200));
+            assert_eq!(saved.last_ttft_ms, has_health.then_some(150));
+            assert_eq!(
+                saved.last_error,
+                if has_health { "slow extra model" } else { "" }
+            );
+            assert_eq!(saved.last_checked_at, has_health.then_some(now));
+            assert!(saved.last_ping_latency_ms.is_none());
+            assert_eq!(saved.probe_streak, 0);
+            assert_eq!(saved.injection_state, "unknown");
+            assert!(saved.injection_tokens.is_none() && saved.injection_checked_at.is_none());
+            assert!(saved.injection_content.is_empty());
+            assert_eq!(saved.failure_count, 3);
+            assert_eq!(saved.circuit_state, "open");
+            assert_eq!(
+                saved.cooldown_until,
+                Some(now + chrono::Duration::minutes(5))
+            );
+            assert_eq!(saved.model_health.len(), if has_health { 2 } else { 1 });
+            assert_eq!(saved.model_performance.len(), 2);
+            assert!(!pool.retry_after_model(ch.id, "extra").is_zero());
+        }
+    }
+
+    #[test]
+    fn secondary_diagnostics_require_current_configuration_and_credential_epochs() {
+        for change in [
+            "none", "key", "model", "upstream", "disabled", "primary", "epoch",
+        ] {
+            let store = Store::open_in_memory().unwrap();
+            let mut ch = channel("source");
+            ch.extra_models = vec!["extra".into()];
+            store.save(&mut ch).unwrap();
+            let expected = ch.clone();
+            let pool = crate::key_pool::KeyPool::new(store.clone());
+            let lease = pool
+                .acquire_probe_for_channel(&ch, "extra", None)
+                .unwrap()
+                .unwrap();
+            match change {
+                "key" => {
+                    store
+                        .patch_key(
+                            ch.id,
+                            lease.key.id,
+                            &crate::store_keys::KeyPatch {
+                                secret: Some("replacement".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                }
+                "model" => {
+                    ch.extra_models.clear();
+                    store.save(&mut ch).unwrap();
+                    ch.extra_models.push("extra".into());
+                    store.save(&mut ch).unwrap();
+                }
+                "upstream" => {
+                    ch.endpoint = "https://new.test".into();
+                    store.save(&mut ch).unwrap();
+                }
+                "disabled" => {
+                    ch.enabled = false;
+                    store.save(&mut ch).unwrap();
+                }
+                "primary" => {
+                    ch.extra_models.push(ch.primary_model.clone());
+                    ch.primary_model = "extra".into();
+                    store.save(&mut ch).unwrap();
+                }
+                "epoch" => {
+                    lease
+                        .failure(
+                            &crate::resilience::FailureInfo::new(
+                                crate::resilience::FailureClass::RateLimit,
+                            ),
+                            "extra",
+                        )
+                        .unwrap();
+                }
+                _ => {}
+            }
+            assert_eq!(
+                store
+                    .diagnostic_is_current(&expected, "extra", &lease)
+                    .unwrap(),
+                change == "none",
+                "{change}"
+            );
+        }
+    }
 
     fn channel(name: &str) -> Channel {
         Channel {

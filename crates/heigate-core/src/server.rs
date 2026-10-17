@@ -159,6 +159,16 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         .route("/system", get(handlers::system_info))
         .route("/settings", put(handlers::update_settings))
         .route("/clients/config", get(handlers::get_client_configs))
+        .route(
+            "/clients/codex/status",
+            get(handlers::get_codex_config_status),
+        )
+        .route("/clients/codex/apply", post(handlers::apply_codex_config))
+        .route(
+            "/clients/codex/restore",
+            post(handlers::restore_codex_config),
+        )
+        .route("/clients/probe", post(handlers::probe_client))
         .route("/clients/{id}/config", put(handlers::update_client_config))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn(same_origin_only));

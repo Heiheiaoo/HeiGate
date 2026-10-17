@@ -104,9 +104,9 @@ pub async fn check_injection_model(cfg: &Config, model: &str) -> InjectionReport
                     );
                 }
             }
-            Err(_) => {
-                report.state = INJECTION_CLEAN.to_string();
-                report.content = "满血原厂：无系统提示词注入".to_string();
+            Err(message) => {
+                report.state = INJECTION_ERROR.to_string();
+                report.message = truncate(&message, MAX_ERROR_SNIPPET);
             }
         }
         return report;
@@ -163,6 +163,16 @@ async fn inject_request(
                 "messages": [{"role": "user", "content": user_content}],
             }),
         )
+    } else if cfg.api_mode == super::API_MODE_RESPONSES {
+        (
+            "/v1/responses",
+            json!({
+                "model": cfg.primary_model,
+                "input": [{"role": "user", "content": user_content}],
+                "max_output_tokens": max_tokens,
+                "stream": false,
+            }),
+        )
     } else {
         (
             "/v1/chat/completions",
@@ -176,6 +186,7 @@ async fn inject_request(
     };
 
     let client = reqwest::Client::builder()
+        .redirect(super::upstream_redirect_policy())
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|err| err.to_string())?;
@@ -195,8 +206,8 @@ async fn inject_request(
 
     let response = request.send().await.map_err(|err| err.to_string())?;
     let status = response.status().as_u16();
-    let data = response.bytes().await.map_err(|err| err.to_string())?;
-    let data = &data[..data.len().min(MAX_ERROR_BODY_READ)];
+    let data = super::read_response_limited(response, MAX_ERROR_BODY_READ).await?;
+    let data = data.as_slice();
 
     if !(200..300).contains(&status) {
         return Err(format!(
@@ -208,16 +219,30 @@ async fn inject_request(
         ));
     }
 
+    decode_injection_response(&cfg, data)
+}
+
+fn decode_injection_response(cfg: &Config, data: &[u8]) -> Result<(i64, String), String> {
+    let raw = String::from_utf8_lossy(data);
+    if let Some((message, status)) = crate::api::upstream_error_payload(&raw) {
+        return Err(format!("upstream error {status}: {message}"));
+    }
     let value: serde_json::Value =
         serde_json::from_slice(data).map_err(|err| format!("decode response: {err}"))?;
-
+    let input_field =
+        if cfg.provider == PROVIDER_ANTHROPIC || cfg.api_mode == super::API_MODE_RESPONSES {
+            "input_tokens"
+        } else {
+            "prompt_tokens"
+        };
+    let prompt_tokens = value
+        .get("usage")
+        .and_then(|u| u.get(input_field))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|n| *n >= 0)
+        .ok_or_else(|| "上游未返回输入用量，无法判断注入情况".to_string())?;
+    let mut text = String::new();
     if cfg.provider == PROVIDER_ANTHROPIC {
-        let input_tokens = value
-            .get("usage")
-            .and_then(|u| u.get("input_tokens"))
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0);
-        let mut text = String::new();
         if let Some(blocks) = value.get("content").and_then(|c| c.as_array()) {
             for block in blocks {
                 if block.get("type").and_then(|t| t.as_str()) == Some("text") {
@@ -227,20 +252,24 @@ async fn inject_request(
                 }
             }
         }
-        return Ok((input_tokens, text));
-    }
-
-    let prompt_tokens = value
-        .get("usage")
-        .and_then(|u| u.get("prompt_tokens"))
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0);
-    let mut text = String::new();
-    if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
+    } else if cfg.api_mode == super::API_MODE_RESPONSES {
+        if let Some(output) = value.get("output").and_then(|o| o.as_array()) {
+            for item in output {
+                if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                    for block in content {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                text.push_str(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
             let message = choice.get("message");
-            let part = content_to_text(message.and_then(|m| m.get("content")));
-            text.push_str(&part);
+            text.push_str(&content_to_text(message.and_then(|m| m.get("content"))));
             if text.is_empty() {
                 if let Some(reasoning) = message
                     .and_then(|m| m.get("reasoning_content"))
@@ -250,6 +279,9 @@ async fn inject_request(
                 }
             }
         }
+    }
+    if text.trim().is_empty() {
+        return Err("上游未返回有效文本，无法完成注入检测".into());
     }
     Ok((prompt_tokens, text))
 }
@@ -296,5 +328,93 @@ mod tests {
         let report = check_injection_model(&cfg, "m").await;
         assert_eq!(report.state, INJECTION_ERROR);
         assert!(!report.message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn responses_injection_uses_responses_endpoint_and_decodes_output() {
+        use axum::{routing::post, Json};
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = seen.clone();
+        let app = axum::Router::new().route("/v1/responses", post(move |Json(body):Json<serde_json::Value>| {
+            let captured = captured.clone(); async move {
+                captured.lock().unwrap().push(body);
+                Json(json!({"usage":{"input_tokens":30},"output":[{"type":"message","content":[{"type":"output_text","text":"3"}]}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = Config {
+            provider: "openai".into(),
+            api_mode: "responses".into(),
+            endpoint: format!("http://{addr}/v1"),
+            primary_model: "model".into(),
+            ..Default::default()
+        };
+        let report = check_injection_model(&cfg, "model").await;
+        assert_eq!(report.state, INJECTION_CLEAN);
+        assert_eq!(report.prompt_tokens, 30);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["input"][0]["content"], "hi");
+        assert_eq!(seen[0]["max_output_tokens"], 16);
+        assert!(seen[0].get("messages").is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn error_payloads_in_either_detection_step_never_classify_a_model() {
+        use axum::{routing::post, Json};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        for failing_step in [0, 1] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let calls = count.clone();
+            let app = axum::Router::new().route("/v1/chat/completions", post(move || {
+                let calls = calls.clone(); async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == failing_step {
+                        Json(json!({"error":{"code":429,"message":"quota exceeded"}}))
+                    } else { Json(json!({"usage":{"prompt_tokens":30},"choices":[{"message":{"content":"3"}}]})) }
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let cfg = Config {
+                provider: "openai".into(),
+                endpoint: format!("http://{addr}"),
+                primary_model: "model".into(),
+                ..Default::default()
+            };
+            let report = check_injection_model(&cfg, "model").await;
+            assert_eq!(report.state, INJECTION_ERROR);
+            assert!(report.message.contains("quota exceeded"));
+            assert!(report.content.is_empty());
+            assert_eq!(count.load(Ordering::SeqCst), failing_step + 1);
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn injection_decoder_rejects_missing_evidence_but_accepts_empty_error_slots() {
+        let cfg = Config {
+            provider: "openai".into(),
+            ..Default::default()
+        };
+        for payload in [
+            json!({}),
+            json!({"choices":[{"message":{"content":"3"}}]}),
+            json!({"usage":{"prompt_tokens":10},"choices":[]}),
+        ] {
+            assert!(decode_injection_response(&cfg, payload.to_string().as_bytes()).is_err());
+        }
+        let payload = json!({"error":{},"usage":{"prompt_tokens":10},"choices":[{"message":{"content":"3"}}]});
+        assert_eq!(
+            decode_injection_response(&cfg, payload.to_string().as_bytes()).unwrap(),
+            (10, "3".into())
+        );
     }
 }

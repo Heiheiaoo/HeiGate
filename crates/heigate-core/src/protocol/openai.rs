@@ -45,6 +45,7 @@ pub struct StreamOptions {
 /// content parts; it is omitted entirely for tool-call-only assistant turns.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
 pub struct ChatMessage {
+    #[serde(default)]
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<Value>,

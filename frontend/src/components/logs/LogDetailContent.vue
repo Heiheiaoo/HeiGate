@@ -203,7 +203,7 @@ function parseTraceSteps(log: RequestLog): TraceStep[] {
         </div>
         <div class="m26-perf-card">
           <span class="label">首字耗时 (TTFT)</span>
-          <span class="val font-mono">{{ formatLatencySec(props.log.ttft_ms || props.log.latency_ms) }}</span>
+          <span class="val font-mono">{{ (props.log.ttft_ms ?? 0) > 0 ? formatLatencySec(props.log.ttft_ms) : '-' }}</span>
         </div>
         <div class="m26-perf-card">
           <span class="label">生成速率</span>

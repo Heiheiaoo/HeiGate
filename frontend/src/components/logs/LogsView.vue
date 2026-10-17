@@ -152,7 +152,7 @@ function duration(value?: number): string {
             <td class="whitespace-nowrap">
               <div class="flex items-center gap-1.5 flex-nowrap">
                 <span class="m26-pill-total">{{ duration(log.latency_ms) }}</span>
-                <span class="m26-pill-ttft">{{ duration(log.ttft_ms || log.latency_ms) }}</span>
+                <span class="m26-pill-ttft">{{ duration(log.ttft_ms) }}</span>
                 <span v-if="log.is_stream" class="m26-pill-stream">流</span>
               </div>
             </td>

@@ -9,7 +9,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Json;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -45,22 +44,9 @@ pub type SharedState = Arc<AppState>;
 const MAX_UPSTREAM_RESPONSE_BODY: usize = 2 << 20;
 
 async fn read_upstream_body(response: reqwest::Response) -> Result<Vec<u8>, ()> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_UPSTREAM_RESPONSE_BODY as u64)
-    {
-        return Err(());
-    }
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| ())?;
-        if body.len().saturating_add(chunk.len()) > MAX_UPSTREAM_RESPONSE_BODY {
-            return Err(());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    crate::probe::read_response_limited(response, MAX_UPSTREAM_RESPONSE_BODY)
+        .await
+        .map_err(|_| ())
 }
 
 fn ok_data(data: Value) -> Response {
@@ -282,28 +268,30 @@ pub async fn update_channel(
 
     // A blank or masked key means "keep the stored one".
     let mut input = input;
-    if input.api_key.trim().is_empty() || input.api_key.contains("***") {
+    let keep_key = input.api_key.trim().is_empty() || input.api_key.contains("***");
+    if keep_key {
         input.api_key = existing.api_key.clone();
     }
 
-    let incoming = match request_to_channel(input) {
+    let mut incoming = match request_to_channel(input) {
         Ok(channel) => channel,
         Err(err) => return probe_error_response(&err),
     };
 
-    let mut updated: Option<Channel> = None;
     let result = state.store.update_runtime(id, |fresh| {
+        if keep_key {
+            incoming.api_key.clone_from(&fresh.api_key);
+        }
         if fresh.interval_seconds != incoming.interval_seconds
             || fresh.primary_model != incoming.primary_model
         {
             fresh.probe_streak = 0;
         }
         copy_config_state(fresh, &incoming);
-        updated = Some(fresh.clone());
     });
     match result {
         Ok(()) => {
-            let updated = updated.unwrap_or(existing);
+            let updated = state.store.get(id).unwrap_or(existing);
             ok_data(json!(sanitize_channel(&updated)))
         }
         Err(err) => store_error_response(&err),
@@ -332,6 +320,21 @@ pub async fn duplicate_channel(State(state): State<SharedState>, Path(id): Path<
             json!({"data":sanitize_channel(&channel)}),
         ),
         Err(err) => store_error_response(&err),
+    }
+}
+
+pub async fn probe_client(Json(mut cfg): Json<probe::Config>) -> Response {
+    cfg.extra_models.clear();
+    match probe::run_once(&cfg).await {
+        Ok(mut results) => {
+            for result in &mut results {
+                if !cfg.api_key.is_empty() {
+                    result.message = result.message.replace(&cfg.api_key, "[REDACTED]");
+                }
+            }
+            ok_data(json!(results))
+        }
+        Err(err) => probe_error_response(&err),
     }
 }
 
@@ -408,7 +411,11 @@ pub async fn injection_check(
     let mut reports = Vec::new();
     let mut key_origins = Vec::new();
     for model in &models {
-        let lease = match state.gateway.key_pool.acquire_for_probe(id, model, None) {
+        let lease = match state
+            .gateway
+            .key_pool
+            .acquire_probe_for_channel(&channel, model, None)
+        {
             Ok(Some(lease)) => lease,
             _ => {
                 return json_response(
@@ -434,29 +441,40 @@ pub async fn injection_check(
                 report.message = report.message.replace(&lease.key.secret, "[REDACTED]");
                 report.content = report.content.replace(&lease.key.secret, "[REDACTED]");
             }
-            key_origins.push((lease.key.id, lease.key.name.clone()));
+            let accepted = if report.model == channel.primary_model {
+                match state.store.set_injection(
+                    &channel,
+                    &lease,
+                    report.checked_at,
+                    &report.state,
+                    report.prompt_tokens,
+                    &report.content,
+                ) {
+                    Ok(accepted) => accepted,
+                    Err(err) => return store_error_response(&err),
+                }
+            } else {
+                match state
+                    .store
+                    .diagnostic_is_current(&channel, &report.model, &lease)
+                {
+                    Ok(accepted) => accepted,
+                    Err(err) => return store_error_response(&err),
+                }
+            };
+            key_origins.push((lease.key.id, lease.key.name.clone(), accepted));
         }
         reports.extend(result);
-    }
-
-    // The channel column reflects the primary model.
-    if let Some(report) = reports.iter().find(|r| r.model == channel.primary_model) {
-        if let Err(err) =
-            state
-                .store
-                .set_injection(id, &report.state, report.prompt_tokens, &report.content)
-        {
-            return store_error_response(&err);
-        }
     }
 
     let reports: Vec<_> = reports
         .iter()
         .zip(key_origins)
-        .map(|(report, (id, name))| {
+        .map(|(report, (id, name, accepted))| {
             let mut value = json!(report);
             value["key_id"] = json!(id);
             value["key_name"] = json!(name);
+            value["accepted"] = json!(accepted);
             value
         })
         .collect();
@@ -812,12 +830,25 @@ pub async fn fetch_upstream_models(
             Ok(c) if c.enabled => c,
             _ => return json_response(StatusCode::CONFLICT, json!({"error":"渠道不可用"})),
         };
-        let lease =
-            match state
-                .gateway
-                .key_pool
-                .acquire(id, "", &std::collections::HashSet::new(), None)
-            {
+        if req.endpoint.trim().is_empty() {
+            req.endpoint = channel.endpoint.clone();
+        }
+        if req.provider.trim().is_empty() {
+            req.provider = channel.provider.clone();
+        }
+        if req.api_key.trim().is_empty() {
+            if !crate::probe::same_endpoint(&req.endpoint, &channel.endpoint) {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error":"Base URL 已修改，请提供新地址的 API Key 后获取模型"}),
+                );
+            }
+            let lease = match state.gateway.key_pool.acquire_for_channel(
+                &channel,
+                "",
+                &std::collections::HashSet::new(),
+                None,
+            ) {
                 Ok(Some(lease)) => lease,
                 _ => {
                     return json_response(
@@ -826,10 +857,11 @@ pub async fn fetch_upstream_models(
                     )
                 }
             };
-        req.endpoint = channel.endpoint;
-        req.provider = channel.provider;
-        req.api_key = lease.key.secret.clone();
-        Some(lease)
+            req.api_key = lease.key.secret.clone();
+            Some(lease)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -856,6 +888,7 @@ pub async fn fetch_upstream_models(
     }
 
     let client = match reqwest::Client::builder()
+        .redirect(crate::probe::upstream_redirect_policy())
         .timeout(Duration::from_secs(12))
         .build()
     {
@@ -961,6 +994,8 @@ pub struct DetectProtocolRequest {
     pub endpoint: String,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Automatically tests the endpoint for OpenAI and Anthropic protocol support.
@@ -968,19 +1003,46 @@ pub async fn detect_protocol(
     State(state): State<SharedState>,
     Json(mut req): Json<DetectProtocolRequest>,
 ) -> Response {
-    if let Some(id) = req.channel_id {
-        if let Ok(c) = state.store.get(id) {
-            req.endpoint = c.endpoint;
-            if let Ok(Some(lease)) =
-                state
-                    .gateway
-                    .key_pool
-                    .acquire(id, "", &std::collections::HashSet::new(), None)
-            {
-                req.api_key = lease.key.secret.clone();
-            }
+    let _lease = if let Some(id) = req.channel_id {
+        let channel = match state.store.get(id) {
+            Ok(channel) if channel.enabled => channel,
+            _ => return json_response(StatusCode::CONFLICT, json!({"error":"渠道不可用"})),
+        };
+        if req.endpoint.trim().is_empty() {
+            req.endpoint = channel.endpoint.clone();
         }
-    }
+        if req.model.as_deref().unwrap_or("").trim().is_empty() {
+            req.model = Some(channel.primary_model.clone());
+        }
+        if req.api_key.trim().is_empty() {
+            if !crate::probe::same_endpoint(&req.endpoint, &channel.endpoint) {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error":"Base URL 已修改，请提供新地址的 API Key 后检测"}),
+                );
+            }
+            let lease = match state.gateway.key_pool.acquire_for_channel(
+                &channel,
+                "",
+                &std::collections::HashSet::new(),
+                None,
+            ) {
+                Ok(Some(lease)) => lease,
+                _ => {
+                    return json_response(
+                        StatusCode::CONFLICT,
+                        json!({"error":"没有可用于协议检测的 Key"}),
+                    )
+                }
+            };
+            req.api_key = lease.key.secret.clone();
+            Some(lease)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let mut endpoint = req.endpoint.trim().to_string();
     if endpoint.is_empty() {
@@ -995,7 +1057,8 @@ pub async fn detect_protocol(
     endpoint = endpoint.trim_end_matches('/').to_string();
 
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .redirect(crate::probe::upstream_redirect_policy())
+        .timeout(Duration::from_secs(15))
         .build()
     {
         Ok(c) => c,
@@ -1008,18 +1071,13 @@ pub async fn detect_protocol(
     };
 
     let api_key = req.api_key.trim();
-    let url_lower = endpoint.to_lowercase();
-    let is_anthropic_domain = url_lower.contains("anthropic.com");
-
-    let mut supports_openai = false;
-    let mut supports_anthropic = false;
     let mut models: Vec<String> = Vec::new();
-    let mut openai_msg = String::new();
-    let mut anthropic_msg = String::new();
 
     // 1. Probe OpenAI endpoint (/v1/models and /models)
     let candidate_openai_urls = if endpoint.ends_with("/models") {
         vec![endpoint.clone()]
+    } else if endpoint.ends_with("/v1") {
+        vec![format!("{endpoint}/models")]
     } else {
         let mut u = vec![format!("{endpoint}/v1/models")];
         if !endpoint.ends_with("/v1") {
@@ -1037,141 +1095,193 @@ pub async fn detect_protocol(
             request = request.header("authorization", format!("Bearer {api_key}"));
         }
         if let Ok(res) = request.send().await {
-            let status = res.status().as_u16();
-            if let Ok(body) = res.bytes().await {
-                if status == 200 {
+            let status = res.status();
+            if let Ok(body) = read_upstream_body(res).await {
+                if status.is_success() {
                     let parsed = parse_model_list(&body);
                     if !parsed.is_empty() {
                         models = parsed;
-                    }
-                    supports_openai = true;
-                    openai_msg = "成功获取 OpenAI 模型列表".to_string();
-                    break;
-                } else if status == 401 || status == 400 || status == 403 {
-                    if let Ok(val) = serde_json::from_slice::<Value>(&body) {
-                        if val.get("error").is_some() {
-                            supports_openai = true;
-                            openai_msg = format!("端点响应 OpenAI 规范 (HTTP {status})");
-                            break;
-                        }
+                        break;
                     }
                 }
             }
         }
     }
 
-    // 2. Probe Anthropic endpoint (/v1/messages)
-    let anthropic_target = if endpoint.ends_with("/v1") {
-        format!("{endpoint}/messages")
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| models.first().map(String::as_str));
+    let base = endpoint.strip_suffix("/models").unwrap_or(&endpoint);
+    let base = if base.ends_with("/v1") {
+        base.to_string()
     } else {
-        format!("{endpoint}/v1/messages")
+        format!("{base}/v1")
     };
-    let mut ant_request = client
-        .post(&anthropic_target)
-        .header("content-type", "application/json")
-        .header("accept", "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .header("user-agent", "HeiGate/1.0")
-        .json(&serde_json::json!({
-            "model": "claude-3-7-sonnet-latest",
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1
-        }));
-    if !api_key.is_empty() && !api_key.contains("***") {
-        ant_request = ant_request.header("x-api-key", api_key);
-    }
-    if let Ok(res) = ant_request.send().await {
-        let status = res.status().as_u16();
-        if let Ok(body) = res.bytes().await {
-            if (200..300).contains(&status) {
-                supports_anthropic = true;
-                anthropic_msg = "Anthropic 消息接口响应正常 (HTTP 200)".to_string();
-            } else if let Ok(val) = serde_json::from_slice::<Value>(&body) {
-                if val.get("type").and_then(Value::as_str) == Some("error")
-                    || val.get("error").is_some()
-                {
-                    supports_anthropic = true;
-                    anthropic_msg = format!("端点识别为 Anthropic 协议 (HTTP {status})");
-                }
-            }
-        }
-    }
-
-    // 3. Probe Responses endpoint (/v1/responses)
-    let mut supports_responses = false;
-    let responses_target = if endpoint.ends_with("/v1") {
-        format!("{endpoint}/responses")
+    // The models route alone does not establish Chat support (Responses-only
+    // servers expose it too). Probe each generation route independently.
+    let (openai, anthropic, responses) = tokio::join!(
+        probe_protocol(
+            &client,
+            &base,
+            api_key,
+            "chat/completions",
+            json!({
+                "model": model.unwrap_or("gpt-4o-mini"), "messages": [{"role":"user","content":"ping"}], "max_tokens":16
+            })
+        ),
+        probe_protocol(
+            &client,
+            &base,
+            api_key,
+            "messages",
+            json!({
+                "model": model.unwrap_or("claude-3-7-sonnet-latest"), "messages": [{"role":"user","content":"ping"}], "max_tokens":16
+            })
+        ),
+        probe_protocol(
+            &client,
+            &base,
+            api_key,
+            "responses",
+            json!({
+                "model": model.unwrap_or("gpt-4o-mini"), "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}], "max_output_tokens":16
+            })
+        )
+    );
+    let detected_protocol = if openai.0 == Some(true) {
+        Some("openai-compatible")
+    } else if anthropic.0 == Some(true) {
+        Some("anthropic")
+    } else if responses.0 == Some(true) {
+        Some("openai-responses")
     } else {
-        format!("{endpoint}/v1/responses")
+        None
     };
-    let mut resp_request = client
-        .post(&responses_target)
-        .header("content-type", "application/json")
-        .header("accept", "application/json")
-        .header("user-agent", "HeiGate/1.0")
-        .json(&serde_json::json!({
-            "model": "gpt-4o",
-            "input": "ping"
-        }));
-    if !api_key.is_empty() && !api_key.contains("***") {
-        resp_request = resp_request.header("authorization", format!("Bearer {api_key}"));
-    }
-    if let Ok(res) = resp_request.send().await {
-        let status = res.status().as_u16();
-        if status != 404 && status != 405 && status != 502 && status != 504 {
-            if let Ok(body) = res.bytes().await {
-                if let Ok(val) = serde_json::from_slice::<Value>(&body) {
-                    if val.get("id").is_some()
-                        || val.get("output").is_some()
-                        || val.get("error").is_some()
-                    {
-                        supports_responses = true;
-                    }
-                }
-            }
-        }
-    }
-
-    let detected_protocol = if is_anthropic_domain || (supports_anthropic && !supports_openai) {
-        "anthropic"
-    } else if supports_openai {
-        "openai-compatible"
-    } else if supports_anthropic {
-        "anthropic"
-    } else {
-        if is_anthropic_domain {
-            "anthropic"
-        } else {
-            "openai-compatible"
-        }
-    };
-
-    let summary = if supports_openai && supports_anthropic {
-        "端点同时支持 OpenAI 兼容与 Anthropic 协议，已为您选中主流推荐".to_string()
-    } else if detected_protocol == "anthropic" {
-        if !anthropic_msg.is_empty() {
-            format!("已自动识别为 Anthropic 协议（{anthropic_msg}）")
-        } else {
-            "已根据端点特征自动识别为 Anthropic 原生协议".to_string()
-        }
-    } else if supports_openai {
-        if !openai_msg.is_empty() {
-            format!("已自动识别为 OpenAI 兼容协议（{openai_msg}）")
-        } else {
-            "已自动识别为 OpenAI 兼容协议".to_string()
-        }
-    } else {
-        "未识别到专属特征，已默认设为 OpenAI 兼容协议".to_string()
-    };
+    let summary = format!(
+        "Chat：{}；Anthropic：{}；Responses：{}",
+        openai.1, anthropic.1, responses.1
+    );
 
     ok_data(json!({
         "detected_protocol": detected_protocol,
-        "supports_openai": supports_openai,
-        "supports_anthropic": supports_anthropic,
-        "supports_responses": supports_responses,
+        "supports_openai": openai.0,
+        "supports_anthropic": anthropic.0,
+        "supports_responses": responses.0,
         "models": models,
         "message": summary
     }))
+}
+
+async fn probe_protocol(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    path: &str,
+    body: Value,
+) -> (Option<bool>, String) {
+    let mut request = client
+        .post(format!("{base}/{path}"))
+        .header("accept", "application/json")
+        .header("user-agent", "HeiGate/1.0")
+        .json(&body);
+    if !key.is_empty() && !key.contains("***") {
+        request = request.bearer_auth(key);
+        if path == "messages" {
+            request = request.header("x-api-key", key);
+        }
+    }
+    if path == "messages" {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                None,
+                if error.is_timeout() {
+                    "超时，未确认"
+                } else {
+                    "连接失败，未确认"
+                }
+                .into(),
+            )
+        }
+    };
+    let status = response.status().as_u16();
+    let body = match read_upstream_body(response).await {
+        Ok(body) => body,
+        Err(_) => return (None, "响应读取失败，未确认".into()),
+    };
+    let support = classify_protocol_probe(status, &body, path);
+    let message = match support {
+        Some(true) if (200..300).contains(&status) => format!("支持 (HTTP {status})"),
+        Some(true) => format!("接口存在，但请求未成功 (HTTP {status})"),
+        Some(false) => format!("接口不存在或不接受 POST (HTTP {status})"),
+        None => format!("未确认 (HTTP {status})"),
+    };
+    (support, message)
+}
+
+fn classify_protocol_probe(status: u16, body: &[u8], path: &str) -> Option<bool> {
+    let value = serde_json::from_slice::<Value>(body).ok();
+    if (200..300).contains(&status) {
+        let valid = value.as_ref().is_some_and(|v| match path {
+            "chat/completions" => v.get("choices").is_some_and(Value::is_array),
+            "messages" => {
+                v.get("type").and_then(Value::as_str) == Some("message")
+                    && v.get("content").is_some_and(Value::is_array)
+            }
+            "responses" => v.get("output").is_some_and(|output| {
+                output.is_array()
+                    || (v.get("object").and_then(Value::as_str) == Some("response")
+                        && output.get("type").and_then(Value::as_str) == Some("message")
+                        && output.get("content").is_some())
+            }),
+            _ => false,
+        });
+        return valid.then_some(true);
+    }
+    // Auth/rate-limit/proxy failures can happen before routing, so are not
+    // proof of either support or lack of support. Never expose raw error text.
+    if let Some(value) = value.as_ref() {
+        let error = value.get("error").unwrap_or(value);
+        let text = [
+            error.get("code"),
+            error.get("type"),
+            error.get("message"),
+            value.get("message"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+        if matches!(status, 400 | 404 | 422) && (text.contains("model") || text.contains("模型"))
+        {
+            return Some(true);
+        }
+        if status == 404
+            && (text.contains("route_not_found")
+                || text.contains("endpoint not found")
+                || text.contains("cannot post"))
+        {
+            return Some(false);
+        }
+    }
+    if status == 405
+        || (status == 404
+            && (body.is_empty()
+                || String::from_utf8_lossy(body)
+                    .trim()
+                    .eq_ignore_ascii_case("not found")))
+    {
+        return Some(false);
+    }
+    None
 }
 
 fn parse_model_list(body: &[u8]) -> Vec<String> {
@@ -1244,6 +1354,17 @@ pub struct ClientConfigPayload {
     pub launch_terminal: Option<bool>,
 }
 
+impl ClientConfigPayload {
+    fn effective_models(&self) -> Option<&[String]> {
+        if self.auto_enabled.unwrap_or(false) {
+            if let Some(models) = self.auto_models.as_deref().filter(|m| !m.is_empty()) {
+                return Some(models);
+            }
+        }
+        self.allowed_models.as_deref()
+    }
+}
+
 pub fn apply_hermes_local_config(
     gateway_key: &str,
     gateway_port: u16,
@@ -1277,8 +1398,132 @@ fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     })
 }
 
-fn yaml_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+/// Atomically writes secret-bearing files with owner-only permissions on Unix.
+/// The temp file is secured before any secret bytes are written.
+fn write_atomic_private(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".heigate.tmp");
+    let tmp = path.with_file_name(tmp_name);
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn restore_atomic_file(path: &std::path::Path, original: Option<&str>) -> std::io::Result<()> {
+    match original {
+        Some(content) => write_atomic(path, content),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+fn yaml_section<'a>(
+    map: &'a mut serde_yaml_ng::Mapping,
+    key: &str,
+) -> std::io::Result<&'a mut serde_yaml_ng::Mapping> {
+    use serde_yaml_ng::Value as Yaml;
+    let value = map.entry(Yaml::String(key.into())).or_insert(Yaml::Null);
+    if value.is_null() {
+        *value = Yaml::Mapping(Default::default());
+    }
+    value.as_mapping_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Hermes 配置中的 {key} 必须是 YAML 映射"),
+        )
+    })
+}
+
+fn merge_hermes_config(
+    content: &str,
+    base_url: &str,
+    model: &str,
+    allowed_models: &[String],
+) -> std::io::Result<String> {
+    use serde_yaml_ng::{Mapping, Value as Yaml};
+    let invalid = |err| std::io::Error::new(std::io::ErrorKind::InvalidData, err);
+    let mut document: Yaml = serde_yaml_ng::from_str(content).map_err(invalid)?;
+    if document.is_null() {
+        document = Yaml::Mapping(Mapping::new());
+    }
+    let root = document.as_mapping_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hermes 配置根节点必须是 YAML 映射",
+        )
+    })?;
+    let key = |s: &str| Yaml::String(s.to_string());
+    // Some installations start with a scalar model name, others a model mapping.
+    if root.get(key("model")).is_some_and(Yaml::is_string) {
+        root.insert(key("model"), Yaml::Mapping(Mapping::new()));
+    }
+    let config = yaml_section(root, "model")?;
+    for (name, value) in [
+        ("default", model),
+        ("provider", "bend"),
+        ("base_url", base_url),
+        ("key_env", "HERMES_CUSTOM_BEND_API_KEY"),
+        ("api_mode", "chat_completions"),
+    ] {
+        config.insert(key(name), key(value));
+    }
+    config.remove(key("api_key"));
+    let bend = yaml_section(yaml_section(root, "providers")?, "bend")?;
+    for (name, value) in [
+        ("name", "HeiGate"),
+        ("model", model),
+        ("base_url", base_url),
+        ("key_env", "HERMES_CUSTOM_BEND_API_KEY"),
+        ("api_mode", "chat_completions"),
+    ] {
+        bend.insert(key(name), key(value));
+    }
+    bend.remove(key("api_key"));
+    bend.insert(key("discover_models"), Yaml::Bool(true));
+    let old_models = bend
+        .get(key("models"))
+        .and_then(Yaml::as_mapping)
+        .cloned()
+        .unwrap_or_default();
+    let mut models = Mapping::new();
+    // The configured default must also be advertised when it is the Auto alias.
+    for name in std::iter::once(model).chain(allowed_models.iter().map(String::as_str)) {
+        models.insert(
+            key(name),
+            old_models
+                .get(key(name))
+                .cloned()
+                .unwrap_or(Yaml::Mapping(Mapping::new())),
+        );
+    }
+    bend.insert(key("models"), Yaml::Mapping(models));
+    root.entry(key("fallback_providers"))
+        .or_insert(Yaml::Sequence(Vec::new()));
+    serde_yaml_ng::to_string(&document).map_err(invalid)
 }
 
 fn apply_hermes_config_in_dir(
@@ -1291,126 +1536,54 @@ fn apply_hermes_config_in_dir(
     std::fs::create_dir_all(hermes_dir)?;
     let config_path = hermes_dir.join("config.yaml");
     let env_path = hermes_dir.join(".env");
-    let quoted_model = yaml_string(model);
-    let quoted_url = yaml_string(base_url);
-
-    if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        let backup_path = hermes_dir.join("config.yaml.heigate.bak");
-        // Keep the user's original config: later applies must not overwrite a
-        // backup that already exists with an already-modified copy.
-        if !backup_path.exists() {
-            std::fs::write(&backup_path, &content)?;
-        }
-
-        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-        let mut in_models_block = false;
-        let mut in_bend_provider = false;
-        let mut current_section = String::new();
-        let mut updated_lines = Vec::new();
-
-        for line in lines {
-            let trimmed = line.trim();
-            if !line.starts_with(' ') && !line.starts_with('\t') && trimmed.ends_with(':') {
-                current_section = trimmed.trim_end_matches(':').to_string();
-                in_bend_provider = false;
-            } else if current_section == "providers"
-                && line.starts_with("  ")
-                && !line.starts_with("    ")
-                && trimmed.ends_with(':')
-            {
-                in_bend_provider = trimmed == "bend:";
-            }
-
-            // Update base_url
-            if trimmed.starts_with("base_url:") && (current_section == "model" || in_bend_provider)
-            {
-                let indent = line.len() - line.trim_start().len();
-                let prefix = " ".repeat(indent);
-                updated_lines.push(format!("{prefix}base_url: {quoted_url}"));
-                continue;
-            }
-            // Update default under top-level model:
-            if current_section == "model" && trimmed.starts_with("default:") && !in_models_block {
-                let indent = line.len() - line.trim_start().len();
-                let prefix = " ".repeat(indent);
-                updated_lines.push(format!("{prefix}default: {quoted_model}"));
-                continue;
-            }
-            // Update model under providers.bend:
-            if in_bend_provider && trimmed.starts_with("model:") && line.starts_with("    model:") {
-                updated_lines.push(format!("    model: {quoted_model}"));
-                continue;
-            }
-            // Update models dictionary
-            if in_bend_provider && trimmed == "models:" && line.starts_with("    models:") {
-                in_models_block = true;
-                updated_lines.push("    models:".to_string());
-                if allowed_models.is_empty() {
-                    updated_lines.push(format!("      {}: {{}}", yaml_string(model)));
-                } else {
-                    for m in allowed_models {
-                        updated_lines.push(format!("      {}: {{}}", yaml_string(m)));
-                    }
-                }
-                continue;
-            }
-            if in_models_block {
-                if line.starts_with("      ") || (trimmed.is_empty() && in_models_block) {
-                    continue;
-                } else {
-                    in_models_block = false;
-                }
-            }
-            updated_lines.push(line);
-        }
-
-        let mut final_content = updated_lines.join("\n");
-        if !final_content.ends_with('\n') {
-            final_content.push('\n');
-        }
-        write_atomic(&config_path, &final_content)?;
+    let original = if config_path.exists() {
+        Some(std::fs::read_to_string(&config_path)?)
     } else {
-        let models = if allowed_models.is_empty() {
-            vec![model]
-        } else {
-            allowed_models.iter().map(String::as_str).collect()
-        };
-        let model_entries = models
-            .into_iter()
-            .map(|name| format!("      {}: {{}}", yaml_string(name)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = format!(
-            "model:\n  default: {quoted_model}\n  provider: bend\n  base_url: {quoted_url}\n  key_env: HERMES_CUSTOM_BEND_API_KEY\n  api_mode: chat_completions\nproviders:\n  bend:\n    name: HeiGate\n    base_url: {quoted_url}\n    model: {quoted_model}\n    discover_models: true\n    models:\n{model_entries}\n    key_env: HERMES_CUSTOM_BEND_API_KEY\nfallback_providers: []\n"
-        );
-        write_atomic(&config_path, &content)?;
-    }
-
-    {
-        let existed = env_path.exists();
-        let env_content = if existed {
-            std::fs::read_to_string(&env_path)?
-        } else {
-            String::new()
-        };
-        let key_line = format!("HERMES_CUSTOM_BEND_API_KEY={gateway_key}");
-        let re_key = regex::Regex::new(r"(?m)^HERMES_CUSTOM_BEND_API_KEY=.*$").unwrap();
-        let new_env = if re_key.is_match(&env_content) {
-            re_key.replace_all(&env_content, &key_line).to_string()
-        } else if env_content.is_empty() {
-            format!("{key_line}\n")
-        } else {
-            format!("{}\n{key_line}\n", env_content.trim_end_matches('\n'))
-        };
-        write_atomic(&env_path, &new_env)?;
-        #[cfg(unix)]
-        if !existed {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600))?;
+        None
+    };
+    let merged = merge_hermes_config(
+        original.as_deref().unwrap_or(""),
+        base_url,
+        model,
+        allowed_models,
+    )?;
+    let existed = env_path.exists();
+    let env_content = if existed {
+        std::fs::read_to_string(&env_path)?
+    } else {
+        String::new()
+    };
+    let key_line = format!("HERMES_CUSTOM_BEND_API_KEY={gateway_key}");
+    let re_key = regex::Regex::new(r"(?m)^HERMES_CUSTOM_BEND_API_KEY=.*$").unwrap();
+    let new_env = if re_key.is_match(&env_content) {
+        re_key
+            .replace_all(&env_content, regex::NoExpand(&key_line))
+            .to_string()
+    } else if env_content.is_empty() {
+        format!("{key_line}\n")
+    } else {
+        format!("{}\n{key_line}\n", env_content.trim_end_matches('\n'))
+    };
+    // Parse and prepare both files before changing either; invalid YAML or an
+    // unreadable .env must leave the user's existing configuration untouched.
+    if let Some(original) = original.as_deref() {
+        let backup = hermes_dir.join("config.yaml.heigate.bak");
+        if !backup.exists() {
+            std::fs::write(backup, original)?;
         }
     }
-
+    let write_result = write_atomic(&config_path, &merged)
+        .and_then(|()| write_atomic_private(&env_path, &new_env));
+    if let Err(error) = write_result {
+        let rollback = restore_atomic_file(&config_path, original.as_deref());
+        if rollback.is_err() {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("Hermes 配置写入失败: {error}；配置回滚失败，请检查 config.yaml"),
+            ));
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -1468,6 +1641,196 @@ pub async fn get_client_configs(State(state): State<SharedState>) -> Response {
     ok_data(Value::Object(map))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CodexApplyRequest {
+    pub model: String,
+    #[serde(default = "default_codex_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub channel_id: Option<i64>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub restart: bool,
+}
+
+fn default_codex_mode() -> String {
+    "gateway".into()
+}
+
+pub async fn get_codex_config_status() -> Response {
+    match tokio::task::spawn_blocking(crate::api::codex::status).await {
+        Ok(status) => ok_data(serde_json::to_value(status).unwrap_or(Value::Null)),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": format!("读取 Codex 配置状态失败: {error}") }),
+        ),
+    }
+}
+
+pub async fn apply_codex_config(
+    State(state): State<SharedState>,
+    Json(request): Json<CodexApplyRequest>,
+) -> Response {
+    let model = request.model.trim().to_string();
+    if model.is_empty() || model.len() > 256 {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "Codex 模型不能为空且最多 256 个字符" }),
+        );
+    }
+    let mode = request.mode.trim().to_ascii_lowercase();
+    if mode != "gateway" && mode != "direct" {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "Codex 接入模式无效" }),
+        );
+    }
+    if mode == "direct" && request.models.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "直连模式至少需要一个模型" }),
+        );
+    }
+    let direct_credentials = if mode == "direct" {
+        if let Some(channel_id) = request.channel_id {
+            let channel = match state.store.get(channel_id) {
+                Ok(channel) => channel,
+                Err(err) => return store_error_response(&err),
+            };
+            if !channel.enabled {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": "所选渠道已禁用，无法配置 Codex 直连" }),
+                );
+            }
+            if channel.provider != "openai" {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": "Codex 直连只支持 OpenAI 兼容或 Responses 渠道" }),
+                );
+            }
+            if !channel.has_model(&model)
+                || request.models.iter().any(|model| !channel.has_model(model))
+            {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": "Codex 模型目录只能包含所选渠道已配置的模型" }),
+                );
+            }
+            let now = chrono::Utc::now();
+            let cooling_keys = match state.store.model_cooling_key_ids(channel_id, &model) {
+                Ok(keys) => keys,
+                Err(err) => return store_error_response(&err),
+            };
+            let key = match state.store.list_keys(channel_id) {
+                Ok(keys) => keys.into_iter().find(|key| {
+                    key.enabled
+                        && !key.auth_invalid
+                        && !cooling_keys.contains(&key.id)
+                        && !key.cooldown_until.is_some_and(|until| until > now)
+                        && !key.secret.trim().is_empty()
+                }),
+                Err(err) => return store_error_response(&err),
+            };
+            let Some(key) = key else {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": "所选渠道没有可用 Key，请启用一把未冷却的 Key 后重试" }),
+                );
+            };
+            (Some(channel.endpoint), Some(key.secret))
+        } else {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                json!({ "error": "直连模式必须选择 HeiGate 中已保存的渠道，密钥不会通过前端明文提交" }),
+            );
+        }
+    } else {
+        (None, None)
+    };
+    let options = crate::api::codex::CodexApplyOptions {
+        model,
+        gateway_base_url: format!("http://127.0.0.1:{}/codex/v1", state.gateway_port),
+        gateway_key: state.gateway_key.clone(),
+        mode,
+        direct_base_url: direct_credentials.0,
+        direct_key: direct_credentials.1,
+        direct_models: request.models,
+    };
+    let restart = request.restart;
+    match tokio::task::spawn_blocking(move || {
+        let status = crate::api::codex::apply(&options)?;
+        let restart_result = if restart {
+            Some(crate::api::codex::restart())
+        } else {
+            None
+        };
+        Ok::<_, String>((status, restart_result))
+    })
+    .await
+    {
+        Ok(Ok((status, restart_message))) => ok_data(json!({
+            "status": "ok",
+            "message": codex_apply_message(options_mode_label(&status), restart_message),
+            "config": status,
+        })),
+        Ok(Err(error)) => json_response(StatusCode::BAD_REQUEST, json!({ "error": error })),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": format!("应用 Codex 配置失败: {error}") }),
+        ),
+    }
+}
+
+fn options_mode_label(status: &crate::api::codex::CodexConfigStatus) -> &'static str {
+    if status.provider.as_deref() == Some("heigate_direct") {
+        "direct"
+    } else {
+        "gateway"
+    }
+}
+
+fn codex_apply_message(mode: &str, restart: Option<Result<String, String>>) -> String {
+    let mode_label = if mode == "direct" { "直连" } else { "网关" };
+    match restart {
+        Some(Ok(message)) => format!("已应用 Codex {mode_label}配置。{message}"),
+        Some(Err(error)) => format!(
+            "已应用 Codex {mode_label}配置，但自动重启失败：{error}。请手动重新打开 Codex。"
+        ),
+        None => "已应用 Codex 配置。请重启 Codex 使配置和模型目录生效。".to_string(),
+    }
+}
+
+pub async fn restore_codex_config() -> Response {
+    match tokio::task::spawn_blocking(|| {
+        let status = crate::api::codex::restore()?;
+        let restart = crate::api::codex::restart();
+        Ok::<_, String>((status, restart))
+    })
+    .await
+    {
+        Ok(Ok((status, restart))) => {
+            let message = match restart {
+                Ok(message) => format!("已恢复接管前的 Codex 配置。{message}"),
+                Err(error) => format!(
+                    "已恢复接管前的 Codex 配置，但自动重启失败：{error}。请手动重新打开 Codex。"
+                ),
+            };
+            ok_data(json!({
+                "status": "ok",
+                "message": message,
+                "config": status,
+            }))
+        }
+        Ok(Err(error)) => json_response(StatusCode::BAD_REQUEST, json!({ "error": error })),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": format!("恢复 Codex 配置失败: {error}") }),
+        ),
+    }
+}
+
 /// Applies the local side effects of saving the Hermes client config (config
 /// rewrite, gateway restart, terminal launch). Blocking by nature — file I/O
 /// and child processes — so callers must run it via `spawn_blocking`.
@@ -1475,8 +1838,85 @@ fn run_hermes_actions(
     payload: &ClientConfigPayload,
     gateway_key: &str,
     gateway_port: u16,
-) -> String {
+) -> Result<String, String> {
+    run_hermes_actions_with(
+        payload,
+        || apply_hermes_payload(payload, gateway_key, gateway_port),
+        |terminal| {
+            if terminal {
+                launch_hermes_terminal()
+            } else {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let hermes_bin = std::path::PathBuf::from(home).join(".local/bin/hermes");
+                let bin = if hermes_bin.exists() {
+                    hermes_bin
+                } else {
+                    "hermes".into()
+                };
+                checked_command(
+                    std::process::Command::new(bin)
+                        .arg("gateway")
+                        .arg("restart"),
+                )
+            }
+        },
+    )
+}
+
+fn checked_command(command: &mut std::process::Command) -> Result<(), String> {
+    let out = command.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+fn launch_hermes_terminal() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        checked_command(
+            std::process::Command::new("osascript")
+                .arg("-e")
+                .arg("tell application \"Terminal\" to do script \"hermes\""),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台不支持自动打开终端，请手动运行 hermes".into())
+    }
+}
+
+fn run_hermes_actions_with(
+    payload: &ClientConfigPayload,
+    apply: impl FnOnce() -> Result<(), String>,
+    mut launch: impl FnMut(bool) -> Result<(), String>,
+) -> Result<String, String> {
     let mut msg = String::new();
+    if payload.apply_local.unwrap_or(false) {
+        apply().map_err(|e| format!("更新 Hermes 本地配置失败: {e}"))?;
+        msg.push_str("已更新 Hermes 本地配置。");
+    }
+    if payload.restart.unwrap_or(false) {
+        launch(false).map_err(|e| format!("Hermes 重启失败: {e}"))?;
+        msg.push_str(" 已成功重启 Hermes 网关服务。");
+    }
+    if payload.launch_terminal.unwrap_or(false) {
+        launch(true).map_err(|e| format!("启动 Hermes 终端失败: {e}"))?;
+        msg.push_str(" 已在终端启动 Hermes 对话。");
+    }
+    Ok(msg.trim().to_string())
+}
+
+fn apply_hermes_payload(
+    payload: &ClientConfigPayload,
+    gateway_key: &str,
+    gateway_port: u16,
+) -> Result<(), String> {
     if payload.apply_local.unwrap_or(false) {
         let auto_on = payload.auto_enabled.unwrap_or(false);
         let m = if auto_on {
@@ -1495,43 +1935,9 @@ fn run_hermes_actions(
         } else {
             payload.allowed_models.as_deref().unwrap_or(&[])
         };
-        match apply_hermes_local_config(gateway_key, gateway_port, m, am) {
-            Ok(_) => msg.push_str("已更新 Hermes 本地配置 (~/.hermes/config.yaml & .env)。"),
-            Err(e) => msg.push_str(&format!("更新本地配置失败: {e}。")),
-        }
+        apply_hermes_local_config(gateway_key, gateway_port, m, am).map_err(|e| e.to_string())?;
     }
-    if payload.restart.unwrap_or(false) {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let hermes_bin = std::path::PathBuf::from(&home).join(".local/bin/hermes");
-        let bin = if hermes_bin.exists() {
-            hermes_bin.to_string_lossy().to_string()
-        } else {
-            "hermes".to_string()
-        };
-        match std::process::Command::new(bin)
-            .arg("gateway")
-            .arg("restart")
-            .output()
-        {
-            Ok(out) => {
-                if out.status.success() {
-                    msg.push_str(" 已成功重启 Hermes 网关服务！");
-                } else {
-                    let err_str = String::from_utf8_lossy(&out.stderr);
-                    msg.push_str(&format!(" Hermes 重启响应: {}", err_str.trim()));
-                }
-            }
-            Err(e) => msg.push_str(&format!(" 执行重启命令失败: {e}")),
-        }
-    }
-    if payload.launch_terminal.unwrap_or(false) {
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg("tell application \"Terminal\" to do script \"hermes\"")
-            .output();
-        msg.push_str(" 已在终端启动 Hermes 对话。");
-    }
-    msg.trim().to_string()
+    Ok(())
 }
 
 pub async fn update_client_config(
@@ -1543,6 +1949,16 @@ pub async fn update_client_config(
         return unknown_client_response(&client_id);
     }
     let client_id = normalize_client_id(&client_id);
+    if client_id != "hermes"
+        && (payload.apply_local.unwrap_or(false)
+            || payload.restart.unwrap_or(false)
+            || payload.launch_terminal.unwrap_or(false))
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "此客户端仅支持保存网关设置，请手动配置和启动客户端"}),
+        );
+    }
     let key = format!("client_config_{client_id}");
     let serialized = match serde_json::to_string(&payload) {
         Ok(s) => s,
@@ -1565,8 +1981,16 @@ pub async fn update_client_config(
             run_hermes_actions(&actions_payload, &gateway_key, gateway_port)
         })
         .await
-        .unwrap_or_else(|err| format!("执行 Hermes 操作失败: {err}"));
-        return ok_data(json!({ "status": "ok", "client_id": client_id, "message": msg }));
+        .unwrap_or_else(|err| Err(format!("执行 Hermes 操作失败: {err}")));
+        return match msg {
+            Ok(message) => {
+                ok_data(json!({ "status": "ok", "client_id": client_id, "message": message }))
+            }
+            Err(error) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": format!("网关设置已保存，但本地操作未完成：{error}"), "gateway_saved": true }),
+            ),
+        };
     }
 
     ok_data(json!({ "status": "ok", "client_id": client_id }))
@@ -1608,17 +2032,7 @@ async fn forward_with_proto_and_client(
                 _ => route_strategy(&state.store, &HashMap::new()),
             }
         };
-        let models = if cfg.auto_enabled.unwrap_or(false)
-            && cfg
-                .auto_models
-                .as_ref()
-                .map(|m| !m.is_empty())
-                .unwrap_or(false)
-        {
-            cfg.auto_models
-        } else {
-            cfg.allowed_models
-        };
+        let models = cfg.effective_models().map(<[String]>::to_vec);
         (strat, cfg.allowed_channels, models)
     } else {
         (route_strategy(&state.store, &HashMap::new()), None, None)
@@ -1649,7 +2063,7 @@ async fn forward_with_proto(
     path: String,
     body: axum::body::Bytes,
 ) -> Response {
-    forward_with_proto_and_client(state, proto, headers, path, body, None).await
+    forward_with_proto_and_client(state, proto, headers, path, body, Some("generic".into())).await
 }
 
 pub async fn forward_messages(
@@ -1889,17 +2303,7 @@ pub async fn gateway_models(
     State(state): State<SharedState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let channels = match state.store.list() {
-        Ok(channels) => channels,
-        Err(err) => return store_error_response(&err),
-    };
-    let cfg = get_client_config(&state.store, "generic");
-    build_gateway_models_response(
-        &channels,
-        &params,
-        cfg.allowed_models.as_deref(),
-        cfg.auto_enabled.unwrap_or(false),
-    )
+    gateway_client_models(State(state), Path("generic".into()), Query(params)).await
 }
 
 /// Handles `GET /{client}/v1/models`.
@@ -1916,7 +2320,7 @@ pub async fn gateway_client_models(
         Ok(chans) => chans,
         Err(err) => return store_error_response(&err),
     };
-    let filtered_channels: Vec<_> = if let Some(allowed) = cfg.allowed_channels {
+    let filtered_channels: Vec<_> = if let Some(ref allowed) = cfg.allowed_channels {
         if !allowed.is_empty() {
             channels
                 .into_iter()
@@ -1929,27 +2333,36 @@ pub async fn gateway_client_models(
         channels
     };
     let auto_on = cfg.auto_enabled.unwrap_or(false);
-    build_gateway_models_response(
-        &filtered_channels,
-        &params,
-        cfg.allowed_models.as_deref(),
-        auto_on,
-    )
+    build_gateway_models_response(&filtered_channels, &params, cfg.effective_models(), auto_on)
+}
+
+struct LogSubscription {
+    store: Arc<Store>,
+    id: u64,
+}
+
+impl Drop for LogSubscription {
+    fn drop(&mut self) {
+        self.store.unsubscribe(self.id);
+    }
 }
 
 /// Streams request-log events as SSE.
 pub async fn stream_logs(State(state): State<SharedState>) -> Response {
     let (receiver, sub_id) = state.store.subscribe_logs();
-    let store = state.store.clone();
+    let subscription = LogSubscription {
+        store: state.store.clone(),
+        id: sub_id,
+    };
 
     let stream = futures_util::stream::unfold(
-        (receiver, sub_id, store, false),
-        |(mut receiver, sub_id, store, sent_connected)| async move {
+        (receiver, subscription, false),
+        |(mut receiver, subscription, sent_connected)| async move {
             if !sent_connected {
                 let frame = "event: connected\ndata: {\"connected\":true}\n\n".to_string();
                 return Some((
                     Ok::<_, std::convert::Infallible>(Bytes::from(frame)),
-                    (receiver, sub_id, store, true),
+                    (receiver, subscription, true),
                 ));
             }
             let mut ticker = tokio::time::interval(Duration::from_secs(15));
@@ -1966,7 +2379,7 @@ pub async fn stream_logs(State(state): State<SharedState>) -> Response {
                                 _ => ("message", "{}".to_string()),
                             };
                             let frame = format!("event: {kind}\ndata: {payload}\n\n");
-                            Some((Ok(Bytes::from(frame)), (receiver, sub_id, store, true)))
+                            Some((Ok(Bytes::from(frame)), (receiver, subscription, true)))
                         }
                         None => None,
                     }
@@ -1976,7 +2389,7 @@ pub async fn stream_logs(State(state): State<SharedState>) -> Response {
                         "event: ping\ndata: {{\"ts\":{}}}\n\n",
                         chrono::Utc::now().timestamp_millis()
                     );
-                    Some((Ok(Bytes::from(frame)), (receiver, sub_id, store, true)))
+                    Some((Ok(Bytes::from(frame)), (receiver, subscription, true)))
                 }
             }
         },
@@ -2005,6 +2418,7 @@ mod settings_tests {
     use crate::api::gateway::Gateway;
     use crate::router::Router as ChannelRouter;
     use crate::runner::ProbeRunner;
+    use axum::response::IntoResponse;
 
     fn test_state() -> SharedState {
         let store = Store::open_in_memory().unwrap();
@@ -2018,6 +2432,15 @@ mod settings_tests {
             gateway_port: 28888,
             version: "test".into(),
         })
+    }
+
+    #[test]
+    fn codex_apply_keeps_configuration_success_separate_from_restart_failure() {
+        let message =
+            codex_apply_message("gateway", Some(Err("Codex could not be launched".into())));
+        assert!(message.contains("已应用 Codex 网关配置"));
+        assert!(message.contains("自动重启失败"));
+        assert!(message.contains("请手动重新打开 Codex"));
     }
 
     #[tokio::test]
@@ -2078,11 +2501,156 @@ mod settings_tests {
                 endpoint: "".into(),
                 api_key: "".into(),
                 channel_id: None,
+                model: None,
             }),
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn saved_detection_credentials_are_bound_to_the_saved_endpoint_and_draft_keys_win() {
+        let received = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let seen = received.clone();
+        let app = axum::Router::new().fallback(move |headers: HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push((
+                    headers.get("authorization").and_then(|h| h.to_str().ok()).unwrap_or("").to_string(),
+                    headers.get("x-api-key").and_then(|h| h.to_str().ok()).unwrap_or("").to_string(),
+                ));
+                Json(json!({"choices":[],"type":"message","content":[],"output":[],"data":[{"id":"model"}]}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let endpoint = format!("http://{address}");
+        let state = test_state();
+        let mut channel = Channel {
+            name: "saved".into(),
+            enabled: true,
+            provider: "openai".into(),
+            endpoint: endpoint.clone(),
+            primary_model: "model".into(),
+            api_key: "saved-secret".into(),
+            ..Default::default()
+        };
+        state.store.save(&mut channel).unwrap();
+        let response = detect_protocol(
+            State(state.clone()),
+            Json(DetectProtocolRequest {
+                channel_id: Some(channel.id),
+                endpoint: format!("{endpoint}/draft"),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(received.lock().unwrap().is_empty());
+        assert_eq!(state.store.list_keys(channel.id).unwrap()[0].attempts, 0);
+        for (url, api_key, expected) in [
+            (format!("{endpoint}/v1/"), "", "saved-secret"),
+            (format!("{endpoint}/draft"), "draft-secret", "draft-secret"),
+            (endpoint, "explicit-secret", "explicit-secret"),
+        ] {
+            let response = detect_protocol(
+                State(state.clone()),
+                Json(DetectProtocolRequest {
+                    channel_id: Some(channel.id),
+                    endpoint: url,
+                    api_key: api_key.into(),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let requests = std::mem::take(&mut *received.lock().unwrap());
+            assert!(!requests.is_empty());
+            for (authorization, key) in requests {
+                assert_eq!(authorization, format!("Bearer {expected}"));
+                if !key.is_empty() {
+                    assert_eq!(key, expected);
+                }
+            }
+        }
+        assert_eq!(state.store.list_keys(channel.id).unwrap()[0].attempts, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn model_listing_uses_draft_endpoints_and_explicit_keys_without_leaking_saved_keys() {
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = axum::Router::new().fallback({
+            let received = received.clone();
+            move |uri: axum::http::Uri, headers: HeaderMap| {
+                let received = received.clone();
+                async move {
+                    received.lock().unwrap().push((
+                        uri.path().to_string(),
+                        headers["authorization"].to_str().unwrap().to_string(),
+                    ));
+                    Json(json!({"data":[{"id":"draft-model"}]}))
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = test_state();
+        let mut channel = Channel {
+            enabled: true,
+            endpoint: endpoint.clone(),
+            provider: "openai".into(),
+            primary_model: "model".into(),
+            api_key: "saved-secret".into(),
+            ..Default::default()
+        };
+        state.store.save(&mut channel).unwrap();
+        let response = fetch_upstream_models(
+            State(state.clone()),
+            Json(UpstreamModelsRequest {
+                channel_id: Some(channel.id),
+                endpoint: format!("{endpoint}/draft"),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(received.lock().unwrap().is_empty());
+        for (url, secret, expected_path, expected_secret) in [
+            (format!("{endpoint}/v1/"), "", "/v1/models", "saved-secret"),
+            (
+                format!("{endpoint}/draft"),
+                "draft-key",
+                "/draft/models",
+                "draft-key",
+            ),
+            (endpoint, "explicit-key", "/models", "explicit-key"),
+        ] {
+            let response = fetch_upstream_models(
+                State(state.clone()),
+                Json(UpstreamModelsRequest {
+                    channel_id: Some(channel.id),
+                    endpoint: url,
+                    api_key: secret.into(),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response_json(response).await["data"][0], "draft-model");
+            assert_eq!(
+                std::mem::take(&mut *received.lock().unwrap()),
+                vec![(
+                    expected_path.to_string(),
+                    format!("Bearer {expected_secret}")
+                )]
+            );
+        }
+        assert_eq!(state.store.list_keys(channel.id).unwrap()[0].attempts, 1);
+        server.abort();
     }
 
     #[tokio::test]
@@ -2177,10 +2745,728 @@ mod settings_tests {
             std::fs::read_to_string(dir.join("config.yaml.heigate.bak")).unwrap(),
             original
         );
-        assert!(std::fs::read_to_string(dir.join("config.yaml"))
-            .unwrap()
-            .contains("\"second\""));
+        let saved: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(dir.join("config.yaml")).unwrap())
+                .unwrap();
+        assert_eq!(saved["model"]["default"].as_str(), Some("second"));
         assert!(!dir.join("config.yaml.heigate.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_env_permissions_are_restricted_even_when_file_already_exists() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "heigate-hermes-env-mode-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), "model: {}\n").unwrap();
+        let env_path = dir.join(".env");
+        std::fs::write(&env_path, "EXISTING_SECRET=keep\n").unwrap();
+        std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        apply_hermes_config_in_dir(&dir, "new-key", "http://localhost/hermes/v1", "Auto", &[])
+            .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&env_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(std::fs::read_to_string(env_path)
+            .unwrap()
+            .contains("HERMES_CUSTOM_BEND_API_KEY=new-key"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_hermes_env_write_rolls_back_the_config_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "heigate-hermes-rollback-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original_config = "model:\n  default: original\n";
+        let original_env = "EXISTING_SECRET=keep\n";
+        std::fs::write(dir.join("config.yaml"), original_config).unwrap();
+        std::fs::write(dir.join(".env"), original_env).unwrap();
+        // Block the .env temp-file path so the first atomic write succeeds and
+        // the second one fails before replacing the existing environment file.
+        std::fs::create_dir(dir.join(".env.heigate.tmp")).unwrap();
+
+        assert!(apply_hermes_config_in_dir(
+            &dir,
+            "new-key",
+            "http://localhost/hermes/v1",
+            "Auto",
+            &[],
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.yaml")).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".env")).unwrap(),
+            original_env
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    async fn response_json(response: Response) -> Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn protocol_detection_accepts_root_and_v1_base_urls() {
+        let app = axum::Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async { Json(json!({"data":[{"id":"gpt-test"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body["model"], "gpt-test");
+                    Json(json!({"choices":[]}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for suffix in ["", "/v1", "/v1/"] {
+            let response = detect_protocol(
+                State(test_state()),
+                Json(DetectProtocolRequest {
+                    endpoint: format!("http://{address}{suffix}"),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            let body = response_json(response).await;
+            assert_eq!(body["data"]["supports_openai"], true, "suffix: {suffix}");
+            assert_eq!(body["data"]["models"], json!(["gpt-test"]));
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn protocol_detection_uses_real_models_and_compatible_messages_auth() {
+        let app = axum::Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async { Json(json!({"data":[{"id":"qwen3.8-27b"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body["model"], "qwen3.8-27b");
+                    Json(json!({"choices":[]}))
+                }),
+            )
+            .route(
+                "/v1/messages",
+                axum::routing::post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["authorization"], "Bearer test-key");
+                    assert_eq!(headers["x-api-key"], "test-key");
+                    assert_eq!(headers["anthropic-version"], "2023-06-01");
+                    assert_eq!(body["model"], "qwen3.8-27b");
+                    assert_eq!(body["max_tokens"], 16);
+                    Json(json!({"type":"message","content":[]}))
+                }),
+            )
+            .route(
+                "/v1/responses",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body["model"], "qwen3.8-27b");
+                    assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+                    Json(json!({"output":[]}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let body = response_json(
+            detect_protocol(
+                State(test_state()),
+                Json(DetectProtocolRequest {
+                    endpoint: format!("http://{address}"),
+                    api_key: "test-key".into(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+        for protocol in [
+            "supports_openai",
+            "supports_anthropic",
+            "supports_responses",
+        ] {
+            assert_eq!(body["data"][protocol], true, "{body}");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn protocol_detection_selects_responses_only_and_prioritizes_selected_model() {
+        let app = axum::Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async { Json(json!({"data":[{"id":"unusable-model"}]})) }),
+            )
+            .route(
+                "/v1/responses",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body["model"], "senseaudio-s2");
+                    Json(json!({"output":[]}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let body = response_json(
+            detect_protocol(
+                State(test_state()),
+                Json(DetectProtocolRequest {
+                    endpoint: format!("http://{address}/v1/"),
+                    model: Some("senseaudio-s2".into()),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["data"]["supports_openai"], false);
+        assert_eq!(body["data"]["supports_anthropic"], false);
+        assert_eq!(body["data"]["supports_responses"], true);
+        assert_eq!(body["data"]["detected_protocol"], "openai-responses");
+        server.abort();
+    }
+
+    #[test]
+    fn protocol_detection_distinguishes_model_errors_routes_and_uncertainty() {
+        assert_eq!(
+            classify_protocol_probe(200, br#"{"object":"response","output":{"type":"message","role":"assistant","content":"pong"}}"#, "responses"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_protocol_probe(200, br#"{"output":{"unexpected":true}}"#, "responses"),
+            None
+        );
+        for body in [
+            json!({"error":{"code":"model_not_found","message":"Unknown model"}}),
+            json!({"message":"model does not exist","code":404}),
+            json!({"message":"模型不存在"}),
+        ] {
+            assert_eq!(
+                classify_protocol_probe(404, body.to_string().as_bytes(), "responses"),
+                Some(true)
+            );
+        }
+        assert_eq!(
+            classify_protocol_probe(
+                404,
+                br#"{"error":{"message":"endpoint not found"}}"#,
+                "messages"
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            classify_protocol_probe(404, b"Not Found", "responses"),
+            Some(false)
+        );
+        assert_eq!(classify_protocol_probe(405, b"", "responses"), Some(false));
+        for status in [401, 403, 429, 500, 502, 504] {
+            assert_eq!(
+                classify_protocol_probe(status, br#"{"error":"failure"}"#, "responses"),
+                None
+            );
+        }
+        assert_eq!(
+            classify_protocol_probe(404, br#"{"error":"not found"}"#, "responses"),
+            None
+        );
+        assert_eq!(
+            classify_protocol_probe(200, b"<html>login</html>", "responses"),
+            None
+        );
+        assert_eq!(
+            classify_protocol_probe(200, br#"{"error":"failure"}"#, "messages"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_detection_connection_failure_does_not_choose_a_protocol() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let body = response_json(
+            detect_protocol(
+                State(test_state()),
+                Json(DetectProtocolRequest {
+                    endpoint: format!("http://{address}"),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert!(body["data"]["supports_openai"].is_null());
+        assert!(body["data"]["supports_anthropic"].is_null());
+        assert!(body["data"]["supports_responses"].is_null());
+        assert!(body["data"]["detected_protocol"].is_null());
+        assert!(body["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("连接失败"));
+    }
+
+    #[tokio::test]
+    async fn draft_probe_sends_the_exact_model_and_key_and_redacts_upstream_errors() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post({
+                let calls = calls.clone();
+                move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let calls = calls.clone();
+                    async move {
+                        let key = headers["authorization"].to_str().unwrap().to_string();
+                        calls.lock().unwrap().push((key.clone(), body));
+                        if key == "Bearer invalid-draft-key" {
+                            (
+                                StatusCode::UNAUTHORIZED,
+                                Json(json!({"error":"invalid-draft-key is invalid"})),
+                            ).into_response()
+                        } else {
+                            (
+                                [("content-type", "text/event-stream")],
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"42\"}}]}\n\ndata: [DONE]\n\n",
+                            ).into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (key, expected) in [
+            ("valid-draft-key", "operational"),
+            ("invalid-draft-key", "error"),
+        ] {
+            let response = probe_client(Json(probe::Config {
+                provider: "openai".into(),
+                api_mode: "chat_completions".into(),
+                endpoint: format!("http://{address}/v1"),
+                api_key: key.into(),
+                primary_model: "draft-model".into(),
+                extra_models: vec!["must-not-be-called".into()],
+                ..Default::default()
+            }))
+            .await;
+            let body = response_json(response).await;
+            assert_eq!(body["data"][0]["status"], expected);
+            assert!(body["data"][0]["latency_ms"].is_number());
+            assert!(!body.to_string().contains(key));
+        }
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "Bearer valid-draft-key");
+        assert_eq!(calls[1].0, "Bearer invalid-draft-key");
+        assert!(calls.iter().all(|(_, body)| body["model"] == "draft-model"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unsupported_client_actions_are_rejected_without_persisting_them() {
+        let state = test_state();
+        for client in ["codex", "claude-desktop", "claude-code", "generic"] {
+            let response = update_client_config(
+                State(state.clone()),
+                Path(client.into()),
+                Json(ClientConfigPayload {
+                    apply_local: Some(true),
+                    restart: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(get_client_config(&state.store, client)
+                .apply_local
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn failed_hermes_apply_never_restarts_and_process_errors_are_propagated() {
+        let payload = ClientConfigPayload {
+            apply_local: Some(true),
+            restart: Some(true),
+            ..Default::default()
+        };
+        let result = run_hermes_actions_with(
+            &payload,
+            || Err("disk full".into()),
+            |_| panic!("must not launch after failed apply"),
+        );
+        assert!(result.unwrap_err().contains("disk full"));
+        let result = run_hermes_actions_with(&payload, || Ok(()), |_| Err("exit code 1".into()));
+        assert!(result.unwrap_err().contains("exit code 1"));
+        let payload = ClientConfigPayload {
+            launch_terminal: Some(true),
+            ..Default::default()
+        };
+        let result = run_hermes_actions_with(
+            &payload,
+            || Ok(()),
+            |terminal| {
+                assert!(terminal);
+                Err("terminal unavailable".into())
+            },
+        );
+        assert!(result.unwrap_err().contains("terminal unavailable"));
+    }
+
+    #[test]
+    fn command_exit_status_is_checked() {
+        let executable = std::env::current_exe().unwrap();
+        assert!(checked_command(std::process::Command::new(&executable).arg("--list")).is_ok());
+        assert!(checked_command(
+            std::process::Command::new(&executable).arg("--heigate-invalid-option")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn hermes_merge_replaces_connection_fields_and_preserves_unrelated_configuration() {
+        let original = r#"
+model: {default: old, provider: anthropic, base_url: 'https://old.example', key_env: OLD_KEY, api_key: old-secret, temperature: 0.4}
+providers:
+  other: {base_url: 'https://other.example', custom: keep}
+  bend:
+    api_key: stale-secret
+    timeout: 42
+    models: {keep-model: {context_length: 1234}, obsolete: {}}
+fallback_providers: [other]
+mcp_servers: {filesystem: {command: node, args: [script.js]}}
+custom_setting: true
+"#;
+        let merged = merge_hermes_config(
+            original,
+            "http://127.0.0.1:28889/hermes/v1",
+            "Auto",
+            &["keep-model".into(), "model: with spaces".into()],
+        )
+        .unwrap();
+        let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&merged).unwrap();
+        assert_eq!(value["model"]["provider"].as_str(), Some("bend"));
+        assert_eq!(value["model"]["default"].as_str(), Some("Auto"));
+        assert_eq!(
+            value["model"]["key_env"].as_str(),
+            Some("HERMES_CUSTOM_BEND_API_KEY")
+        );
+        assert_eq!(
+            value["model"]["api_mode"].as_str(),
+            Some("chat_completions")
+        );
+        assert_eq!(
+            value["model"]["base_url"].as_str(),
+            Some("http://127.0.0.1:28889/hermes/v1")
+        );
+        assert!(value["model"].get("api_key").is_none());
+        let bend = &value["providers"]["bend"];
+        assert!(bend.get("api_key").is_none());
+        assert_eq!(bend["base_url"], value["model"]["base_url"]);
+        assert_eq!(bend["key_env"], value["model"]["key_env"]);
+        assert_eq!(bend["timeout"].as_i64(), Some(42));
+        assert_eq!(
+            bend["models"]["keep-model"]["context_length"].as_i64(),
+            Some(1234)
+        );
+        assert!(bend["models"].get("Auto").is_some());
+        assert!(bend["models"].get("model: with spaces").is_some());
+        assert!(bend["models"].get("obsolete").is_none());
+        let old: serde_yaml_ng::Value = serde_yaml_ng::from_str(original).unwrap();
+        for field in ["mcp_servers", "fallback_providers", "custom_setting"] {
+            assert_eq!(value[field], old[field]);
+        }
+        assert_eq!(value["providers"]["other"], old["providers"]["other"]);
+        assert_eq!(value["model"]["temperature"], old["model"]["temperature"]);
+    }
+
+    #[test]
+    fn hermes_merge_fills_missing_provider_and_supports_scalar_or_empty_configs() {
+        for original in [
+            "",
+            "model: old-model\n",
+            "model:\n  default: old\n",
+            "model: null\nproviders: null\n",
+        ] {
+            let merged = merge_hermes_config(
+                original,
+                "http://127.0.0.1:28888/hermes/v1",
+                "gpt-test",
+                &[],
+            )
+            .unwrap();
+            let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&merged).unwrap();
+            assert_eq!(value["model"]["provider"].as_str(), Some("bend"));
+            assert_eq!(
+                value["providers"]["bend"]["model"].as_str(),
+                Some("gpt-test")
+            );
+            assert_eq!(
+                value["providers"]["bend"]["api_mode"].as_str(),
+                Some("chat_completions")
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_hermes_yaml_does_not_change_either_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "heigate-yaml-invalid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for original in ["model: [unterminated", "model: {}\nproviders: []\n"] {
+            std::fs::write(dir.join("config.yaml"), original).unwrap();
+            std::fs::write(dir.join(".env"), "EXISTING_SECRET=keep\n").unwrap();
+            assert!(apply_hermes_config_in_dir(
+                &dir,
+                "new-key",
+                "http://localhost/hermes/v1",
+                "Auto",
+                &[]
+            )
+            .is_err());
+            assert_eq!(
+                std::fs::read_to_string(dir.join("config.yaml")).unwrap(),
+                original
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join(".env")).unwrap(),
+                "EXISTING_SECRET=keep\n"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_routes_share_model_channel_and_strategy_policy() {
+        use tower::ServiceExt;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let upstream = axum::Router::new().route("/v1/chat/completions",axum::routing::post({
+            let calls = calls.clone();
+            move |headers: HeaderMap| { let calls = calls.clone(); async move {
+                calls.lock().unwrap().push(headers["authorization"].to_str().unwrap().to_string());
+                Json(json!({"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}))
+            }}
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let state = test_state();
+        for name in ["excluded", "selected"] {
+            let mut channel = Channel {
+                name: name.into(),
+                provider: "openai".into(),
+                api_mode: "chat_completions".into(),
+                endpoint: format!("http://{address}"),
+                api_key: format!("{name}-key"),
+                primary_model: "gpt-a".into(),
+                extra_models: vec![if name == "selected" {
+                    "gpt-b".into()
+                } else {
+                    "gpt-c".into()
+                }],
+                enabled: true,
+                ..Default::default()
+            };
+            state.store.save(&mut channel).unwrap();
+        }
+        let result = update_client_config(
+            State(state.clone()),
+            Path("generic".into()),
+            Json(ClientConfigPayload {
+                allowed_channels: Some(vec!["selected".into()]),
+                allowed_models: Some(vec!["gpt-a".into()]),
+                strategy: Some("manual_priority".into()),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(result.status(), StatusCode::OK);
+        let app = crate::server::router(
+            state,
+            std::env::temp_dir().join("heigate-missing-test-static-dir"),
+        )
+        .layer(axum::Extension(axum::extract::ConnectInfo(
+            "127.0.0.1:30000".parse::<std::net::SocketAddr>().unwrap(),
+        )));
+        for prefix in ["/v1", "/generic/v1"] {
+            let request = axum::http::Request::builder()
+                .uri(format!("{prefix}/models"))
+                .header("host", "127.0.0.1")
+                .header("authorization", "Bearer test")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let models = response_json(response).await;
+            assert_eq!(models["data"].as_array().unwrap().len(), 1);
+            assert_eq!(models["data"][0]["id"], "gpt-a");
+            for endpoint in ["messages", "chat/completions", "responses"] {
+                let request = axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("{prefix}/{endpoint}"))
+                    .header("host", "127.0.0.1")
+                    .header("authorization", "Bearer test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-b","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "{prefix}/{endpoint}"
+                );
+            }
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("{prefix}/chat/completions"))
+                .header("host", "127.0.0.1")
+                .header("authorization", "Bearer test")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-a","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let _ = response_json(response).await;
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["Bearer selected-key", "Bearer selected-key"]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_log_stream_releases_subscription_before_and_after_polling() {
+        use futures_util::StreamExt;
+        let state = test_state();
+        for _ in 0..5 {
+            let response = stream_logs(State(state.clone())).await;
+            assert_eq!(state.store.log_subscriber_count(), 1);
+            drop(response);
+            assert_eq!(state.store.log_subscriber_count(), 0);
+            let response = stream_logs(State(state.clone())).await;
+            let mut body = response.into_body().into_data_stream();
+            assert!(body
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .starts_with(b"event: connected"));
+            assert_eq!(state.store.log_subscriber_count(), 1);
+            drop(body);
+            assert_eq!(state.store.log_subscriber_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn model_listing_and_forwarding_share_auto_allowlist_and_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                Json(json!({"choices":[{"message":{"role":"assistant","content":"ok"}}]}))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = test_state();
+        let mut channel = Channel {
+            name: "test".into(),
+            provider: "openai".into(),
+            api_mode: "chat_completions".into(),
+            endpoint: format!("http://{addr}"),
+            api_key: "test".into(),
+            primary_model: "model-A".into(),
+            extra_models: vec!["model-B".into()],
+            enabled: true,
+            ..Default::default()
+        };
+        state.store.save(&mut channel).unwrap();
+        for (enabled, auto_models, expected, denied) in [
+            (true, vec!["model-B"], "model-B", "model-A"),
+            (true, vec![], "model-A", "model-B"),
+            (false, vec!["model-B"], "model-A", "model-B"),
+        ] {
+            for client in ["generic", "hermes"] {
+                state.store.set_setting(&format!("client_config_{client}"), &json!({"auto_enabled":enabled,"auto_models":auto_models,"allowed_models":["model-A"]}).to_string()).unwrap();
+                let response = gateway_client_models(
+                    State(state.clone()),
+                    Path(client.into()),
+                    Query(HashMap::from([("raw".into(), "1".into())])),
+                )
+                .await;
+                let bytes = axum::body::to_bytes(response.into_body(), 10000)
+                    .await
+                    .unwrap();
+                let payload: Value = serde_json::from_slice(&bytes).unwrap();
+                let listed = payload["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| m["id"].as_str().unwrap())
+                    .filter(|m| *m != "Auto")
+                    .collect::<Vec<_>>();
+                assert_eq!(listed, vec![expected]);
+                for (model, status) in [(expected, StatusCode::OK), (denied, StatusCode::FORBIDDEN)]
+                {
+                    let body = Bytes::from(
+                        json!({"model":model,"messages":[{"role":"user","content":"hi"}]})
+                            .to_string(),
+                    );
+                    let response = if client == "generic" {
+                        forward_chat_completions(State(state.clone()), HeaderMap::new(), body).await
+                    } else {
+                        forward_client_chat_completions(
+                            State(state.clone()),
+                            Path(client.into()),
+                            HeaderMap::new(),
+                            body,
+                        )
+                        .await
+                    };
+                    assert_eq!(response.status(), status);
+                    axum::body::to_bytes(response.into_body(), 10000)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        server.abort();
     }
 }

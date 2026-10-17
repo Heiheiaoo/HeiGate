@@ -103,3 +103,63 @@ fn key_edit_preserves_cooldown_and_replacement_increments_generation() {
     assert_eq!(store.list_keys(ch.id).unwrap()[0].generation, 1);
     assert_eq!(store.get(ch.id).unwrap().api_key, "new-secret");
 }
+
+#[test]
+fn model_cooldown_is_scoped_to_the_channel_and_model() {
+    let store = Store::open_in_memory().unwrap();
+    let ch = channel(&store);
+    store
+        .add_key(
+            ch.id,
+            &KeyInput {
+                name: "other".into(),
+                secret: "secret-2".into(),
+            },
+        )
+        .unwrap();
+    let keys = store.list_keys(ch.id).unwrap();
+    let until = (Utc::now() + chrono::Duration::minutes(2)).to_rfc3339();
+    store
+        .lock()
+        .execute(
+            "INSERT INTO channel_key_models(key_id,model,unavailable_until) VALUES(?,?,?)",
+            params![keys[0].id, "model-a", until],
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.model_cooling_key_ids(ch.id, "model-a").unwrap(),
+        [keys[0].id].into_iter().collect()
+    );
+    assert!(store
+        .model_cooling_key_ids(ch.id, "model-b")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn model_epoch_migration_preserves_existing_cooldowns_and_is_idempotent() {
+    let store = Store::open_in_memory().unwrap();
+    let ch = channel(&store);
+    let key = store.list_keys(ch.id).unwrap()[0].id;
+    let until = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+    store.lock().execute_batch("DROP TABLE channel_key_models; CREATE TABLE channel_key_models(
+        key_id INTEGER NOT NULL REFERENCES channel_keys(id) ON DELETE CASCADE,
+        model TEXT NOT NULL, unavailable_until TEXT NOT NULL, rate_limit_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(key_id,model));").unwrap();
+    store
+        .lock()
+        .execute(
+            "INSERT INTO channel_key_models VALUES(?,?,?,?)",
+            params![key, "gpt-a", until, 2],
+        )
+        .unwrap();
+    for _ in 0..2 {
+        store.initialize_keys().unwrap();
+    }
+    let saved: (String,i64,i64) = store.lock().query_row(
+        "SELECT unavailable_until,rate_limit_count,generation FROM channel_key_models WHERE key_id=? AND model='gpt-a'",
+        [key],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).unwrap();
+    assert_eq!(saved, (until, 2, 0));
+}

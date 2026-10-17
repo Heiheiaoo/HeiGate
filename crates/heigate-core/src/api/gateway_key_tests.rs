@@ -16,7 +16,13 @@ async fn setup(mode: &'static str) -> (Gateway, i64, Calls, Server) {
     let address = listener.local_addr().unwrap();
     let app=axum::Router::new().route("/v1/chat/completions",post(move |State(calls):State<Calls>,headers:HeaderMap,Json(body):Json<serde_json::Value>|async move {
         let key=headers.get("authorization").unwrap().to_str().unwrap().to_string();
+        let requested_model = body["model"].as_str().unwrap_or("").to_string();
         calls.lock().unwrap().push((key.clone(),body));
+        if requested_model == "gpt-4o" && matches!(mode, "model429" | "model404" | "model500" | "model400" | "mixed") {
+            let status = match mode { "model404" => 404, "model500" | "mixed" => 500, "model400" => 400, _ => 429 };
+            return json_error(StatusCode::from_u16(status).unwrap(), "primary model unavailable");
+        }
+        if mode == "mixed" { return json_error(StatusCode::TOO_MANY_REQUESTS, "backup rate limited"); }
         if mode=="all429" || (mode=="first429" && key.ends_with("key-a")) {
             let mut response=json_error(StatusCode::TOO_MANY_REQUESTS,&format!("rate limit {key}"));
             response.headers_mut().insert("retry-after",HeaderValue::from_static("1"));
@@ -399,4 +405,293 @@ async fn model_error_does_not_affect_other_models_of_same_supplier() {
         .unwrap();
     assert_eq!(probe_results.len(), 1);
     assert!(!probe_results[0].message.contains("没有可用于探活的 Key"));
+}
+
+async fn forward_auto_for_strategy(gateway: &Gateway, strategy: &str, models: Option<Vec<String>>) {
+    let response = gateway
+        .forward(
+            GatewayProtocol::Chat,
+            &HeaderMap::new(),
+            request(),
+            &RequestContext {
+                strategy: strategy.into(),
+                allowed_models: models,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+}
+
+fn add_routing_backup(gateway: &Gateway, id: i64) -> i64 {
+    let mut backup = gateway.store.get(id).unwrap();
+    backup.id = 0;
+    backup.name = "Backup".into();
+    backup.api_key = "backup-key".into();
+    backup.last_status = "operational".into();
+    backup.last_latency_ms = Some(500);
+    backup.injection_state = "clean".into();
+    gateway.store.save(&mut backup).unwrap();
+    gateway
+        .store
+        .set_model_health(
+            backup.id,
+            &crate::store::ModelHealth {
+                model: "gpt-4o".into(),
+                status: "operational".into(),
+                latency_ms: Some(500),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    backup.id
+}
+
+#[tokio::test]
+async fn auto_keeps_detected_injection_as_fallback_under_every_strategy() {
+    for strategy in ["smart_quality", "latency", "round_robin", "manual_priority"] {
+        let (gateway, id, calls, _server) = setup("ok").await;
+        let mut fast = gateway.store.get(id).unwrap();
+        fast.last_status = "operational".into();
+        fast.last_latency_ms = Some(10);
+        fast.injection_state = "detected".into();
+        gateway.store.save(&mut fast).unwrap();
+        add_routing_backup(&gateway, id);
+        for _ in 0..3 {
+            forward_auto_for_strategy(&gateway, strategy, None).await;
+        }
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(key, _)| key == "Bearer backup-key"),
+            "strategy: {strategy}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn auto_round_robin_rotates_suppliers_despite_different_changing_latencies() {
+    let (gateway, id, calls, _server) = setup("ok").await;
+    let mut fast = gateway.store.get(id).unwrap();
+    fast.last_status = "operational".into();
+    fast.last_latency_ms = Some(10);
+    gateway.store.save(&mut fast).unwrap();
+    add_routing_backup(&gateway, id);
+    for _ in 0..4 {
+        forward_auto_for_strategy(&gateway, "round_robin", None).await;
+    }
+    let backup_turns: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(key, _)| key == "Bearer backup-key")
+        .collect();
+    assert_eq!(backup_turns, [false, true, false, true]);
+}
+
+#[tokio::test]
+async fn auto_manual_priority_selects_the_first_model_even_when_another_is_faster() {
+    let (gateway, id, calls, _server) = setup("ok").await;
+    let mut channel = gateway.store.get(id).unwrap();
+    channel.last_status = "operational".into();
+    channel.last_latency_ms = Some(500);
+    channel.extra_models = vec!["gpt-4.1".into()];
+    gateway.store.save(&mut channel).unwrap();
+    gateway
+        .store
+        .set_model_health(
+            id,
+            &crate::store::ModelHealth {
+                model: "gpt-4o".into(),
+                status: "operational".into(),
+                latency_ms: Some(500),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    gateway
+        .store
+        .set_model_health(
+            id,
+            &crate::store::ModelHealth {
+                model: "gpt-4.1".into(),
+                status: "operational".into(),
+                latency_ms: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for (strategy, expected) in [("manual_priority", "gpt-4o"), ("latency", "gpt-4.1")] {
+        forward_auto_for_strategy(
+            &gateway,
+            strategy,
+            Some(vec!["gpt-4o".into(), "gpt-4.1".into()]),
+        )
+        .await;
+        assert_eq!(calls.lock().unwrap().last().unwrap().1["model"], expected);
+    }
+}
+
+#[tokio::test]
+async fn auto_retains_half_open_recovery_priority() {
+    let (gateway, id, calls, _server) = setup("ok").await;
+    let mut healthy = gateway.store.get(id).unwrap();
+    healthy.last_status = "operational".into();
+    healthy.last_latency_ms = Some(10);
+    gateway.store.save(&mut healthy).unwrap();
+    let backup_id = add_routing_backup(&gateway, id);
+    gateway
+        .store
+        .update_runtime(backup_id, |c| {
+            c.circuit_state = CIRCUIT_HALF_OPEN.into();
+        })
+        .unwrap();
+    forward_auto_for_strategy(&gateway, "smart_quality", None).await;
+    assert_eq!(calls.lock().unwrap()[0].0, "Bearer backup-key");
+}
+
+fn add_backup_model(gateway: &Gateway, id: i64) {
+    let mut channel = gateway.store.get(id).unwrap();
+    channel.extra_models = vec!["gpt-4.1".into()];
+    gateway.store.save(&mut channel).unwrap();
+}
+
+#[tokio::test]
+async fn auto_retries_same_supplier_backup_model_within_shared_budgets() {
+    for mode in ["model429", "model404", "model500"] {
+        let (gateway, id, calls, _server) = setup(mode).await;
+        add_backup_model(&gateway, id);
+        gateway
+            .store
+            .add_key(
+                id,
+                &KeyInput {
+                    name: "third".into(),
+                    secret: "key-c".into(),
+                },
+            )
+            .unwrap();
+        forward_auto_for_strategy(
+            &gateway,
+            "manual_priority",
+            Some(vec!["gpt-4o".into(), "gpt-4.1".into()]),
+        )
+        .await;
+        let calls = calls.lock().unwrap();
+        assert!(calls.len() <= 3);
+        assert_eq!(calls.last().unwrap().1["model"], "gpt-4.1");
+        assert!(
+            calls
+                .iter()
+                .map(|(key, _)| key)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                <= 2
+        );
+        let original: serde_json::Value = serde_json::from_slice(&request()).unwrap();
+        assert!(calls
+            .iter()
+            .all(|(_, body)| body["messages"] == original["messages"]));
+    }
+}
+
+#[tokio::test]
+async fn backup_models_do_not_expand_attempt_or_key_budgets() {
+    let (gateway, id, calls, _server) = setup("mixed").await;
+    add_backup_model(&gateway, id);
+    gateway
+        .store
+        .add_key(
+            id,
+            &KeyInput {
+                name: "third".into(),
+                secret: "key-c".into(),
+            },
+        )
+        .unwrap();
+    let response = gateway
+        .forward(
+            GatewayProtocol::Chat,
+            &HeaderMap::new(),
+            request(),
+            &RequestContext {
+                strategy: "manual_priority".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(key, _)| key)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2
+    );
+    assert_eq!(calls[0].1["model"], "gpt-4o");
+    assert!(calls[1..]
+        .iter()
+        .all(|(_, body)| body["model"] == "gpt-4.1"));
+}
+
+#[tokio::test]
+async fn auto_skips_a_cooling_model_but_respects_the_model_allowlist() {
+    let (gateway, id, calls, _server) = setup("ok").await;
+    add_backup_model(&gateway, id);
+    for key in gateway.store.list_keys(id).unwrap() {
+        gateway
+            .key_pool
+            .acquire(id, "gpt-4o", &Default::default(), Some(key.id))
+            .unwrap()
+            .unwrap()
+            .failure(&FailureInfo::new(FailureClass::RateLimit), "gpt-4o")
+            .unwrap();
+    }
+    let ctx = RequestContext {
+        strategy: "manual_priority".into(),
+        allowed_models: Some(vec!["gpt-4o".into()]),
+        ..Default::default()
+    };
+    let response = gateway
+        .forward(GatewayProtocol::Chat, &HeaderMap::new(), request(), &ctx)
+        .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(calls.lock().unwrap().is_empty());
+    forward_auto_for_strategy(
+        &gateway,
+        "manual_priority",
+        Some(vec!["gpt-4o".into(), "gpt-4.1".into()]),
+    )
+    .await;
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(calls.lock().unwrap()[0].1["model"], "gpt-4.1");
+}
+
+#[tokio::test]
+async fn backup_models_are_not_tried_for_client_errors_or_after_output() {
+    for mode in ["model400", "stream_error"] {
+        let (gateway, id, calls, _server) = setup(mode).await;
+        add_backup_model(&gateway, id);
+        let response = gateway
+            .forward(
+                GatewayProtocol::Chat,
+                &HeaderMap::new(),
+                request(),
+                &RequestContext {
+                    strategy: "manual_priority".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let _ = axum::body::to_bytes(response.into_body(), 1 << 20).await;
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
 }

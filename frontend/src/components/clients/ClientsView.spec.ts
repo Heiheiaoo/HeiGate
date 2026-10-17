@@ -1,7 +1,32 @@
-import { describe, it, expect } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest'
+import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils'
 import ClientsView from './ClientsView.vue'
 import type { Channel } from '@/components/channels/types'
+
+import { getClientConfigs, updateClientConfig, probeClientConnection, applyCodexConfig, getCodexConfigStatus } from '@/services/gatewayApi'
+
+vi.mock('@/services/gatewayApi', () => ({
+  getClientConfigs: vi.fn(),
+  updateClientConfig: vi.fn(),
+  probeClientConnection: vi.fn(),
+  applyCodexConfig: vi.fn(),
+  getCodexConfigStatus: vi.fn(),
+}))
+
+enableAutoUnmount(afterEach)
+beforeEach(() => {
+  vi.resetAllMocks()
+  const draft = new Map<string, string>()
+  vi.stubGlobal('localStorage', {
+    getItem: vi.fn((key: string) => draft.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => { draft.set(key, value) }),
+  })
+  vi.mocked(getClientConfigs).mockResolvedValue({})
+  vi.mocked(updateClientConfig).mockResolvedValue({ ok: true })
+  vi.mocked(applyCodexConfig).mockResolvedValue({ ok: true, message: '已配置并重启 Codex' })
+  vi.mocked(getCodexConfigStatus).mockResolvedValue({ path: '~/.codex/config.toml', exists: true, managed: false, modified: false, backup_exists: false })
+})
+afterEach(() => { vi.unstubAllGlobals() })
 
 const mockChannels: Channel[] = [
   {
@@ -174,32 +199,113 @@ describe('ClientsView.vue', () => {
     expect(codexOptions.some((txt) => txt.includes('Anthropic Official'))).toBe(false)
   })
 
-  it('emits save event with correct payload on clicking save buttons', async () => {
-    const wrapper = mount(ClientsView, {
-      props: {
-        channels: mockChannels,
-      },
-    })
+  it('saves direct settings as a local draft without claiming a client was launched', async () => {
+    const wrapper = mount(ClientsView, { props: { channels: mockChannels } })
+    await wrapper.findAll('.m26-client-tab-card')[2].trigger('click')
+    expect(wrapper.find('.m26-hero-actions').text()).toContain('保存直连草稿')
+    expect(wrapper.find('.m26-hero-actions').text()).not.toContain('启动')
+    await wrapper.find('.m26-hero-actions button').trigger('click')
+    await flushPromises()
+    expect(updateClientConfig).not.toHaveBeenCalled()
+    const saved = JSON.parse(localStorage.getItem('heigate_client_platforms_draft')!)
+    expect(saved['claude-desktop'].direct.endpoint).toBe('https://api.anthropic.com')
+    expect(saved['claude-desktop'].direct.apiKey).toBe(mockChannels[0].apiKey)
+    expect(wrapper.find('[role="status"]').text()).toContain('直连草稿已保存在此设备')
+    expect(wrapper.text()).not.toContain('已检测到 macOS 本机配置文件')
+  })
 
-    // Switch to Claude Desktop (index 2)
-    const tabCards = wrapper.findAll('.m26-client-tab-card')
-    await tabCards[2].trigger('click')
+  it('reports direct Codex protocol failures before attempting a restart', async () => {
+    const wrapper = mount(ClientsView, { props: { channels: mockChannels } })
+    await wrapper.findAll('.m26-client-tab-card')[1].trigger('click')
+    await wrapper.find('.m26-hero-actions button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').text()).toContain('不是 Responses 协议')
+    expect(wrapper.find('[role="status"]').classes()).toContain('text-red-600')
+  })
 
-    // Click "保存配置" (without launch)
-    await wrapper.find('.m26-btn-ghost').trigger('click')
-    expect(wrapper.emitted('save')).toBeTruthy()
-    expect(wrapper.emitted('save')![0][0]).toMatchObject({
-      platformId: 'claude-desktop',
+  it('allows direct Codex setup when a Chat channel is also confirmed to support Responses', async () => {
+    const dualProtocolChannels = mockChannels.map(channel => channel.name === 'OpenAI Direct'
+      ? { ...channel, gatewayId: 42, supportsResponses: true }
+      : channel)
+    const wrapper = mount(ClientsView, { props: { channels: dualProtocolChannels } })
+    await wrapper.findAll('.m26-client-tab-card')[1].trigger('click')
+
+    expect(wrapper.text()).toContain('Responses 可用')
+    await wrapper.find('.m26-hero-actions button').trigger('click')
+    await flushPromises()
+
+    expect(applyCodexConfig).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'direct',
-      launchAfterSave: false,
-    })
+      channel_id: 42,
+      models: expect.arrayContaining(['gpt-4o', 'o3-mini']),
+      restart: true,
+    }))
+    expect(wrapper.find('[role="status"]').text()).toContain('已配置并重启 Codex')
+  })
 
-    // Click "保存并启动" (with launch)
-    await wrapper.find('.m26-btn-primary').trigger('click')
-    expect(wrapper.emitted('save')![1][0]).toMatchObject({
-      platformId: 'claude-desktop',
-      mode: 'direct',
-      launchAfterSave: true,
-    })
+  it('waits for gateway save and shows API failures instead of a success toast', async () => {
+    const wrapper = mount(ClientsView, { props: { channels: mockChannels } })
+    await wrapper.findAll('.m26-client-tab-card')[1].trigger('click')
+    await wrapper.findAll('.m26-mode-btn')[1].trigger('click')
+    vi.mocked(updateClientConfig).mockResolvedValueOnce({ ok: false, message: '数据库写入失败' })
+    await wrapper.find('.m26-hero-actions button').trigger('click')
+    await flushPromises()
+    vi.mocked(applyCodexConfig).mockResolvedValueOnce({ ok: false, message: '数据库写入失败' })
+    await wrapper.find('.m26-hero-actions button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').text()).toBe('数据库写入失败')
+    expect(wrapper.text()).not.toContain('正在启动 Codex')
+    expect(updateClientConfig).toHaveBeenCalledWith('codex', expect.objectContaining({ strategy: 'smart_quality' }))
+    await wrapper.find('.m26-hero-actions button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').text()).toContain('已配置并重启 Codex')
+  })
+
+  it('shows real probe latency and upstream or network errors', async () => {
+    const wrapper = mount(ClientsView, { props: { channels: mockChannels } })
+    await wrapper.findAll('.m26-client-tab-card')[1].trigger('click')
+    let resolveProbe!: (result: { model: string; status: string; latencyMs: number }) => void
+    vi.mocked(probeClientConnection).mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve }))
+    await wrapper.find('.m26-btn-test').trigger('click')
+    expect(wrapper.find('.m26-btn-test').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).not.toContain('168ms')
+    expect(probeClientConnection).toHaveBeenCalledWith(expect.objectContaining({
+      endpoint: mockChannels[1].url, api_key: mockChannels[1].apiKey, primary_model: 'gpt-4o',
+    }))
+    resolveProbe({ model: 'gpt-4o', status: 'operational', latencyMs: 423 })
+    await flushPromises()
+    expect(wrapper.find('.m26-test-result-msg').text()).toContain('423ms')
+    vi.mocked(probeClientConnection).mockResolvedValueOnce({ model: 'gpt-4o', status: 'error', message: 'upstream HTTP 401' })
+    await wrapper.find('.m26-btn-test').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.m26-test-result-msg').classes()).toContain('failed')
+    expect(wrapper.find('.m26-test-result-msg').text()).toContain('401')
+    vi.mocked(probeClientConnection).mockRejectedValueOnce(new Error('connection refused'))
+    await wrapper.find('.m26-btn-test').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.m26-test-result-msg').text()).toContain('connection refused')
+  })
+
+  it('shows Hermes action failure without claiming restart success', async () => {
+    const wrapper = mount(ClientsView, { props: { channels: mockChannels } })
+    vi.mocked(updateClientConfig).mockResolvedValueOnce({ ok: false, message: 'Hermes 重启失败' })
+    await wrapper.find('.m26-btn-save-restart').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Hermes 重启失败')
+    expect(wrapper.text()).not.toContain('成功重启 Hermes')
+  })
+
+  it('uses the same client-specific gateway URL in copied and displayed commands', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const wrapper = mount(ClientsView, { props: { channels: mockChannels, gatewayBaseUrl: 'http://127.0.0.1:28889/v1', gatewayKey: 'gateway-key' } })
+    await wrapper.findAll('.m26-client-tab-card')[1].trigger('click')
+    await wrapper.findAll('.m26-mode-btn')[1].trigger('click')
+    await wrapper.find('.m26-cli-env-card button').trigger('click')
+    expect(wrapper.find('.m26-cli-code').text()).toContain('/codex/v1')
+    expect(writeText).toHaveBeenCalledWith(wrapper.find('.m26-cli-code').text())
+    await wrapper.findAll('.m26-mode-btn')[0].trigger('click')
+    expect(wrapper.find('.m26-cli-code').text()).toContain(mockChannels[1].url)
+    expect(wrapper.find('.m26-cli-code').text()).not.toContain('gateway-key')
   })
 })

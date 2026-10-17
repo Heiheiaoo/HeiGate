@@ -5,6 +5,7 @@ export type DetectedProtocolInfo = {
   detectedProtocol?: string
   models?: string[]
   updatedAt?: number
+  endpoint?: string
 }
 
 const STORAGE_KEY = 'heigate_channel_detected_protocols_v1'
@@ -38,19 +39,23 @@ function persistStorage(): void {
 export function normalizeUrlKey(url?: string): string {
   if (!url) return ''
   let u = url.trim()
-  if (!u.startsWith('http://') && !u.startsWith('https://')) {
+  if (!/^https?:\/\//i.test(u)) {
     u = 'https://' + u
   }
-  return u.toLowerCase().replace(/\/+$/, '')
+  try {
+    return new URL(u).toString().replace(/\/+$/, '')
+  } catch {
+    return u.replace(/\/+$/, '')
+  }
 }
 
 export function getChannelDetectedProtocols(channelId?: number, url?: string): DetectedProtocolInfo | null {
   const store = loadStorage()
+  const normUrl = normalizeUrlKey(url)
   if (channelId != null && channelId > 0) {
     const byId = store[`id:${channelId}`]
-    if (byId) return byId
+    if (byId && (!normUrl || byId.endpoint === normUrl)) return byId
   }
-  const normUrl = normalizeUrlKey(url)
   if (normUrl) {
     const byNorm = store[`url:${normUrl}`]
     if (byNorm) return byNorm
@@ -75,11 +80,12 @@ export function saveChannelDetectedProtocols(params: {
   const existing = getChannelDetectedProtocols(params.channelId, params.url)
 
   const info: DetectedProtocolInfo = {
+    endpoint: normalizeUrlKey(params.url) || existing?.endpoint,
     supportsOpenai: params.supportsOpenai !== undefined ? params.supportsOpenai : (existing?.supportsOpenai ?? null),
     supportsAnthropic: params.supportsAnthropic !== undefined ? params.supportsAnthropic : (existing?.supportsAnthropic ?? null),
     supportsResponses: params.supportsResponses !== undefined ? params.supportsResponses : (existing?.supportsResponses ?? null),
     detectedProtocol: params.detectedProtocol || existing?.detectedProtocol,
-    models: params.models && params.models.length > 0 ? params.models : existing?.models,
+    models: params.models ?? existing?.models,
     updatedAt: Date.now(),
   }
 
@@ -101,12 +107,14 @@ export function saveChannelDetectedProtocols(params: {
 export function linkChannelIdProtocols(channelId: number, url: string): void {
   if (!channelId || channelId <= 0 || !url) return
   const store = loadStorage()
-  if (store[`id:${channelId}`]) return
+  if (store[`id:${channelId}`]?.endpoint === normalizeUrlKey(url)) return
   const existing = getChannelDetectedProtocols(undefined, url)
   if (existing) {
-    store[`id:${channelId}`] = existing
-    persistStorage()
+    store[`id:${channelId}`] = { ...existing, endpoint: normalizeUrlKey(url) }
+  } else {
+    delete store[`id:${channelId}`]
   }
+  persistStorage()
 }
 
 export function clearChannelDetectedProtocols(channelId?: number, url?: string): void {

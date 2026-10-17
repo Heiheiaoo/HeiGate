@@ -34,6 +34,13 @@ const diagnostic = {
 }
 
 describe('LogDetailContent', () => {
+  it('does not replace missing TTFT with total request latency', () => {
+    const wrapper = mount(LogDetailContent, { props: { log: { ...log, is_stream: false, latency_ms: 9000, ttft_ms: 0 }, diagnostic } })
+    const metric = wrapper.findAll('.m26-perf-card').find(item => item.text().includes('TTFT'))!
+    expect(metric.get('.val').text()).toBe('-')
+    expect(metric.text()).not.toContain('9.00s')
+  })
+
   it('renders the diagnostic, failover trace and usage summary', () => {
     const wrapper = mount(LogDetailContent, { props: { log, diagnostic } })
 

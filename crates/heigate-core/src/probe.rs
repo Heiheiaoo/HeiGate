@@ -49,6 +49,28 @@ pub(crate) const MAX_ERROR_SNIPPET: usize = 300;
 pub(crate) const MAX_ERROR_BODY_READ: usize = 64 << 10;
 const MAX_STREAM_BYTES: usize = 1 << 20;
 
+pub(crate) async fn read_response_limited(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err("upstream response body exceeded size limit".into());
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| err.to_string())?;
+        if chunk.len() > limit.saturating_sub(body.len()) {
+            return Err("upstream response body exceeded size limit".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// The latency at or above which a correct answer is still reported degraded.
 pub const DEGRADED_THRESHOLD: Duration = Duration::from_secs(6);
 
@@ -116,6 +138,8 @@ pub struct ProbeResult {
     pub key_id: i64,
     #[serde(default)]
     pub key_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<bool>,
     pub model: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +160,7 @@ impl ProbeResult {
             retry_after_secs: 0,
             key_id: 0,
             key_name: String::new(),
+            accepted: None,
             model: model.to_string(),
             status: STATUS_ERROR.to_string(),
             latency_ms: None,
@@ -178,6 +203,36 @@ pub fn normalize_endpoint(raw: &str) -> String {
         ep = stripped.to_string();
     }
     ep.trim_end_matches('/').to_string()
+}
+
+/// Custom credential headers must never follow redirects to another origin.
+pub(crate) fn upstream_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many upstream redirects");
+        }
+        let target = attempt.url();
+        let same_origin = attempt.previous().first().is_some_and(|original| {
+            original.origin() == target.origin()
+                && original.username() == target.username()
+                && original.password() == target.password()
+        });
+        if same_origin {
+            attempt.follow()
+        } else {
+            attempt.error("cross-origin upstream redirect blocked")
+        }
+    })
+}
+
+pub(crate) fn same_endpoint(left: &str, right: &str) -> bool {
+    match (
+        reqwest::Url::parse(&normalize_endpoint(left)),
+        reqwest::Url::parse(&normalize_endpoint(right)),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Removes credentials from an endpoint before it is written to request logs
@@ -409,6 +464,7 @@ struct SendResult {
 /// recorded as TTFT, falling back to the first reasoning delta.
 async fn send(cfg: &Config, model: &str, prompt: &str) -> Result<SendResult, String> {
     let client = reqwest::Client::builder()
+        .redirect(upstream_redirect_policy())
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|err| err.to_string())?;
@@ -488,8 +544,8 @@ async fn send(cfg: &Config, model: &str, prompt: &str) -> Result<SendResult, Str
             .map(crate::api::forward::parse_retry_after)
             .unwrap_or_default()
             .as_secs();
-        let body = response.text().await.unwrap_or_default();
-        let body: String = body.chars().take(MAX_ERROR_BODY_READ).collect();
+        let body = read_response_limited(response, MAX_ERROR_BODY_READ).await?;
+        let body = String::from_utf8_lossy(&body).into_owned();
         return Ok(SendResult {
             retry_after_secs,
             status,
@@ -516,29 +572,31 @@ async fn read_stream(
     let mut reason_at: Option<Instant> = None;
 
     let mut stream = response.bytes_stream();
-    let mut buffer = Vec::<u8>::new();
+    let mut tracker = crate::api::forward::StreamTokenTracker::default();
+    let mut decoder = crate::protocol::stream::SseEventDecoder::default();
     let mut total = 0usize;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|err| err.to_string())?;
         total += chunk.len();
         if total > MAX_STREAM_BYTES {
-            break;
+            return Err("upstream stream exceeded probe size limit".to_string());
         }
-        buffer.extend_from_slice(&chunk);
-
-        // Process complete lines from the buffer.
-        loop {
-            let newline = buffer.iter().position(|b| *b == b'\n');
-            let Some(newline) = newline else { break };
-            let line_bytes: Vec<u8> = buffer.drain(..=newline).collect();
-            let line = String::from_utf8_lossy(&line_bytes);
-            let (payload, done, ok) = parse_sse_line(&line);
-            if !ok {
+        tracker.feed(&chunk);
+        if !tracker.stream_error.is_empty() {
+            return Err(format!(
+                "upstream stream error: {}",
+                compact_whitespace(&tracker.stream_error)
+            ));
+        }
+        let events = decoder.feed(&chunk);
+        if decoder.exceeded {
+            return Err("upstream SSE line or event exceeded probe size limit".to_string());
+        }
+        for event in events {
+            let payload = String::from_utf8_lossy(&event);
+            if payload == "[DONE]" {
                 continue;
-            }
-            if done {
-                return finish_stream(out, text_at, reason_at, started);
             }
 
             // An error object inside a 200 SSE stream is still an error.
@@ -551,8 +609,38 @@ async fn read_stream(
 
             apply_delta(cfg, &payload, &mut text_at, &mut reason_at);
         }
+        if tracker.has_authoritative_end() {
+            return finish_stream(out, text_at, reason_at, started);
+        }
     }
 
+    tracker.finish();
+    if !tracker.stream_error.is_empty() {
+        return Err(format!(
+            "upstream stream error: {}",
+            compact_whitespace(&tracker.stream_error)
+        ));
+    }
+    if !tracker.saw_done {
+        return Err("upstream truncated stream: missing completion marker".to_string());
+    }
+    let events = decoder.finish();
+    if decoder.exceeded {
+        return Err("upstream SSE line or event exceeded probe size limit".to_string());
+    }
+    for event in events {
+        let payload = String::from_utf8_lossy(&event);
+        if payload == "[DONE]" {
+            continue;
+        }
+        if let Some(message) = stream_error(&payload) {
+            return Err(format!(
+                "upstream stream error: {}",
+                compact_whitespace(&message)
+            ));
+        }
+        apply_delta(cfg, &payload, &mut text_at, &mut reason_at);
+    }
     finish_stream(out, text_at, reason_at, started)
 }
 
@@ -575,22 +663,7 @@ fn finish_stream(
 }
 
 fn stream_error(payload: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(payload).ok()?;
-    let error = value.get("error")?;
-    if error.is_null() {
-        return None;
-    }
-    if let Some(message) = error.get("message").and_then(Value::as_str) {
-        if !message.is_empty() {
-            return Some(message.to_string());
-        }
-    }
-    if let Some(text) = error.as_str() {
-        if !text.is_empty() {
-            return Some(text.to_string());
-        }
-    }
-    Some(error.to_string())
+    crate::api::upstream_error_payload(payload).map(|(message, _)| message)
 }
 
 fn apply_delta(
@@ -867,5 +940,127 @@ mod tests {
             Some("boom".to_string())
         );
         assert!(stream_error("{\"error\":null}").is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_requires_terminal_events_and_reports_nested_failures() {
+        use axum::{body::Body, response::Response, routing::post};
+        for (provider, mode, path, wire, healthy) in [
+            (PROVIDER_OPENAI, API_MODE_CHAT_COMPLETIONS, "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n", false),
+            (PROVIDER_OPENAI, API_MODE_CHAT_COMPLETIONS, "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"},\"finish_reason\":\"stop\"}]}\n\n", true),
+            (PROVIDER_ANTHROPIC, API_MODE_CHAT_COMPLETIONS, "/v1/messages", "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n", false),
+            (PROVIDER_ANTHROPIC, API_MODE_CHAT_COMPLETIONS, "/v1/messages", "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", true),
+            (PROVIDER_OPENAI, API_MODE_RESPONSES, "/v1/responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"nested failure\"}}}\n\n", false),
+            (PROVIDER_OPENAI, API_MODE_RESPONSES, "/v1/responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n", true),
+        ] {
+            let app = axum::Router::new().route(path, post(move || async move {
+                Response::builder().header("content-type", "text/event-stream").body(Body::from(wire)).unwrap()
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let cfg = Config { provider: provider.into(), api_mode: mode.into(), endpoint: format!("http://{address}"),
+                api_key: "dummy".into(), primary_model: "model".into(), ..Default::default() };
+            let result = check_model_once(&cfg, "model").await;
+            server.abort();
+            assert_eq!(result.status == STATUS_OPERATIONAL, healthy, "{result:?}");
+            if !healthy { assert_eq!(result.status, STATUS_ERROR); }
+        }
+    }
+
+    #[tokio::test]
+    async fn redirects_preserve_same_origin_credentials_but_block_other_origins() {
+        use axum::{http::HeaderMap, response::Redirect, routing::get};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let received = Arc::new(AtomicUsize::new(0));
+        let seen = received.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sink = listener.local_addr().unwrap();
+        let sink_server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/sink",
+                    get(move || {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        async { "ok" }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let app = axum::Router::new()
+            .route("/same", get(|| async { Redirect::temporary("/finish") }))
+            .route(
+                "/other",
+                get(move || async move { Redirect::temporary(&format!("http://{sink}/sink")) }),
+            )
+            .route(
+                "/finish",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(headers["x-api-key"], "dummy-secret");
+                    "ok"
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = listener.local_addr().unwrap();
+        let source_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .redirect(upstream_redirect_policy())
+            .build()
+            .unwrap();
+        assert!(client
+            .get(format!("http://{source}/same"))
+            .header("x-api-key", "dummy-secret")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success());
+        assert!(client
+            .get(format!("http://{source}/other"))
+            .header("x-api-key", "dummy-secret")
+            .send()
+            .await
+            .unwrap_err()
+            .is_redirect());
+        assert_eq!(received.load(Ordering::SeqCst), 0);
+        source_server.abort();
+        sink_server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_probe_hitting_the_size_limit_is_not_healthy() {
+        use axum::{body::Body, response::Response, routing::post};
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                let mut wire =
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n".to_string();
+                wire.push_str(&"x".repeat(MAX_STREAM_BYTES));
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(wire))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = Config {
+            provider: PROVIDER_OPENAI.into(),
+            api_mode: API_MODE_CHAT_COMPLETIONS.into(),
+            endpoint: format!("http://{address}"),
+            primary_model: "model".into(),
+            ..Default::default()
+        };
+        let result = check_model_once(&cfg, "model").await;
+        server.abort();
+        assert_eq!(result.status, STATUS_ERROR);
+        assert!(result.message.contains("size limit"), "{result:?}");
     }
 }

@@ -13,7 +13,8 @@ use crate::canonical::channel_supports_model_or_canonical;
 use crate::probe::{STATUS_DEGRADED, STATUS_ERROR, STATUS_OPERATIONAL};
 use crate::resilience::{
     failure_cooldown, failure_is_channel_fault, failure_is_circuit_eligible, failure_label,
-    FailureInfo, FailureInfoProvider, CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN, CIRCUIT_OPEN,
+    FailureClass, FailureInfo, FailureInfoProvider, CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN,
+    CIRCUIT_OPEN,
 };
 use crate::store::{Channel, Store};
 
@@ -116,9 +117,18 @@ impl Router {
             }
         }
 
-        self.sort_candidates(&mut healthy, model, strategy);
-        self.sort_candidates(&mut degraded, model, strategy);
-        self.sort_candidates(&mut failed, model, strategy);
+        let turn = if strategy == ROUTE_ROUND_ROBIN {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let turn = state.turn.entry(model.to_string()).or_insert(0);
+            let current = *turn;
+            *turn = turn.wrapping_add(1);
+            current
+        } else {
+            0
+        };
+        self.sort_candidates(&mut healthy, strategy, turn, model);
+        self.sort_candidates(&mut degraded, strategy, turn, model);
+        self.sort_candidates(&mut failed, strategy, turn, model);
         healthy.extend(degraded);
         healthy.extend(failed);
         // A cooling channel is never a last-resort candidate.
@@ -272,6 +282,74 @@ impl Router {
         });
     }
 
+    /// A late live reply must not change a newly edited channel or clear a newer failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_live_outcome(
+        &self,
+        channel: &Channel,
+        model: &str,
+        failure: Option<&FailureInfo>,
+        message: &str,
+        latency: i64,
+        started_at: chrono::DateTime<Utc>,
+    ) {
+        if failure.is_some_and(|info| info.class == Some(FailureClass::Client)) {
+            return;
+        }
+        if !self
+            .store
+            .record_model_outcome(channel, model, failure.is_none(), message, started_at)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let _ = self.store.update_runtime(channel.id, |fresh| {
+            if !fresh.enabled
+                || fresh.endpoint != channel.endpoint
+                || fresh.provider != channel.provider
+                || fresh.api_mode != channel.api_mode
+                // Per-model health above remains useful when this model is
+                // retained as an extra, but only a request for the same
+                // primary model in both the snapshot and current config may
+                // alter the channel headline.
+                || channel.primary_model != model
+                || fresh.primary_model != model
+                || fresh
+                    .last_checked_at
+                    .is_some_and(|checked| checked > started_at)
+            {
+                return;
+            }
+            if let Some(info) = failure {
+                let key_fault = matches!(
+                    info.class,
+                    Some(FailureClass::RateLimit | FailureClass::Auth | FailureClass::Model)
+                );
+                if !key_fault && fresh.extra_models.is_empty() {
+                    fresh.failure_count += 1;
+                    fresh.last_status = STATUS_ERROR.to_string();
+                    fresh.last_error = format!("{}: {message}", failure_label(info));
+                    fresh.cooldown_until =
+                        Some(Utc::now() + failure_cooldown(info, fresh.failure_count));
+                    if failure_is_circuit_eligible(info) && fresh.failure_count >= 3 {
+                        fresh.circuit_state = CIRCUIT_OPEN.to_string();
+                    }
+                    fresh.last_latency_ms = Some(latency);
+                } else {
+                    fresh.last_error = format!("[{model}] {message}");
+                }
+            } else {
+                fresh.last_status = STATUS_OPERATIONAL.to_string();
+                fresh.last_error.clear();
+                fresh.failure_count = 0;
+                fresh.circuit_state = CIRCUIT_CLOSED.to_string();
+                fresh.cooldown_until = None;
+                fresh.last_latency_ms = Some(latency);
+            }
+            fresh.last_checked_at = Some(started_at);
+        });
+    }
+
     /// Claims the single in-flight slot for a half-open channel.
     pub fn claim_half_open_public(&self, id: i64) -> bool {
         self.claim_half_open(id)
@@ -298,52 +376,41 @@ impl Router {
         }
     }
 
-    fn sort_candidates(&self, channels: &mut [Channel], model: &str, strategy: &str) {
+    fn sort_candidates(&self, channels: &mut [Channel], strategy: &str, turn: usize, model: &str) {
         channels.sort_by(|a, b| {
-            // Recovery probes go first under every strategy; RouteCandidates
-            // still enforces one in-flight half-open call.
-            let a_half = a.circuit_state == CIRCUIT_HALF_OPEN;
-            let b_half = b.circuit_state == CIRCUIT_HALF_OPEN;
-            if a_half != b_half {
-                return if a_half {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Greater
-                };
-            }
-
-            // Quality safeguard: Channels with detected prompt injection or degraded
-            // reasoning are penalized behind safe channels across all strategies.
-            let a_detected = a.injection_state == "detected";
-            let b_detected = b.injection_state == "detected";
-            if a_detected != b_detected {
-                return if a_detected {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Less
-                };
+            let safety = candidate_safety_priority(a).cmp(&candidate_safety_priority(b));
+            if !safety.is_eq() {
+                return safety;
             }
 
             match strategy {
-                ROUTE_LATENCY | ROUTE_ROUND_ROBIN => {
-                    responsiveness_of(a).cmp(&responsiveness_of(b))
-                }
-                _ => quality_score(b).cmp(&quality_score(a)),
+                ROUTE_LATENCY => responsiveness_of(a, model).cmp(&responsiveness_of(b, model)),
+                // A changing measured latency must not change the rotation's baseline.
+                ROUTE_ROUND_ROBIN => a.id.cmp(&b.id),
+                _ => quality_score(b, model).cmp(&quality_score(a, model)),
             }
         });
 
-        if strategy == ROUTE_ROUND_ROBIN && channels.len() > 1 {
-            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let len = channels.len();
-            let start = *state.turn.get(model).unwrap_or(&0) % len;
-            *state.turn.entry(model.to_string()).or_insert(0) += 1;
-            drop(state);
-            channels.rotate_left(start);
+        if strategy == ROUTE_ROUND_ROBIN {
+            for group in channels
+                .chunk_by_mut(|a, b| candidate_safety_priority(a) == candidate_safety_priority(b))
+            {
+                let start = turn % group.len();
+                group.rotate_left(start);
+            }
         }
     }
 }
 
-fn quality_score(channel: &Channel) -> i64 {
+/// Recovery retains its single-flight priority; diagnosed injection remains a fallback.
+pub(crate) fn candidate_safety_priority(channel: &Channel) -> (bool, bool) {
+    (
+        channel.circuit_state != CIRCUIT_HALF_OPEN,
+        channel.injection_state == "detected",
+    )
+}
+
+fn quality_score(channel: &Channel, model: &str) -> i64 {
     let mut score: i64 = match channel.last_status.as_str() {
         STATUS_OPERATIONAL | "healthy" => 10000,
         STATUS_DEGRADED => 5000,
@@ -371,7 +438,12 @@ fn quality_score(channel: &Channel) -> i64 {
         _ => {}
     }
 
-    let lat = responsiveness_of(channel);
+    let model = if model.is_empty() {
+        &channel.primary_model
+    } else {
+        model
+    };
+    let lat = responsiveness_of(channel, model);
     if lat < 1_000_000 {
         score -= lat;
     }
@@ -395,7 +467,22 @@ fn latency_of(channel: &Channel) -> i64 {
 
 /// The routing sort key: time to first token when measured, total latency
 /// otherwise.
-fn responsiveness_of(channel: &Channel) -> i64 {
+fn responsiveness_of(channel: &Channel, model: &str) -> i64 {
+    let actual =
+        crate::canonical::find_channel_model_for_request(channel, model).map(|(actual, _)| actual);
+    let model = actual.as_deref().unwrap_or(model);
+    if let Some(performance) = channel.fresh_model_performance(model) {
+        return performance.ttft_ms.round() as i64;
+    }
+    if let Some(health) = channel
+        .model_health
+        .iter()
+        .find(|h| h.model.eq_ignore_ascii_case(model))
+    {
+        if let Some(ttft) = health.ttft_ms.or(health.latency_ms).filter(|v| *v > 0) {
+            return ttft;
+        }
+    }
     match channel.last_ttft_ms {
         Some(value) if value > 0 => value,
         _ => latency_of(channel),
@@ -408,6 +495,68 @@ mod tests {
 
     use super::*;
     use crate::store::Store;
+
+    #[test]
+    fn latency_routes_by_the_requested_models_live_ttft_then_expires() {
+        let store = Store::open_in_memory().unwrap();
+        let mut first = seed(&store, "first", "primary", "operational");
+        first.extra_models = vec!["extra".into()];
+        first.last_ttft_ms = Some(20);
+        store.save(&mut first).unwrap();
+        let mut second = seed(&store, "second", "primary", "operational");
+        second.extra_models = vec!["extra".into()];
+        second.last_ttft_ms = Some(80);
+        store.save(&mut second).unwrap();
+        store
+            .record_model_ttft(&first, "extra", 500, Utc::now())
+            .unwrap();
+        store
+            .record_model_ttft(&second, "extra", 100, Utc::now())
+            .unwrap();
+        let router = Router::new(store.clone());
+        assert_eq!(
+            router
+                .candidates_matching("extra", ROUTE_SMART_QUALITY, None)
+                .unwrap()[0]
+                .id,
+            second.id
+        );
+        assert_eq!(
+            router
+                .candidates_matching("primary", ROUTE_SMART_QUALITY, None)
+                .unwrap()[0]
+                .id,
+            first.id
+        );
+        assert_eq!(
+            router
+                .candidates_matching("extra", ROUTE_LATENCY, None)
+                .unwrap()[0]
+                .id,
+            second.id
+        );
+        assert_eq!(
+            router
+                .candidates_matching("primary", ROUTE_LATENCY, None)
+                .unwrap()[0]
+                .id,
+            first.id
+        );
+        store
+            .lock()
+            .execute(
+                "UPDATE desktop_model_performance SET updated_at=?",
+                [(Utc::now() - chrono::Duration::minutes(31)).to_rfc3339()],
+            )
+            .unwrap();
+        assert_eq!(
+            router
+                .candidates_matching("extra", ROUTE_LATENCY, None)
+                .unwrap()[0]
+                .id,
+            first.id
+        );
+    }
 
     fn seed(store: &Store, name: &str, model: &str, status: &str) -> Channel {
         let mut channel = Channel {

@@ -91,6 +91,13 @@ export type Channel = {
   injectionContent?: string
   injectionCheckedAt?: string | null
   modelHealth?: ModelHealth[]
+  modelPerformance?: Array<{
+    model: string
+    ttftMs: number
+    lastTtftMs: number
+    samples: number
+    updatedAt: string
+  }>
   supportsOpenai?: boolean | null
   supportsAnthropic?: boolean | null
   supportsResponses?: boolean | null

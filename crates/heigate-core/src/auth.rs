@@ -2,7 +2,7 @@
 //! restricted to the current user, matching the Go `internal/api` auth code.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek, Write};
 use std::path::Path;
 
 /// Prefix of every generated gateway key.
@@ -11,60 +11,36 @@ const KEY_PREFIX: &str = "hg_";
 /// Reads the gateway key from `path`, creating it (0600) with a fresh random
 /// value when the file is missing or empty.
 pub fn load_or_create_gateway_key(path: &Path) -> io::Result<String> {
-    match fs::read(path) {
-        Ok(data) => {
-            let key = String::from_utf8_lossy(&data).trim().to_string();
-            if !key.is_empty() {
-                restrict_to_owner(path)?;
-                return Ok(key);
-            }
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err),
-    }
-
-    let mut buf = [0u8; 32];
-    getrandom::fill(&mut buf).map_err(|err| io::Error::other(err.to_string()))?;
-    let key = format!("{KEY_PREFIX}{}", hex_encode(&buf));
-
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-
-    match options.open(path) {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(format!("{key}\n").as_bytes())?;
-            Ok(key)
-        }
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            // Another process created the key first; adopt its value.
-            let data = fs::read(path)?;
-            Ok(String::from_utf8_lossy(&data).trim().to_string())
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// Ensures the key file is readable only by its owner (no-op on Windows).
-fn restrict_to_owner(path: &Path) -> io::Result<()> {
+    let mut file = options.open(path)?;
+    // Serialize both creation and empty-file repair across processes; nobody
+    // can adopt a partially written key from another startup.
+    file.lock()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::metadata(path)?;
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
+    let mut data = String::new();
+    file.read_to_string(&mut data)?;
+    let existing = data.trim();
+    if !existing.is_empty() {
+        return Ok(existing.to_string());
     }
-    Ok(())
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf).map_err(|err| io::Error::other(err.to_string()))?;
+    let key = format!("{KEY_PREFIX}{}", hex_encode(&buf));
+    file.rewind()?;
+    file.set_len(0)?;
+    writeln!(file, "{key}")?;
+    file.sync_all()?;
+    Ok(key)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -125,5 +101,42 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_key_repair_is_secure_and_shared_by_concurrent_startups() {
+        for exists in [false, true] {
+            let path = unique_path();
+            if exists {
+                fs::write(&path, " \n").unwrap();
+            }
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let threads = (0..8)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        load_or_create_gateway_key(&path).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let keys = threads
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(keys[0].len(), 67);
+            assert!(keys.iter().all(|k| k == &keys[0]));
+            assert_eq!(fs::read_to_string(&path).unwrap().trim(), keys[0]);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            fs::remove_file(path).unwrap();
+        }
     }
 }

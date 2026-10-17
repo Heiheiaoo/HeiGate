@@ -1,10 +1,10 @@
 //! OpenAI chat chunks -> Anthropic streaming events. Ported from
 //! `internal/protocol/stream.go`.
 //!
-//! A new content block is opened whenever the kind changes or a tool call with
-//! a new upstream index appears.
+//! Text and reasoning stream immediately. Interleaved tool arguments are
+//! assembled by upstream index and emitted as sequential blocks at completion.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
@@ -14,6 +14,149 @@ use super::openai::{chat_text, ChatChunk, ToolCall};
 
 /// One Anthropic streaming event. The `type` key is always present.
 pub type Event = Value;
+
+pub(crate) const MAX_SSE_LINE_BYTES: usize = 1 << 20;
+pub(crate) const MAX_SSE_EVENT_BYTES: usize = 1 << 20;
+const MAX_PENDING_TOOL_BYTES: usize = 16 << 20;
+
+/// Bounded SSE event decoder. Data fields in a dispatched event are joined by
+/// LF, as required by the SSE format; line and event limits prevent a peer
+/// from growing either buffer without bound.
+#[derive(Debug, Default)]
+pub(crate) struct SseEventDecoder {
+    line: Vec<u8>,
+    data: Vec<u8>,
+    has_data: bool,
+    skip_lf: bool,
+    pub exceeded: bool,
+}
+
+impl SseEventDecoder {
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut events = Vec::new();
+        if self.exceeded {
+            return events;
+        }
+        for &byte in bytes {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte == b'\n' {
+                    continue;
+                }
+            }
+            match byte {
+                b'\r' => {
+                    self.process_line(&mut events);
+                    self.skip_lf = true;
+                }
+                b'\n' => self.process_line(&mut events),
+                _ => {
+                    if self.line.len() >= MAX_SSE_LINE_BYTES {
+                        self.exceeded = true;
+                        self.line.clear();
+                        self.data.clear();
+                        self.has_data = false;
+                        return events;
+                    }
+                    self.line.push(byte);
+                }
+            }
+            if self.exceeded {
+                break;
+            }
+        }
+        events
+    }
+
+    /// Completes a final data event at EOF. Callers must still require their
+    /// protocol's authoritative completion marker before reporting success.
+    pub fn finish(&mut self) -> Vec<Vec<u8>> {
+        let mut events = Vec::new();
+        if self.exceeded {
+            return events;
+        }
+        if !self.line.is_empty() {
+            self.process_line(&mut events);
+        }
+        if self.has_data {
+            events.push(std::mem::take(&mut self.data));
+            self.has_data = false;
+        }
+        events
+    }
+
+    pub fn pending_line(&self) -> &[u8] {
+        &self.line
+    }
+
+    fn process_line(&mut self, events: &mut Vec<Vec<u8>>) {
+        if self.line.is_empty() {
+            if self.has_data {
+                events.push(std::mem::take(&mut self.data));
+                self.has_data = false;
+            }
+            return;
+        }
+        if let Some(mut value) = self.line.strip_prefix(b"data:").map(<[u8]>::to_vec) {
+            // Many OpenAI-compatible servers omit the blank line between
+            // ordinary JSON data frames. If the previous accumulated fields
+            // already form a complete JSON value, dispatch it before starting
+            // the next data field; incomplete JSON fragments remain joined.
+            if self.has_data
+                && (self.data == b"[DONE]"
+                    || serde_json::from_slice::<serde_json::Value>(&self.data).is_ok())
+            {
+                events.push(std::mem::take(&mut self.data));
+                self.has_data = false;
+            }
+            // The SSE grammar removes at most one optional space after ':'.
+            if value.first() == Some(&b' ') {
+                value.remove(0);
+            }
+            let separator = usize::from(self.has_data);
+            if separator.saturating_add(value.len())
+                > MAX_SSE_EVENT_BYTES.saturating_sub(self.data.len())
+            {
+                self.exceeded = true;
+                self.line.clear();
+                self.data.clear();
+                self.has_data = false;
+                return;
+            }
+            if self.has_data {
+                self.data.push(b'\n');
+            }
+            self.data.extend_from_slice(&value);
+            self.has_data = true;
+            if self.data == b"[DONE]"
+                || serde_json::from_slice::<serde_json::Value>(&self.data).is_ok()
+            {
+                events.push(std::mem::take(&mut self.data));
+                self.has_data = false;
+            }
+        }
+        self.line.clear();
+    }
+}
+
+/// Returns the end offset of the next SSE line, including its LF, CR, or
+/// CRLF delimiter. `None` means the remaining bytes do not end a line yet.
+pub(crate) fn next_sse_line_end(bytes: &[u8]) -> Option<usize> {
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'\n' => return Some(index + 1),
+            b'\r' => {
+                return Some(if bytes.get(index + 1) == Some(&b'\n') {
+                    index + 2
+                } else {
+                    index + 1
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 /// Returns the event's `type` field.
 pub fn event_type(event: &Event) -> &str {
@@ -47,7 +190,9 @@ pub struct StreamState {
     next_index: i64,
     open_index: i64,
     open_kind: String,
-    tool_blocks: HashMap<i32, i64>,
+    pending_tools: BTreeMap<i32, ToolCall>,
+    pending_tool_bytes: usize,
+    buffer_error: bool,
     input_tokens: i64,
     output_tokens: i64,
     saw_usage: bool,
@@ -65,7 +210,9 @@ impl StreamState {
             next_index: 0,
             open_index: -1,
             open_kind: String::new(),
-            tool_blocks: HashMap::new(),
+            pending_tools: BTreeMap::new(),
+            pending_tool_bytes: 0,
+            buffer_error: false,
             input_tokens: 0,
             output_tokens: 0,
             saw_usage: false,
@@ -79,26 +226,21 @@ impl StreamState {
         let Some(chunk) = chunk else {
             return Vec::new();
         };
-        if self.finished {
+        if self.finished || self.buffer_error {
             return Vec::new();
         }
 
         let mut events: Vec<Event> = Vec::new();
+        if let Some(usage) = &chunk.usage {
+            self.saw_usage = true;
+            self.input_tokens = usage.prompt_tokens;
+            self.output_tokens = usage.completion_tokens;
+        }
         if !self.started {
             if self.message_id.is_empty() {
                 self.message_id = message_id(&chunk.id);
             }
             events.push(self.start_event());
-        }
-
-        if let Some(usage) = &chunk.usage {
-            self.saw_usage = true;
-            if usage.prompt_tokens > 0 {
-                self.input_tokens = usage.prompt_tokens;
-            }
-            if usage.completion_tokens > 0 {
-                self.output_tokens = usage.completion_tokens;
-            }
         }
 
         for choice in &chunk.choices {
@@ -128,20 +270,31 @@ impl StreamState {
             for (position, call) in choice.delta.tool_calls.iter().enumerate() {
                 self.saw_tool_calls = true;
                 let idx = call.index.unwrap_or(position as i32);
-                if !self.tool_blocks.contains_key(&idx) {
-                    events.extend(self.ensure_block("tool_use", Some(call)));
-                    self.tool_blocks.insert(idx, self.open_index);
+                let added = call
+                    .id
+                    .len()
+                    .saturating_add(call.function.name.len())
+                    .saturating_add(call.function.arguments.len());
+                if added > MAX_PENDING_TOOL_BYTES.saturating_sub(self.pending_tool_bytes)
+                    || (self.pending_tools.len() >= 1024 && !self.pending_tools.contains_key(&idx))
+                {
+                    self.buffer_error = true;
+                    self.pending_tools.clear();
+                    return Vec::new();
                 }
-                if !call.function.arguments.is_empty() {
-                    let block_index = self.tool_blocks[&idx];
-                    events.push(json!({
-                        "type": "content_block_delta",
-                        "index": block_index,
-                        "delta": {"type": "input_json_delta", "partial_json": call.function.arguments},
-                    }));
-                    let args = call.function.arguments.clone();
-                    self.count_tokens(&args);
+                self.pending_tool_bytes += added;
+                // OpenAI interleaves parallel tool arguments; Anthropic clients
+                // expect each block to finish before the next one starts.
+                let pending = self.pending_tools.entry(idx).or_default();
+                if !call.id.is_empty() {
+                    pending.id.clone_from(&call.id);
                 }
+                pending.function.name.push_str(&call.function.name);
+                pending
+                    .function
+                    .arguments
+                    .push_str(&call.function.arguments);
+                self.count_tokens(&call.function.arguments);
             }
             if let Some(finish) = &choice.finish_reason {
                 if !finish.is_empty() {
@@ -156,7 +309,7 @@ impl StreamState {
     /// Closes any open block and emits `message_delta` + `message_stop`. Safe
     /// to call even if no chunk was ever fed.
     pub fn finish(&mut self) -> Vec<Event> {
-        if self.finished {
+        if self.finished || self.buffer_error {
             return Vec::new();
         }
         self.finished = true;
@@ -168,6 +321,23 @@ impl StreamState {
             }
             events.push(self.start_event());
         }
+        for (_, call) in std::mem::take(&mut self.pending_tools) {
+            events.extend(self.ensure_block("tool_use", Some(&call)));
+            // Keep synthesized SSE lines bounded even when arguments arrived in many deltas.
+            let mut arguments = call.function.arguments.as_str();
+            while !arguments.is_empty() {
+                let mut end = arguments.len().min(32 << 10);
+                while !arguments.is_char_boundary(end) {
+                    end -= 1;
+                }
+                events.push(json!({
+                    "type": "content_block_delta",
+                    "index": self.open_index,
+                    "delta": {"type": "input_json_delta", "partial_json": &arguments[..end]},
+                }));
+                arguments = &arguments[end..];
+            }
+        }
         events.extend(self.close_block());
 
         let mut stop = self.stop_reason.clone();
@@ -178,10 +348,15 @@ impl StreamState {
                 STOP_END_TURN.to_string()
             };
         }
+        let mut usage = json!({"output_tokens": self.output_tokens});
+        // Chat upstreams report input usage at the end of the stream.
+        if self.saw_usage {
+            usage["input_tokens"] = json!(self.input_tokens);
+        }
         events.push(json!({
             "type": "message_delta",
             "delta": {"stop_reason": stop, "stop_sequence": null},
-            "usage": {"output_tokens": self.output_tokens},
+            "usage": usage,
         }));
         events.push(json!({"type": "message_stop"}));
         events
@@ -191,6 +366,10 @@ impl StreamState {
     /// reported usage itself rather than HeiGate estimating it.
     pub fn usage(&self) -> (i64, i64, bool) {
         (self.input_tokens, self.output_tokens, self.saw_usage)
+    }
+
+    pub(crate) fn buffer_limit_exceeded(&self) -> bool {
+        self.buffer_error
     }
 
     fn start_event(&mut self) -> Event {
@@ -372,6 +551,73 @@ mod tests {
     }
 
     #[test]
+    fn tool_argument_and_tool_count_buffers_are_bounded() {
+        for many_calls in [false, true] {
+            let mut state = StreamState::new("model");
+            for index in 0..=1024 {
+                let tool = ToolCall {
+                    index: Some(if many_calls { index } else { 0 }),
+                    function: super::super::openai::FunctionCall {
+                        arguments: if many_calls {
+                            "{}".into()
+                        } else {
+                            "x".repeat(256 << 10)
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let chunk = ChatChunk {
+                    choices: vec![super::super::openai::ChunkChoice {
+                        delta: super::super::openai::ChatMessage {
+                            tool_calls: vec![tool],
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                state.feed(Some(&chunk));
+                if state.buffer_limit_exceeded() {
+                    break;
+                }
+            }
+            assert!(state.buffer_limit_exceeded());
+            assert!(state.pending_tools.is_empty());
+            assert!(state.finish().is_empty());
+        }
+    }
+
+    #[test]
+    fn large_tool_arguments_are_split_into_bounded_utf8_safe_events() {
+        let arguments = "\"你好\\\n".repeat(200_000);
+        let mut state = StreamState::new("model");
+        state.feed(Some(&chunk(
+            ChatMessage {
+                tool_calls: vec![ToolCall {
+                    id: "call-1".into(),
+                    function: super::super::openai::FunctionCall {
+                        name: "tool".into(),
+                        arguments: arguments.clone(),
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            Some("tool_calls"),
+        )));
+        let events = state.finish();
+        let mut received = String::new();
+        for event in &events {
+            assert!(encode_sse(event).unwrap().len() < MAX_SSE_LINE_BYTES);
+            if let Some(part) = event["delta"]["partial_json"].as_str() {
+                received.push_str(part);
+            }
+        }
+        assert_eq!(received, arguments);
+    }
+
+    #[test]
     fn parse_sse_line_handles_data_and_done() {
         assert_eq!(
             parse_sse_line("data: {\"a\":1}"),
@@ -466,12 +712,34 @@ mod tests {
         assert!(exact);
         assert_eq!(input, 11);
         assert_eq!(output, 22);
+        let events = state.finish();
+        let usage = &events
+            .iter()
+            .find(|event| event_type(event) == "message_delta")
+            .unwrap()["usage"];
+        assert_eq!(usage["input_tokens"], 11);
+        assert_eq!(usage["output_tokens"], 22);
+    }
+
+    #[test]
+    fn first_chunk_usage_is_available_in_message_start() {
+        let mut state = StreamState::new("claude");
+        let first = ChatChunk {
+            usage: Some(crate::protocol::ChatUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+            }),
+            ..Default::default()
+        };
+        let events = state.feed(Some(&first));
+        assert_eq!(events[0]["message"]["usage"]["input_tokens"], 100);
     }
 
     #[test]
     fn tool_calls_open_blocks_keyed_by_upstream_index() {
         let mut state = StreamState::new("claude");
-        let events = state.feed(Some(&chunk(
+        let mut events = state.feed(Some(&chunk(
             ChatMessage {
                 role: "assistant".to_string(),
                 tool_calls: vec![ToolCall {
@@ -487,7 +755,12 @@ mod tests {
             },
             None,
         )));
-        let kinds: Vec<String> = events.iter().map(|e| event_type(e).to_string()).collect();
+        events.extend(state.finish());
+        let kinds: Vec<String> = events
+            .iter()
+            .take(3)
+            .map(|e| event_type(e).to_string())
+            .collect();
         assert_eq!(
             kinds,
             vec![

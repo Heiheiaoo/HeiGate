@@ -38,6 +38,7 @@ describe('channelProtocols', () => {
     expect(normalizeUrlKey('https://api.openai.com/v1/')).toBe('https://api.openai.com/v1')
     expect(normalizeUrlKey('http://API.ANTHROPIC.COM/')).toBe('http://api.anthropic.com')
     expect(normalizeUrlKey('api.deepseek.com')).toBe('https://api.deepseek.com')
+    expect(normalizeUrlKey('https://API.EXAMPLE.COM/Case')).toBe('https://api.example.com/Case')
   })
 
   it('saves and retrieves detected protocols by URL and channelId', () => {
@@ -100,5 +101,25 @@ describe('channelProtocols', () => {
     expect(byId).not.toBeNull()
     expect(byId?.supportsOpenai).toBe(true)
     expect(byId?.supportsAnthropic).toBe(true)
+  })
+
+  it('binds channel identity to its endpoint and does not reuse results for a new URL', () => {
+    saveChannelDetectedProtocols({ channelId: 1, url: 'https://original.test', supportsOpenai: true })
+    saveChannelDetectedProtocols({ url: 'https://draft.test', supportsOpenai: false, supportsResponses: true })
+    expect(getChannelDetectedProtocols(1, 'https://original.test')?.supportsOpenai).toBe(true)
+    expect(getChannelDetectedProtocols(1, 'https://draft.test')?.supportsResponses).toBe(true)
+    expect(getChannelDetectedProtocols(1, 'https://unknown.test')).toBeNull()
+    linkChannelIdProtocols(1, 'https://draft.test')
+    expect(getChannelDetectedProtocols(1)?.supportsResponses).toBe(true)
+    linkChannelIdProtocols(1, 'https://unknown.test')
+    expect(getChannelDetectedProtocols(1)).toBeNull()
+  })
+
+  it('ignores legacy unbound id entries when an endpoint is supplied', () => {
+    localStorage.setItem('heigate_channel_detected_protocols_v1', JSON.stringify({
+      'id:1': { supportsOpenai: false, supportsAnthropic: false, supportsResponses: true },
+    }))
+    _resetDetectedProtocolsCacheForTest()
+    expect(getChannelDetectedProtocols(1, 'https://original.test')).toBeNull()
   })
 })

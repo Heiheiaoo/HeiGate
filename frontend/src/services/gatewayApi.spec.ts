@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createChannel, listChannels, probeChannelDetails } from '@/services/gatewayApi'
+import { createChannel, listChannels, probeChannelDetails, injectionCheck, updateClientConfig, probeClientConnection, detectChannelProtocol } from '@/services/gatewayApi'
 
 type FetchArgs = [input: string, init?: RequestInit]
 
@@ -18,6 +18,36 @@ afterEach(() => {
 })
 
 describe('gatewayApi', () => {
+  it('keeps live model performance separate from probe health', async () => {
+    mockFetch({ data: [{
+      id: 1, model_health: [{ model: 'extra', ttft_ms: 900 }],
+      model_performance: [{ model: 'extra', ttft_ms: 140, last_ttft_ms: 300, samples: 2, updated_at: '2026-10-08T00:00:00Z' }],
+    }] })
+    const channels = await listChannels()
+    expect(channels?.[0].modelHealth[0].ttftMs).toBe(900)
+    expect(channels?.[0].modelPerformance?.[0]).toEqual({ model: 'extra', ttftMs: 140, lastTtftMs: 300, samples: 2, updatedAt: '2026-10-08T00:00:00Z' })
+  })
+
+  it('passes the selected model and preserves uncertain protocol detection', async () => {
+    const spy = mockFetch({ data: {
+      detected_protocol: null, supports_openai: false, supports_anthropic: null,
+      supports_responses: null, models: [], message: '未确认',
+    } })
+    const result = await detectChannelProtocol('https://supplier.test', '', 7, 'qwen3.8-27b')
+    expect(result).toMatchObject({ ok: true, detectedProtocol: undefined, supportsOpenai: false, supportsAnthropic: null, supportsResponses: null })
+    expect(JSON.parse((spy.mock.calls[0] as unknown as FetchArgs)[1]!.body as string)).toEqual({
+      endpoint: 'https://supplier.test', channel_id: 7, model: 'qwen3.8-27b',
+    })
+  })
+
+  it('does not discard an explicit draft detection credential when channelId is provided', async () => {
+    const spy = mockFetch({ data: { detected_protocol: null, supports_openai: null, supports_anthropic: null, models: [], message: '' } })
+    await detectChannelProtocol('https://draft.test', 'draft-secret', 7, 'model')
+    expect(JSON.parse((spy.mock.calls[0] as unknown as FetchArgs)[1]!.body as string)).toMatchObject({
+      endpoint: 'https://draft.test', api_key: 'draft-secret', channel_id: 7,
+    })
+  })
+
   it('reads channels from the local management API', async () => {
     const spy = mockFetch({
       data: [
@@ -72,5 +102,60 @@ describe('gatewayApi', () => {
     const [allUrl] = spy.mock.calls[1] as unknown as FetchArgs
     expect(singleUrl).toBe('/api/channels/7/probe?model=model%20x')
     expect(allUrl).toBe('/api/channels/7/probe?all=1')
+  })
+
+  it('keeps probe start timestamps for rejecting stale diagnostic results', async () => {
+    mockFetch({ data: [{ model: 'model', status: 'operational', checked_at: '2026-10-08T10:00:00Z' }] })
+    const results = await probeChannelDetails(7, 'model')
+    expect(results).toEqual([expect.objectContaining({ checkedAt: '2026-10-08T10:00:00Z' })])
+  })
+
+  it.each([true, false, undefined])('preserves the probe acceptance flag %s without inventing it for old backends', async accepted => {
+    mockFetch({ data: [{ model: 'model', status: 'operational', accepted }] })
+    const results = await probeChannelDetails(7, 'model')
+    expect(Array.isArray(results)).toBe(true)
+    const result = Array.isArray(results) ? results[0] : null
+    if (accepted === undefined) expect(result).not.toHaveProperty('accepted')
+    else expect(result).toHaveProperty('accepted', accepted)
+  })
+
+  it.each([true, false])('preserves injection diagnostic acceptance %s', async accepted => {
+    mockFetch({ data: { results: [{ model: 'model', state: 'clean', prompt_tokens: 20, accepted }] } })
+    expect(await injectionCheck(7, { model: 'model' })).toEqual([expect.objectContaining({ accepted })])
+  })
+})
+
+describe('client operations', () => {
+  it('reads the nested action message from a successful save', async () => {
+    mockFetch({ data: { status: 'ok', message: '已重启 Hermes' } })
+    await expect(updateClientConfig('hermes', {})).resolves.toEqual({ ok: true, message: '已重启 Hermes' })
+  })
+
+  it('surfaces action and validation failures instead of assuming save success', async () => {
+    mockFetch({ error: '网关设置已保存，但本地操作未完成：重启失败' }, false)
+    await expect(updateClientConfig('hermes', {})).resolves.toMatchObject({ ok: false, message: expect.stringContaining('重启失败') })
+    mockFetch({ data: { status: 'error', message: '失败' } })
+    await expect(updateClientConfig('hermes', {})).resolves.toMatchObject({ ok: false })
+    mockFetch({})
+    await expect(updateClientConfig('codex', {})).resolves.toMatchObject({ ok: false })
+  })
+
+  it('probes the exact draft endpoint, key and model and reads measured results', async () => {
+    const spy = mockFetch({ data: [{ model: 'draft-model', status: 'operational', latency_ms: 423 }] })
+    const config = { provider: 'openai' as const, api_mode: 'responses' as const, endpoint: 'https://example.test/v1', api_key: 'draft-key', primary_model: 'draft-model' }
+    await expect(probeClientConnection(config)).resolves.toMatchObject({ status: 'operational', latencyMs: 423 })
+    const [url, init] = spy.mock.calls[0] as unknown as FetchArgs
+    expect(url).toBe('/api/clients/probe')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(init?.body as string)).toEqual(config)
+    expect((init?.headers as Record<string, string>)['X-HeiGate-Request']).toBe('1')
+  })
+
+  it('rejects failed or empty probe responses', async () => {
+    mockFetch({ error: 'invalid endpoint' }, false)
+    const config = { provider: 'openai' as const, api_mode: 'chat_completions' as const, endpoint: '', api_key: '', primary_model: '' }
+    await expect(probeClientConnection(config)).rejects.toThrow('invalid endpoint')
+    mockFetch({ data: [] })
+    await expect(probeClientConnection(config)).rejects.toThrow('未收到有效的探测结果')
   })
 })

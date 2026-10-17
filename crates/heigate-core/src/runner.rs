@@ -7,11 +7,9 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
-
 use crate::probe::{self, Config, ProbeResult, STATUS_DEGRADED, STATUS_ERROR, STATUS_OPERATIONAL};
 use crate::resilience::{FailureClass, FailureInfo, CIRCUIT_CLOSED};
-use crate::store::{ModelHealth, Store};
+use crate::store::{Channel, ModelHealth, Store};
 
 /// Returned when a probe is already in flight for the channel.
 pub const ERR_PROBE_BUSY: &str = "probe already in progress";
@@ -127,7 +125,7 @@ impl ProbeRunner {
         for model in models {
             let lease = self
                 .key_pool
-                .acquire_for_probe(id, &model, key_id)
+                .acquire_probe_for_channel(&channel, &model, key_id)
                 .map_err(|e| RunnerError::Store(e.to_string()))?
                 .ok_or_else(|| {
                     RunnerError::Store("没有可用于探活的 Key（未配置或已停用）".into())
@@ -148,93 +146,76 @@ impl ProbeRunner {
                 result.message = result.message.replace(&lease.key.secret, "[REDACTED]");
             }
             let success = matches!(result.status.as_str(), STATUS_OPERATIONAL | STATUS_DEGRADED);
-            if success {
+            let accepted = self.persist_probe_result(&channel, &result, &lease);
+            result.accepted = Some(accepted);
+            if success && accepted {
                 let _ = lease.success(0, 0, &model);
-                let _ = self.store.clear_key_model_cooldown(lease.key.id, &model);
-            }
-            // CRITICAL: Probes must NEVER call lease.failure or engage temporary retreat cooldown on the key or model.
-            // Upstream diagnostic results are saved directly to model_health and channel headline.
-            let _ = self
-                .store
-                .set_model_health(id, &model_health_from_probe(&result));
-            if model == probed_primary {
-                self.persist_probe_results(id, &probed_primary, std::slice::from_ref(&result));
             }
             results.push(result);
         }
         Ok(results)
     }
 
-    fn persist_probe_results(&self, id: i64, expected_primary: &str, results: &[ProbeResult]) {
-        // Non-operational models are surfaced in the channel's message
-        // regardless of which is primary; the headline status and latency come
-        // from the primary alone.
-        let issues: Vec<String> = results
-            .iter()
-            .filter(|r| r.status != STATUS_OPERATIONAL && !r.message.is_empty())
-            .map(|r| format!("[{}] {}", r.model, r.message))
-            .collect();
-        let issue_text = issues.join("; ");
-
-        let primary = results
-            .iter()
-            .find(|r| r.model == expected_primary)
-            .or_else(|| results.first());
-        let Some(primary) = primary else {
-            return;
+    fn persist_probe_result(
+        &self,
+        channel: &Channel,
+        primary: &ProbeResult,
+        lease: &crate::key_pool::KeyLease,
+    ) -> bool {
+        let issue_text = if primary.status != STATUS_OPERATIONAL && !primary.message.is_empty() {
+            format!("[{}] {}", primary.model, primary.message)
+        } else {
+            String::new()
         };
-        let primary = primary.clone();
-        let expected = expected_primary.to_string();
-        let _ = self.store.update_runtime(id, move |fresh| {
-            if fresh.primary_model != expected {
-                return;
-            }
-            fresh.last_checked_at = Some(Utc::now());
-            fresh.last_ping_latency_ms = primary.ping_latency_ms;
+        self.store
+            .record_probe_result(channel, &model_health_from_probe(primary), lease, |fresh| {
+                fresh.last_checked_at = Some(primary.checked_at);
+                fresh.last_ping_latency_ms = primary.ping_latency_ms;
 
-            match primary.status.as_str() {
-                STATUS_OPERATIONAL => {
-                    fresh.last_status = STATUS_OPERATIONAL.to_string();
-                    fresh.last_latency_ms = primary.latency_ms;
-                    fresh.last_ttft_ms = primary.ttft_ms;
-                    fresh.last_error = issue_text;
-                    fresh.probe_streak += 1;
-                    fresh.failure_count = 0;
-                    fresh.circuit_state = CIRCUIT_CLOSED.to_string();
-                    fresh.cooldown_until = None;
+                match primary.status.as_str() {
+                    STATUS_OPERATIONAL => {
+                        fresh.last_status = STATUS_OPERATIONAL.to_string();
+                        fresh.last_latency_ms = primary.latency_ms;
+                        fresh.last_ttft_ms = primary.ttft_ms;
+                        fresh.last_error = issue_text;
+                        fresh.probe_streak += 1;
+                        fresh.failure_count = 0;
+                        fresh.circuit_state = CIRCUIT_CLOSED.to_string();
+                        fresh.cooldown_until = None;
+                    }
+                    STATUS_DEGRADED => {
+                        fresh.last_status = STATUS_DEGRADED.to_string();
+                        fresh.last_latency_ms = primary.latency_ms;
+                        fresh.last_ttft_ms = primary.ttft_ms;
+                        // The request completed; it is slow, not broken. Clear stale
+                        // failure/circuit state.
+                        fresh.failure_count = 0;
+                        fresh.circuit_state = CIRCUIT_CLOSED.to_string();
+                        fresh.cooldown_until = None;
+                        fresh.last_error = if !primary.message.is_empty() {
+                            format!("[{}] {}", primary.model, primary.message)
+                        } else {
+                            issue_text
+                        };
+                    }
+                    _ => {
+                        fresh.last_status = STATUS_ERROR.to_string();
+                        fresh.last_latency_ms = None;
+                        fresh.last_ttft_ms = None;
+                        fresh.last_error = if !primary.message.is_empty() {
+                            format!("[{}] {}", primary.model, primary.message)
+                        } else if !issue_text.is_empty() {
+                            issue_text
+                        } else {
+                            format!("[{}] 探活失败", primary.model)
+                        };
+                        fresh.failure_count += 1;
+                        fresh.probe_streak = 0;
+                        // Probes are diagnostic tests and must NOT engage cooldown_until or circuit breaker on the channel.
+                    }
                 }
-                STATUS_DEGRADED => {
-                    fresh.last_status = STATUS_DEGRADED.to_string();
-                    fresh.last_latency_ms = primary.latency_ms;
-                    fresh.last_ttft_ms = primary.ttft_ms;
-                    // The request completed; it is slow, not broken. Clear stale
-                    // failure/circuit state.
-                    fresh.failure_count = 0;
-                    fresh.circuit_state = CIRCUIT_CLOSED.to_string();
-                    fresh.cooldown_until = None;
-                    fresh.last_error = if !primary.message.is_empty() {
-                        format!("[{}] {}", primary.model, primary.message)
-                    } else {
-                        issue_text
-                    };
-                }
-                _ => {
-                    fresh.last_status = STATUS_ERROR.to_string();
-                    fresh.last_latency_ms = None;
-                    fresh.last_ttft_ms = None;
-                    fresh.last_error = if !primary.message.is_empty() {
-                        format!("[{}] {}", primary.model, primary.message)
-                    } else if !issue_text.is_empty() {
-                        issue_text
-                    } else {
-                        format!("[{}] 探活失败", primary.model)
-                    };
-                    fresh.failure_count += 1;
-                    fresh.probe_streak = 0;
-                    // Probes are diagnostic tests and must NOT engage cooldown_until or circuit breaker on the channel.
-                }
-            }
-        });
+            })
+            .unwrap_or(false)
     }
 
     /// Reserves the single upstream request slot for a channel. Manual probes
@@ -309,6 +290,7 @@ pub fn model_health_from_probe(result: &ProbeResult) -> ModelHealth {
 mod tests {
     use super::*;
     use crate::store::{Channel, Store};
+    use chrono::Utc;
 
     fn seed(store: &Store, model: &str) -> Channel {
         let mut channel = Channel {
@@ -342,6 +324,7 @@ mod tests {
             retry_after_secs: 0,
             key_id: 0,
             key_name: String::new(),
+            accepted: None,
             model: "gpt".to_string(),
             status: STATUS_ERROR.to_string(),
             message: "upstream HTTP 429: too many requests".to_string(),
@@ -373,5 +356,275 @@ mod tests {
         assert!(matches!(err, RunnerError::Disabled));
         // The slot was released even though the probe was rejected.
         assert!(runner.acquire_channel(channel.id));
+    }
+
+    #[tokio::test]
+    async fn an_older_probe_cannot_clear_a_new_rate_limit_but_a_fresh_probe_can() {
+        use axum::routing::post;
+        use std::time::Duration;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        ([("content-type", "text/event-stream")],
+                     "data: {\"choices\":[{\"delta\":{\"content\":\"42\"}}]}\n\ndata: [DONE]\n\n")
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let store = Store::open_in_memory().unwrap();
+        let mut channel = seed(&store, "gpt-4o");
+        channel.endpoint = format!("http://{address}");
+        store.save(&mut channel).unwrap();
+        let pool = crate::key_pool::KeyPool::new(store.clone());
+        let runner = Arc::new(ProbeRunner::with_key_pool(store.clone(), pool.clone()));
+        let probe = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.probe_now(channel.id).await.unwrap() }
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let lease = pool
+            .acquire(channel.id, "gpt-4o", &HashSet::new(), None)
+            .unwrap()
+            .unwrap();
+        lease
+            .failure(&FailureInfo::new(FailureClass::RateLimit), "gpt-4o")
+            .unwrap();
+        let live_failure_at = Utc::now();
+        let router = crate::router::Router::new(store.clone());
+        router.apply_live_outcome(
+            &channel,
+            "gpt-4o",
+            Some(&FailureInfo::new(FailureClass::RateLimit)),
+            "new live rate limit",
+            10,
+            live_failure_at,
+        );
+        release.notify_one();
+        let results = tokio::time::timeout(Duration::from_secs(5), probe)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(results[0].status, STATUS_OPERATIONAL);
+        assert_eq!(results[0].accepted, Some(false));
+        let saved = store.get(channel.id).unwrap();
+        assert_eq!(saved.last_checked_at, Some(live_failure_at));
+        assert_eq!(saved.model_health[0].status, STATUS_ERROR);
+        assert_eq!(saved.model_health[0].error, "new live rate limit");
+        assert!(pool
+            .acquire(channel.id, "gpt-4o", &HashSet::new(), None)
+            .unwrap()
+            .is_none());
+        assert!(pool.retry_after_model(channel.id, "gpt-4o") > Duration::from_secs(290));
+
+        // A new user-initiated sample may recover the same cooled model.
+        release.notify_one();
+        let results = runner.probe_now(channel.id).await.unwrap();
+        assert_eq!(results[0].status, STATUS_OPERATIONAL);
+        assert_eq!(results[0].accepted, Some(true));
+        assert_eq!(
+            store.get(channel.id).unwrap().model_health[0].status,
+            STATUS_OPERATIONAL
+        );
+        assert!(pool
+            .acquire(channel.id, "gpt-4o", &HashSet::new(), None)
+            .unwrap()
+            .is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_old_endpoint_probe_cannot_poison_a_new_upstream() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let store = Store::open_in_memory().unwrap();
+        let mut channel = seed(&store, "gpt-4o");
+        channel.endpoint = endpoint;
+        store.save(&mut channel).unwrap();
+        let runner = Arc::new(ProbeRunner::new(store.clone()));
+        let request = tokio::spawn({
+            let runner = runner.clone();
+            let id = channel.id;
+            async move { runner.probe_now(id).await.unwrap() }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        channel.endpoint = "https://new.example.test".into();
+        store.save(&mut channel).unwrap();
+        release.notify_one();
+        let results = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(results[0].status, STATUS_ERROR);
+        assert_eq!(results[0].accepted, Some(false));
+        let saved = store.get(channel.id).unwrap();
+        assert_eq!(saved.last_status, "unknown");
+        assert!(saved.model_health.is_empty() && saved.last_checked_at.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_probe_reports_rejection_after_its_credential_is_replaced() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post({
+            let entered = entered.clone();
+            let release = release.clone();
+            move || {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    ([("content-type", "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let store = Store::open_in_memory().unwrap();
+        let mut channel = seed(&store, "gpt-4o");
+        channel.endpoint = endpoint;
+        store.save(&mut channel).unwrap();
+        let runner = Arc::new(ProbeRunner::new(store.clone()));
+        let request = tokio::spawn({
+            let runner = runner.clone();
+            let id = channel.id;
+            async move { runner.probe_now(id).await.unwrap() }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let key = store.list_keys(channel.id).unwrap().remove(0);
+        store
+            .patch_key(
+                channel.id,
+                key.id,
+                &crate::store_keys::KeyPatch {
+                    secret: Some("replacement-secret".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        release.notify_one();
+        let results = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(results[0].status, STATUS_OPERATIONAL);
+        assert_eq!(results[0].accepted, Some(false));
+        assert_eq!(
+            serde_json::to_value(&results[0]).unwrap()["accepted"],
+            false
+        );
+        let saved = store.get(channel.id).unwrap();
+        assert_eq!(saved.last_status, "unknown");
+        assert!(saved.model_health.is_empty() && saved.last_checked_at.is_none());
+        assert_eq!(store.list_keys(channel.id).unwrap()[0].successes, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_chat_finish_frame_cannot_hide_a_later_error_or_clear_model_cooldown() {
+        use futures_util::{stream, StreamExt};
+        use std::time::Duration;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post({
+            let entered = entered.clone();
+            let release = release.clone();
+            move || {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    let first = stream::once(async move {
+                        entered.notify_one();
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"))
+                    });
+                    let tail = stream::once(async move {
+                        release.notified().await;
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"error\":{\"code\":429,\"message\":\"late rate limit\"}}\n\n"))
+                    });
+                    axum::response::Response::builder().header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from_stream(first.chain(tail))).unwrap()
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let store = Store::open_in_memory().unwrap();
+        let mut channel = seed(&store, "gpt-4o");
+        channel.endpoint = endpoint;
+        store.save(&mut channel).unwrap();
+        let pool = crate::key_pool::KeyPool::new(store.clone());
+        let lease = pool
+            .acquire(channel.id, "gpt-4o", &HashSet::new(), None)
+            .unwrap()
+            .unwrap();
+        lease
+            .failure(&FailureInfo::new(FailureClass::RateLimit), "gpt-4o")
+            .unwrap();
+        let runner = Arc::new(ProbeRunner::with_key_pool(store.clone(), pool.clone()));
+        let mut request = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.probe_now(channel.id).await.unwrap() }
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut request)
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        let results = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(results[0].status, STATUS_ERROR);
+        assert_eq!(results[0].accepted, Some(true));
+        assert!(results[0].message.contains("late rate limit"));
+        assert_eq!(store.list_keys(channel.id).unwrap()[0].successes, 0);
+        assert!(!pool.retry_after_model(channel.id, "gpt-4o").is_zero());
+        server.abort();
     }
 }

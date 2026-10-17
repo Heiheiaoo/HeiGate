@@ -1,6 +1,6 @@
 //! Credentials have stable identities independent of their position in a pool.
 //! Runtime updates never write channel configuration or resurrect deleted keys.
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -100,6 +100,7 @@ pub(crate) fn sync_legacy_key(conn: &Connection, channel_id: i64, secret: &str) 
                 ));
             }
             conn.execute("UPDATE channel_keys SET secret=?,auth_invalid=0,rate_limit_count=0,cooldown_until=NULL,last_error='',generation=generation+1 WHERE id=?", params![secret,id])?;
+            conn.execute("DELETE FROM channel_key_models WHERE key_id=?", [id])?;
         }
         _ => {}
     }
@@ -137,6 +138,7 @@ impl Store {
                 model TEXT NOT NULL,
                 unavailable_until TEXT NOT NULL,
                 rate_limit_count INTEGER NOT NULL DEFAULT 0,
+                generation INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(key_id,model)
             );
             INSERT INTO channel_keys(channel_id,name,secret,cooldown_until,last_error)
@@ -145,6 +147,14 @@ impl Store {
         )?;
         if let Err(err) = tx.execute(
             "ALTER TABLE channel_key_models ADD COLUMN rate_limit_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        ) {
+            if !err.to_string().to_lowercase().contains("duplicate column") {
+                return Err(StoreError::Db(err));
+            }
+        }
+        if let Err(err) = tx.execute(
+            "ALTER TABLE channel_key_models ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
             [],
         ) {
             if !err.to_string().to_lowercase().contains("duplicate column") {
@@ -194,6 +204,23 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Returns credentials whose selected model is not in model-scoped
+    /// cooldown. Global credential health is checked by the caller.
+    pub fn model_cooling_key_ids(&self, channel_id: i64, model: &str) -> Result<HashSet<i64>> {
+        if model.trim().is_empty() {
+            return Ok(HashSet::new());
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT key_id FROM channel_key_models \
+             WHERE model=? AND unavailable_until>? \
+             AND key_id IN (SELECT id FROM channel_keys WHERE channel_id=?)",
+        )?;
+        let rows = stmt.query_map(params![model, now, channel_id], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<HashSet<_>, _>>()?)
     }
 
     pub fn add_key(&self, channel_id: i64, input: &KeyInput) -> Result<()> {
@@ -283,8 +310,8 @@ impl Store {
         if let Some(enabled) = patch.enabled {
             // Enabling is not a cooldown bypass.
             tx.execute(
-                "UPDATE channel_keys SET enabled=? WHERE id=?",
-                params![enabled, id],
+                "UPDATE channel_keys SET enabled=?,generation=generation+1 WHERE id=? AND enabled<>?",
+                params![enabled, id, enabled],
             )?;
         }
         if let Some(position) = patch.position {

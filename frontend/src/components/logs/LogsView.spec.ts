@@ -6,6 +6,12 @@ import LogsView from './LogsView.vue'
 const logs = [{ id: 1, created_at: '2026-10-03T10:00:00Z', status_code: 200, model: 'gpt-5', channel_id: 1, channel_name: 'Primary', latency_ms: 1200, ttft_ms: 300, prompt_tokens: 10, completion_tokens: 20, is_stream: true, is_failover: false, failover_from: '', upstream_model: '', error_message: '' }]
 
 describe('LogsView', () => {
+  it('displays absent TTFT separately from total latency', () => {
+    const wrapper = mount(LogsView, { props: { logs: [{ ...logs[0], latency_ms: 9000, ttft_ms: 0, is_stream: false }], totalLogs: 1, search: '', streamConnected: true, autoScroll: false, clearing: false } })
+    expect(wrapper.get('.m26-pill-ttft').text()).toBe('-')
+    expect(wrapper.text()).toContain('9.00s')
+  })
+
   it('renders log rows and emits row actions', async () => {
     const wrapper = mount(LogsView, { props: { logs, totalLogs: 1, search: '', streamConnected: true, autoScroll: true, clearing: false } })
     expect(wrapper.text()).toContain('gpt-5')

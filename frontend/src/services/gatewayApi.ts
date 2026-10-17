@@ -32,6 +32,13 @@ export type ApiChannel = {
     error: string
     checkedAt: string | null
   }>
+  modelPerformance?: Array<{
+    model: string
+    ttftMs: number
+    lastTtftMs: number
+    samples: number
+    updatedAt: string
+  }>
 }
 
 type ApiRecord = Record<string, unknown>
@@ -90,6 +97,10 @@ function normalizeChannel(record: ApiRecord): ApiChannel {
         error: String(item.error ?? ''),
         checkedAt: item.checked_at ? String(item.checked_at) : null,
       }
+    }) : [],
+    modelPerformance: Array.isArray(record.model_performance) ? record.model_performance.map((rawItem: unknown) => {
+      const item = asRecord(rawItem)
+      return { model: String(item.model ?? ''), ttftMs: Number(item.ttft_ms), lastTtftMs: Number(item.last_ttft_ms), samples: Number(item.samples), updatedAt: String(item.updated_at ?? '') }
     }) : [],
   }
 }
@@ -177,6 +188,8 @@ export async function deleteChannel(id: number): Promise<boolean> {
 
 export type ProbeResult = {
   model: string
+  accepted?: boolean
+  checkedAt?: string
   status: string
   latencyMs?: number | null
   ttftMs?: number | null
@@ -235,6 +248,8 @@ export async function probeChannelDetails(
       const item = asRecord(rawItem)
       return {
         model: String(item.model ?? item.Model ?? ''),
+        ...(typeof item.accepted === 'boolean' ? { accepted: item.accepted } : {}),
+        checkedAt: String(item.checked_at ?? item.CheckedAt ?? ''),
         status: String(item.status ?? item.Status ?? 'unknown'),
         latencyMs: numberOrNull(item.latency_ms ?? item.LatencyMs),
         ttftMs: numberOrNull(item.ttft_ms ?? item.TTFTMs),
@@ -249,6 +264,7 @@ export async function probeChannelDetails(
 
 export type ModelInjectionResult = {
   model: string
+  accepted?: boolean
   state: 'clean' | 'suspected' | 'detected' | 'error'
   prompt_tokens: number
   content?: string
@@ -499,9 +515,9 @@ export async function fetchUpstreamModels(
 export type DetectProtocolResult = {
   ok: boolean
   detectedProtocol?: 'openai-compatible' | 'anthropic' | 'openai-responses'
-  supportsOpenai?: boolean
-  supportsAnthropic?: boolean
-  supportsResponses?: boolean
+  supportsOpenai?: boolean | null
+  supportsAnthropic?: boolean | null
+  supportsResponses?: boolean | null
   models?: string[]
   message?: string
   error?: string
@@ -511,22 +527,24 @@ export async function detectChannelProtocol(
   endpointUrl: string,
   apiKey: string,
   channelId?: number,
+  model?: string,
 ): Promise<DetectProtocolResult> {
   try {
     const response = await request('/channels/detect-protocol', {
       method: 'POST',
       body: JSON.stringify({
         endpoint: endpointUrl,
-        api_key: channelId ? undefined : apiKey,
+        api_key: apiKey || undefined,
         channel_id: channelId,
+        model,
       }),
     })
     const payload = (await response.json()) as {
       data?: {
-        detected_protocol: string
-        supports_openai: boolean
-        supports_anthropic: boolean
-        supports_responses?: boolean
+        detected_protocol: string | null
+        supports_openai: boolean | null
+        supports_anthropic: boolean | null
+        supports_responses?: boolean | null
         models: string[]
         message: string
       }
@@ -537,7 +555,7 @@ export async function detectChannelProtocol(
     }
     return {
       ok: true,
-      detectedProtocol: payload.data.detected_protocol as any,
+      detectedProtocol: payload.data.detected_protocol as DetectProtocolResult['detectedProtocol'] ?? undefined,
       supportsOpenai: payload.data.supports_openai,
       supportsAnthropic: payload.data.supports_anthropic,
       supportsResponses: payload.data.supports_responses,
@@ -698,6 +716,62 @@ export async function getClientConfigs(): Promise<Record<string, ClientPlatformB
 export interface ClientConfigUpdateResult {
   ok: boolean
   message?: string
+  config?: CodexLocalConfigStatus
+}
+
+export type CodexLocalConfigStatus = {
+  path: string
+  exists: boolean
+  managed: boolean
+  modified: boolean
+  backup_exists: boolean
+  parse_error?: string | null
+  provider?: string | null
+  catalog_path?: string
+  catalog_managed?: boolean
+}
+
+export async function getCodexConfigStatus(): Promise<CodexLocalConfigStatus> {
+  const response = await request('/clients/codex/status')
+  const payload = await response.json() as { data?: CodexLocalConfigStatus; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error || '读取 Codex 配置状态失败')
+  return payload.data
+}
+
+export type CodexApplyOptions = {
+  model: string
+  mode: 'direct' | 'gateway'
+  channel_id?: number
+  models?: string[]
+  restart?: boolean
+}
+
+async function codexConfigAction(action: 'apply' | 'restore', options?: CodexApplyOptions): Promise<ClientConfigUpdateResult> {
+  try {
+    const response = await request(`/clients/codex/${action}`, {
+      method: 'POST',
+      ...(action === 'apply' ? { body: JSON.stringify(options) } : {}),
+    })
+    const payload = await response.json() as {
+      data?: { status?: string; message?: string; config?: CodexLocalConfigStatus }
+      error?: string
+    }
+    return {
+      ok: response.ok && payload.data?.status === 'ok',
+      message: payload.error || payload.data?.message,
+      config: payload.data?.config,
+    }
+  } catch (err: any) {
+    return { ok: false, message: err?.message }
+  }
+}
+
+export function applyCodexConfig(options: CodexApplyOptions): Promise<ClientConfigUpdateResult> {
+  return codexConfigAction('apply', options)
+}
+
+export function restoreCodexConfig(): Promise<ClientConfigUpdateResult> {
+  return codexConfigAction('restore')
 }
 
 export async function updateClientConfig(
@@ -709,10 +783,41 @@ export async function updateClientConfig(
       method: 'PUT',
       body: JSON.stringify(payload),
     })
-    const payloadJson = (await response.json().catch(() => ({}))) as { message?: string }
-    return { ok: response.ok, message: payloadJson.message }
+    const payloadJson = (await response.json().catch(() => ({}))) as {
+      data?: { status?: string; message?: string }
+      error?: string
+      message?: string
+    }
+    return {
+      ok: response.ok && payloadJson.data?.status === 'ok',
+      message: payloadJson.error || payloadJson.data?.message || payloadJson.message,
+    }
   } catch (err: any) {
     return { ok: false, message: err?.message }
   }
 }
 
+
+export async function probeClientConnection(config: {
+  provider: 'openai' | 'anthropic'
+  api_mode: 'chat_completions' | 'responses'
+  endpoint: string
+  api_key: string
+  primary_model: string
+}): Promise<ProbeResult> {
+  const response = await request('/clients/probe', {
+    method: 'POST',
+    body: JSON.stringify(config),
+  }, PROBE_TIMEOUT_MS)
+  const payload = await response.json() as { data?: unknown[]; error?: string }
+  if (!response.ok || !payload.data?.length) {
+    throw new Error(payload.error || '未收到有效的探测结果')
+  }
+  const item = asRecord(payload.data[0])
+  return {
+    model: String(item.model ?? ''),
+    status: String(item.status ?? 'unknown'),
+    latencyMs: numberOrNull(item.latency_ms),
+    message: String(item.message ?? ''),
+  }
+}

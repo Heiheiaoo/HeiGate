@@ -41,17 +41,6 @@ export type ClientPlatformItem = {
   lastBackupTime?: string
 }
 
-export type PlatformSaveEvent = {
-  platformId: ClientPlatformId
-  mode: ClientMode
-  direct: ClientDirectConfig
-  gateway: ClientGatewayConfig
-  launchAfterSave?: boolean
-  applyLocal?: boolean
-  restart?: boolean
-  launchTerminal?: boolean
-}
-
 export function filterChannelsForPlatform(platformId: ClientPlatformId, channels: Channel[]): Channel[] {
   if (platformId === 'claude-desktop' || platformId === 'claude-code') {
     // Claude 客户端：优先展示 Anthropic 协议供应商，或拥有 Claude 模型的供应商
@@ -60,8 +49,11 @@ export function filterChannelsForPlatform(platformId: ClientPlatformId, channels
     return channels.filter(c => (c.modelNames || []).some(m => m.toLowerCase().includes('claude')))
   }
   if (platformId === 'codex') {
-    // Codex 客户端：优先展示 OpenAI 兼容协议供应商
-    return channels.filter(c => c.protocol !== 'anthropic')
+    // 一个上游可能同时实现 Chat 与 Responses；protocol 是网关当前选用
+    // 的模式，supportsResponses 才表达该地址实际提供的全部协议能力。
+    const responses = channels.filter(c => c.enabled && (c.protocol === 'openai-responses' || c.supportsResponses === true))
+    if (responses.length > 0) return responses
+    return channels.filter(c => c.enabled && c.protocol === 'openai-compatible')
   }
   // Hermes 默认走网关，可使用全部可用供应商
   return channels

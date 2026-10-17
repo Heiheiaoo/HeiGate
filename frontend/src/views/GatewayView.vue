@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { clearValue, readValue, writeValue } from '@/services/storage'
+import type { Ref } from 'vue'
+import { clearValue, readValue } from '@/services/storage'
 import { checkGatewayHealth } from '@/services/health'
 import { configRequest, downloadConfig } from '@/services/configTransfer'
 import {
@@ -24,7 +25,6 @@ import {
   getCustomModelMappings,
   setCustomModelMapping,
   deleteCustomModelMapping,
-  updateClientConfig,
   type ApiChannel,
   type RequestLog,
   type SystemInfo,
@@ -43,6 +43,7 @@ import {
   getChannelDetectedProtocols,
   saveChannelDetectedProtocols,
   linkChannelIdProtocols,
+  normalizeUrlKey,
 } from '@/services/channelProtocols'
 import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
@@ -62,7 +63,6 @@ import StorageSettings from '@/components/settings/StorageSettings.vue'
 import ModelRulesSettings from '@/components/settings/ModelRulesSettings.vue'
 import DesktopGeneralSettings from '@/components/settings/DesktopGeneralSettings.vue'
 import ClientsView from '@/components/clients/ClientsView.vue'
-import type { PlatformSaveEvent } from '@/components/clients/types'
 import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
 // canonical definition lives in components/channels/types.ts.
@@ -243,14 +243,18 @@ const editProtocolDetectMessage = ref<{ type: 'success' | 'warn' | 'error'; text
 const editProtoSupportsOpenai = ref<boolean | null>(null)
 const editProtoSupportsAnthropic = ref<boolean | null>(null)
 const editProtoSupportsResponses = ref<boolean | null>(null)
+const editDetectionApiKey = ref('')
+const editEndpointChanged = computed(() => normalizeUrlKey(normalizeEndpointUrl(editChannelUrl.value))
+  !== normalizeUrlKey(normalizeEndpointUrl(editingChannel.value?.url || '')))
+let newDetectionRevision = 0
+let editDetectionRevision = 0
+let newModelsRevision = 0
+let editModelsRevision = 0
+let channelsRefreshRevision = 0
+let applyingDetectedNewModels = false
+let applyingDetectedEditModels = false
 const hasManuallyChangedEditProtocol = ref(false)
 const showManualEditProto = ref(false)
-
-function formatProtocolName(protocol: Channel['protocol'] | string): string {
-  if (protocol === 'anthropic') return 'Anthropic 原生协议'
-  if (protocol === 'openai-responses') return 'OpenAI Responses 规范'
-  return 'OpenAI 兼容协议'
-}
 
 const configInput = ref<HTMLInputElement | null>(null)
 const gatewayApiActive = ref(false)
@@ -265,6 +269,15 @@ const systemInfo = ref<SystemInfo | null>(null)
 const hideDockIcon = ref<boolean>(false)
 const logRetentionDays = ref<number>(7)
 const logMaxCount = ref<number>(5000)
+const settingsRevision = ref(0)
+type GatewaySettings = Parameters<typeof updateSettings>[0]
+type SettingValue = NonNullable<GatewaySettings[keyof GatewaySettings]>
+const settingSaves = new Map<keyof GatewaySettings, {
+  revision: number
+  pending: number
+  confirmed: SettingValue
+  queue: Promise<void>
+}>()
 const isPruningLogs = ref(false)
 const isClearingLogs = ref(false)
 const desktopLogs = ref<RequestLog[]>([])
@@ -272,6 +285,7 @@ const activeLogDetail = ref<RequestLog | null>(null)
 const logsStreamConnected = ref(false)
 const autoScrollLogs = ref(true)
 let logsUnsubscribe: (() => void) | null = null
+let modelPerformanceRefreshTimer: ReturnType<typeof setTimeout> | null = null
 const logsTableWrapRef = ref<HTMLDivElement | null>(null)
 const logsViewRef = ref<InstanceType<typeof LogsView> | null>(null)
 const copiedModelId = ref('')
@@ -284,32 +298,6 @@ function showToast(msg: string) {
   toastTimer = window.setTimeout(() => {
     toastMessage.value = ''
   }, 2400)
-}
-
-function onClientPlatformSave(event: PlatformSaveEvent) {
-  const isHermes = event.platformId === 'hermes'
-  const applyLocal = event.applyLocal ?? isHermes
-  const restart = event.restart ?? (isHermes && !event.launchAfterSave)
-  const launchTerminal = event.launchTerminal ?? (isHermes && Boolean(event.launchAfterSave))
-
-  void updateClientConfig(event.platformId, {
-    strategy: event.gateway.strategy,
-    allowed_channels: event.gateway.allowedChannels,
-    model: event.gateway.model,
-    small_model: event.direct.smallModel,
-    allowed_models: event.gateway.allowedModels,
-    apply_local: applyLocal,
-    restart: restart,
-    launch_terminal: launchTerminal,
-  }).then((res) => {
-    if (res?.message) {
-      showToast(res.message)
-    } else if (event.launchAfterSave) {
-      showToast(`配置已保存，正在启动 ${event.platformId}...`)
-    } else {
-      showToast(`${event.platformId} 配置已成功保存到网关与本地`)
-    }
-  })
 }
 
 const gatewayBaseUrl = computed(() => {
@@ -447,10 +435,11 @@ const models = computed(() => {
       const modelKey = getModelKey(channel, rawModelName)
       const specificEntry = modelLatencies.value[modelKey]
       const isPrimary = isPrimaryModel(channel, rawModelName)
-      const effectiveLat = specificEntry?.latency != null
+      const performance = getModelPerformance(channel, rawModelName)
+      const effectiveLat = performance?.ttftMs ?? (specificEntry?.latency != null
         ? (specificEntry.ttft ?? specificEntry.latency)
-        : (isPrimary ? (channel.ttft ?? channel.latency) : null)
-      const effectiveStatus = specificEntry?.status
+        : (isPrimary ? (channel.ttft ?? channel.latency) : null))
+      const effectiveStatus = performance && !isModelFailed(channel, rawModelName) ? 'healthy' : specificEntry?.status
         ? (specificEntry.status === 'operational' ? 'healthy' : specificEntry.status === 'degraded' ? 'degraded' : 'offline')
         : (isPrimary ? channel.status : 'unknown')
 
@@ -849,6 +838,7 @@ function fromDesktopChannel(item: ApiChannel): Channel {
     injectionContent: item.injectionContent ?? '',
     injectionCheckedAt: item.injectionCheckedAt ?? null,
     modelHealth: item.modelHealth ?? [],
+    modelPerformance: item.modelPerformance ?? [],
     keyCount: item.keyCount,
     keyAvailableCount: item.keyAvailableCount,
     keyCoolingCount: item.keyCoolingCount,
@@ -890,30 +880,63 @@ function toDesktopChannel(channel: Channel): ApiChannel {
 }
 
 async function refreshChannels() {
+  const revision = ++channelsRefreshRevision
   const remote = await listChannels()
+  if (revision !== channelsRefreshRevision) return false
   if (remote === null) {
     gatewayApiActive.value = false
     return false
   }
   gatewayApiActive.value = true
-  channels.value = remote.map(fromDesktopChannel)
+  const validKeys = new Set<string>()
+  for (const item of remote) {
+    const channel = fromDesktopChannel(item)
+    const previous = channels.value.find(old => old.gatewayId === channel.gatewayId)
+    if (previous && previous.url === channel.url && previous.protocol === channel.protocol) {
+      for (const model of channel.modelNames ?? []) validKeys.add(getModelKey(channel, model))
+    }
+  }
+  for (const key of Object.keys(modelLatencies.value)) {
+    if (!validKeys.has(key)) delete modelLatencies.value[key]
+  }
+  for (const key of Object.keys(modelInjections.value)) {
+    if (!validKeys.has(key)) delete modelInjections.value[key]
+  }
+  channels.value = remote.map(item => {
+    const fresh = fromDesktopChannel(item)
+    const previous = channels.value.find(old => old.gatewayId === fresh.gatewayId)
+    if (previous?.url === fresh.url && previous.protocol === fresh.protocol) fresh.probing = previous.probing
+    return fresh
+  })
+  if (activeModelLatencyChannel.value) {
+    const fresh = channels.value.find((channel) => channel.gatewayId === activeModelLatencyChannel.value?.gatewayId)
+    if (fresh) activeModelLatencyChannel.value = fresh
+  }
   for (const channel of channels.value) {
     if (channel.gatewayId && channel.url) {
       linkChannelIdProtocols(channel.gatewayId, channel.url)
     }
     for (const health of channel.modelHealth ?? []) {
       const key = getModelKey(channel, health.model)
-      if (!modelLatencies.value[key]?.probing) {
-        modelLatencies.value[key] = {
-          latency: health.latencyMs,
-          ttft: health.ttftMs,
-          probing: false,
-          status: health.status,
-          error: health.error || null,
-          message: health.error || (health.status === 'degraded' ? '响应稍慢' : ''),
-          checkedAt: health.checkedAt,
-        }
+      modelLatencies.value[key] = {
+        latency: health.latencyMs,
+        ttft: health.ttftMs,
+        probing: modelLatencies.value[key]?.probing ?? false,
+        status: health.status,
+        error: health.error || null,
+        message: health.error || (health.status === 'degraded' ? '响应稍慢' : ''),
+        checkedAt: health.checkedAt,
       }
+    }
+    const primaryModel = channel.primaryModel || channel.modelNames?.[0]
+    if (primaryModel) getModelInjection(channel, primaryModel)
+  }
+  if (showInjectionModal.value && injectionChannel.value?.gatewayId) {
+    const current = channels.value.find(channel => channel.gatewayId === injectionChannel.value?.gatewayId)
+    if (current) {
+      injectionChannel.value = current
+      injectionResults.value = injectionResults.value.map(result =>
+        getModelInjection(current, result.model) || result)
     }
   }
   return true
@@ -921,8 +944,8 @@ async function refreshChannels() {
 
 async function persistChannel(channel: Channel): Promise<boolean> {
   if (!gatewayApiActive.value) {
-    await saveChannels()
-    return true
+    showToast('本地网关未连接，渠道更改未保存，请连接后重试')
+    return false
   }
   const saved = await updateChannel(toDesktopChannel(channel))
   // 单次失败只提示，不切换到本地存储模式：一旦切换，后续编辑会写进本地，
@@ -938,7 +961,23 @@ async function probeChannel(channel: Channel) {
   if (channel.probing) return
   channel.probing = true
   if (gatewayApiActive.value && channel.gatewayId) {
+    const snapshot = { ...channel }
+    const startedAt = new Date().toISOString()
     const details = await probeChannelDetails(channel.gatewayId)
+    await refreshChannels()
+    const visible = channels.value.find(item => item.gatewayId === snapshot.gatewayId && item.url === snapshot.url && item.protocol === snapshot.protocol)
+    if (visible) visible.probing = false
+    const primaryResult = Array.isArray(details) ? details.find(item => isPrimaryModel(snapshot, item.model)) : undefined
+    if (primaryResult?.accepted === false) {
+      channel.probing = false
+      showToast('渠道配置或状态已更新，旧探活结果已忽略')
+      return
+    }
+    const current = currentDiagnosticChannel(snapshot, snapshot.primaryModel || snapshot.modelNames?.[0] || '', primaryResult?.checkedAt || startedAt)
+    channel.probing = false
+    if (!current) return
+    channel = current
+    channel.probing = false
     if (details === 'busy') {
       channel.probing = false
       showToast(`渠道“${channel.name}”已有探活正在进行，请稍候刷新查看`)
@@ -962,6 +1001,7 @@ async function probeChannel(channel: Channel) {
     }
     if (details.length > 0) {
       for (const res of details) {
+        if (res.accepted === false) continue
         const key = getModelKey(channel, res.model)
         const isOk = res.status === 'operational' || res.status === 'degraded' || res.status === 'healthy'
         const hasErr = !isOk
@@ -973,7 +1013,7 @@ async function probeChannel(channel: Channel) {
           status: res.status,
           error: errMsg,
           message: hasErr ? errMsg! : (res.status === 'degraded' ? '响应稍慢' : ''),
-          checkedAt: new Date().toISOString(),
+          checkedAt: res.checkedAt || startedAt,
         }
       }
       const primaryRes = details.find((d) => isPrimaryModel(channel, d.model)) || details[0]
@@ -990,7 +1030,6 @@ async function probeChannel(channel: Channel) {
         }
       }
     }
-    await refreshChannels()
     channel.probing = false
     const primaryRes = details?.find((d) => isPrimaryModel(channel, d.model)) || details?.[0]
     const pModelName = primaryRes?.model || channel.primaryModel || '主模型'
@@ -1034,18 +1073,7 @@ async function duplicateChannel(channel: Channel) {
     showToast(`复制渠道“${channel.name}”失败，请检查网关状态后重试`)
     return
   }
-  const copy: Channel = {
-    ...channel,
-    name: `${channel.name} (副本)`,
-    gatewayId: undefined,
-    status: 'offline',
-    latency: null,
-    ttft: null,
-    lastCheck: '尚未探活',
-  }
-  channels.value.push(copy)
-  await saveChannels()
-  showToast(`已成功复制渠道“${channel.name}”`)
+  showToast('本地网关未连接，无法复制渠道，请连接后重试')
 }
 
 // ---- 注入检测 ----
@@ -1071,18 +1099,24 @@ function copyInjectionContent(content?: string) {
 
 function getModelInjection(channel: Channel, modelName: string): ModelInjectionResult | null {
   const key = getModelKey(channel, modelName)
-  const r = modelInjections.value[key]
-  if (r) return r
+  const cached = modelInjections.value[key]
   if (isPrimaryModel(channel, modelName) && channel.injectionState && channel.injectionState !== 'unknown') {
-    return {
+    const persisted: ModelInjectionResult = {
       model: modelName,
       state: channel.injectionState,
       prompt_tokens: channel.injectionTokens ?? 0,
       content: channel.injectionContent,
       checked_at: channel.injectionCheckedAt ?? '',
     }
+    const cachedAt = cached?.checked_at ? Date.parse(cached.checked_at) : Number.NaN
+    const persistedAt = persisted.checked_at ? Date.parse(persisted.checked_at) : Number.NaN
+    if (!cached || (!Number.isFinite(cachedAt) && Number.isFinite(persistedAt))
+      || (Number.isFinite(persistedAt) && persistedAt >= cachedAt)) {
+      modelInjections.value[key] = persisted
+      return persisted
+    }
   }
-  return null
+  return cached ?? null
 }
 
 function isModelCheckingInjection(channel: Channel, modelName: string): boolean {
@@ -1125,13 +1159,19 @@ async function checkSingleModelInjection(channel: Channel, modelName: string) {
   const key = getModelKey(channel, modelName)
   if (modelCheckingInjection.value[key]) return
   modelCheckingInjection.value[key] = true
+  const snapshot = { ...channel }
   try {
     const results = await injectionCheck(channel.gatewayId, { model: modelName })
+    await refreshChannels()
     if (!results || results.length === 0) {
       showToast(`模型 [${modelName}] 注入检测失败`)
       return
     }
     const r = results[0]
+    if (r.accepted === false) return
+    const current = currentDiagnosticChannel(snapshot, modelName, r.checked_at, true)
+    if (!current) return
+    channel = current
     modelInjections.value[key] = r
     if (isPrimaryModel(channel, modelName)) {
       channel.injectionState = r.state
@@ -1178,20 +1218,27 @@ function requestBatchModelAction(channel: Channel, action: 'probe' | 'injection'
 
 async function checkModelsInjection(channel: Channel, models: string[]): Promise<ModelInjectionResult[]> {
   if (!channel.gatewayId || isCheckingAllInjections.value || models.length === 0) return []
+  const channelId = channel.gatewayId
   isCheckingAllInjections.value = true
   const results: ModelInjectionResult[] = []
+  const snapshot = { ...channel }
   try {
     let failed = 0
     for (const model of models) {
       const key = getModelKey(channel, model)
       modelCheckingInjection.value[key] = true
       try {
-        const modelResults = await injectionCheck(channel.gatewayId, { model })
+        const modelResults = await injectionCheck(channelId, { model })
+        await refreshChannels()
         if (!modelResults?.length) {
           failed++
           continue
         }
         for (const result of modelResults) {
+          if (result.accepted === false) continue
+          const current = currentDiagnosticChannel(snapshot, result.model, result.checked_at, true)
+          if (!current) continue
+          channel = current
           modelInjections.value[getModelKey(channel, result.model)] = result
           results.push(result)
           if (isPrimaryModel(channel, result.model)) {
@@ -1219,17 +1266,7 @@ async function checkModelsInjection(channel: Channel, models: string[]): Promise
 }
 
 function openModelInjectionDetail(channel: Channel, modelName: string) {
-  const key = getModelKey(channel, modelName)
-  let r = modelInjections.value[key]
-  if (!r && isPrimaryModel(channel, modelName) && channel.injectionState && channel.injectionState !== 'unknown') {
-    r = {
-      model: modelName,
-      state: channel.injectionState,
-      prompt_tokens: channel.injectionTokens ?? 0,
-      content: channel.injectionContent,
-      checked_at: channel.injectionCheckedAt ?? '',
-    }
-  }
+  const r = getModelInjection(channel, modelName)
   if (!r) {
     checkSingleModelInjection(channel, modelName)
     return
@@ -1244,10 +1281,8 @@ function openInjectionModal(channel: Channel) {
   // Seed the list from cached per-model results or the persisted primary-model result
   const list: ModelInjectionResult[] = []
   for (const m of (channel.modelNames || [])) {
-    const k = getModelKey(channel, m)
-    if (modelInjections.value[k]) {
-      list.push(modelInjections.value[k])
-    }
+    const result = getModelInjection(channel, m)
+    if (result) list.push(result)
   }
   if (list.length > 0) {
     injectionResults.value = list
@@ -1266,9 +1301,10 @@ function openInjectionModal(channel: Channel) {
 }
 
 async function runInjectionCheck(all: boolean) {
-  const channel = injectionChannel.value
+  let channel = injectionChannel.value
   if (!channel || !channel.gatewayId || isCheckingInjection.value) return
   if (all) {
+    const batchChannel = channel
     const models = channel.modelNames ?? []
     confirmModal.value = {
       title: '全模型检测确认',
@@ -1278,7 +1314,7 @@ async function runInjectionCheck(all: boolean) {
       onConfirm: async () => {
         isCheckingInjection.value = true
         try {
-          injectionResults.value = await checkModelsInjection(channel, models)
+          injectionResults.value = await checkModelsInjection(batchChannel, models)
         } finally {
           isCheckingInjection.value = false
         }
@@ -1287,19 +1323,27 @@ async function runInjectionCheck(all: boolean) {
     return
   }
   isCheckingInjection.value = true
+  const snapshot = { ...channel }
   const results = await injectionCheck(channel.gatewayId, false)
+  await refreshChannels()
   isCheckingInjection.value = false
   if (!results) {
     showToast('注入检测请求失败，请检查网关状态')
     return
   }
-  injectionResults.value = results
-  for (const r of results) {
+  const acceptedResults = results.filter(item => item.accepted !== false)
+  const checkedAt = acceptedResults.find(item => item.model === snapshot.primaryModel)?.checked_at || acceptedResults[0]?.checked_at || ''
+  const current = currentDiagnosticChannel(snapshot, snapshot.primaryModel || snapshot.modelNames?.[0] || '', checkedAt, true)
+  if (!current || injectionChannel.value?.gatewayId !== snapshot.gatewayId) return
+  channel = current
+  injectionChannel.value = current
+  injectionResults.value = acceptedResults
+  for (const r of acceptedResults) {
     const k = getModelKey(channel, r.model)
     modelInjections.value[k] = r
   }
 
-  const primary = results.find((r) => r.model === channel.primaryModel) ?? results[0]
+  const primary = acceptedResults.find((r) => r.model === channel.primaryModel) ?? acceptedResults[0]
   if (primary) {
     channel.injectionState = primary.state
     channel.injectionTokens = primary.prompt_tokens
@@ -1307,15 +1351,19 @@ async function runInjectionCheck(all: boolean) {
     channel.injectionCheckedAt = primary.checked_at
   }
 
-  const injected = results.filter((r) => r.state === 'detected').length
-  const suspected = results.filter((r) => r.state === 'suspected').length
+  const injected = acceptedResults.filter((r) => r.state === 'detected').length
+  const suspected = acceptedResults.filter((r) => r.state === 'suspected').length
   if (injected > 0) showToast(`${injected} 个模型输入统计显著偏高${suspected ? `，${suspected} 个模型输入偏高` : ''}，请查看详情`)
   else if (suspected > 0) showToast(`${suspected} 个模型输入统计偏高；这不能单独证明注入`)
-  else if (results.every((r) => r.state === 'clean')) showToast(`${results.length} 个模型的输入统计均处于正常模板参考范围`)
+  else if (acceptedResults.every((r) => r.state === 'clean')) showToast(`${acceptedResults.length} 个模型的输入统计均处于正常模板参考范围`)
   else showToast('注入检测完成，部分模型未能检测')
 }
 
 async function openEditChannel(channel: Channel) {
+  editDetectionRevision++
+  editModelsRevision++
+  isFetchingEditModels.value = false
+  editDetectionApiKey.value = ''
   isDetectingEditProtocol.value = false
   editProtocolDetectMessage.value = null
   hasManuallyChangedEditProtocol.value = false
@@ -1405,19 +1453,20 @@ async function saveEditChannel() {
       }
     }
 
-    const saved = await updateChannel(toDesktopChannel(target))
-    if (!saved) {
-      showToast('保存失败，表单已保留，请重试')
-      return
-    }
-    saveChannelDetectedProtocols({
+    const detectedProtocols = {
       channelId: target.gatewayId,
       url: target.url,
       supportsOpenai: editProtoSupportsOpenai.value,
       supportsAnthropic: editProtoSupportsAnthropic.value,
       supportsResponses: editProtoSupportsResponses.value,
       detectedProtocol: editChannelProtocol.value,
-    })
+    }
+    const saved = await updateChannel(toDesktopChannel(target))
+    if (!saved) {
+      showToast('保存失败，表单已保留，请重试')
+      return
+    }
+    saveChannelDetectedProtocols(detectedProtocols)
     await refreshChannels()
     showEditChannel.value = false
     editingChannel.value = null
@@ -1443,24 +1492,19 @@ function removeChannel(channel: Channel) {
     confirmText: '确认删除',
     onConfirm: async () => {
       const name = channel.name
-      if (gatewayApiActive.value && channel.gatewayId) {
-        const deleted = await deleteChannel(channel.gatewayId)
-        if (!deleted) {
-          showToast(`删除渠道“${name}”失败，请重试`)
-          return
-        }
+      if (!gatewayApiActive.value || !channel.gatewayId) {
+        showToast('本地网关未连接，未删除渠道，请连接后重试')
+        return
+      }
+      const deleted = await deleteChannel(channel.gatewayId)
+      if (!deleted) {
+        showToast(`删除渠道“${name}”失败，请重试`)
+        return
       }
       channels.value = channels.value.filter((item) => item !== channel)
-      if (!gatewayApiActive.value) {
-        await saveChannels()
-      }
       showToast(`已成功删除渠道“${name}”`)
     },
   }
-}
-
-function saveChannels() {
-  return writeValue('channels', channels.value)
 }
 
 async function exportConfig(containsSecrets = false) {
@@ -1502,17 +1546,20 @@ function clearWorkspace() {
     danger: true,
     confirmText: '确认清空',
     onConfirm: async () => {
-      if (gatewayApiActive.value) {
-        const remote = await listChannels()
-        if (!remote) {
-          showToast('无法读取网关渠道，未清空本地工作区')
+      if (!gatewayApiActive.value) {
+        showToast('本地网关未连接，未清空工作区，请连接后重试')
+        return
+      }
+      const remote = await listChannels()
+      if (!remote) {
+        showToast('无法读取网关渠道，未清空本地工作区')
+        return
+      }
+      for (const channel of remote) {
+        if (!(await deleteChannel(channel.id))) {
+          await refreshChannels()
+          showToast('清空失败，已有部分渠道未删除')
           return
-        }
-        for (const channel of remote) {
-          if (!(await deleteChannel(channel.id))) {
-            showToast('清空失败，已有部分渠道未删除')
-            return
-          }
         }
       }
       channels.value = []
@@ -1592,10 +1639,25 @@ function getModelKey(channel: Channel, modelName: string) {
   return `${channel.gatewayId ?? channel.name}::${modelName}`
 }
 
+function currentDiagnosticChannel(snapshot: Channel, model: string, checkedAt: string, injection = false): Channel | undefined {
+  const current = channels.value.find(item => item.gatewayId === snapshot.gatewayId)
+  if (!current?.enabled || current.url !== snapshot.url || current.protocol !== snapshot.protocol
+    || current.primaryModel !== snapshot.primaryModel || !current.modelNames?.includes(model)) return undefined
+  const recorded = injection ? (isPrimaryModel(current, model) ? current.injectionCheckedAt : modelInjections.value[getModelKey(current, model)]?.checked_at)
+    : current.modelHealth?.find(item => item.model === model)?.checkedAt
+  const sampleTime = Date.parse(checkedAt)
+  if (!Number.isFinite(sampleTime)) return undefined
+  if (recorded && Date.parse(recorded) > sampleTime) return undefined
+  if (!injection && isPrimaryModel(current, model) && Date.parse(current.lastCheck) > sampleTime) return undefined
+  return current
+}
+
 function isModelFailed(channel: Channel, modelName: string): boolean {
   if (channel.probing) return false
   const key = getModelKey(channel, modelName)
   const entry = modelLatencies.value[key]
+  const performance = getModelPerformance(channel, modelName)
+  if (performance && (!entry?.checkedAt || Date.parse(performance.updatedAt) > Date.parse(entry.checkedAt))) return false
   if (entry) {
     if (entry.probing) return false
     return entry.status === 'error' || entry.status === 'failed' || entry.status === 'timeout'
@@ -1631,6 +1693,8 @@ function formatModelCheckedAt(value?: string | null): string {
 function getModelLatencyDisplay(channel: Channel, modelName: string): string {
   if (isModelProbing(channel, modelName)) return '—'
   if (isModelFailed(channel, modelName)) return '—'
+  const performance = getModelPerformance(channel, modelName)
+  if (performance) return formatLatencySec(performance.ttftMs)
   const key = getModelKey(channel, modelName)
   const entry = modelLatencies.value[key]
   if (entry?.ttft != null) return formatLatencySec(entry.ttft)
@@ -1652,7 +1716,7 @@ function getModelLatencyClass(channel: Channel, modelName: string): string {
     return 'timeout'
   }
   const inheritChannel = isPrimaryModel(channel, modelName) && channel.status !== 'offline'
-  const lat = entry?.latency ?? (inheritChannel ? channel.latency : null)
+  const lat = getModelPerformance(channel, modelName)?.ttftMs ?? entry?.ttft ?? entry?.latency ?? (inheritChannel ? channel.latency : null)
   if (lat == null) return 'idle'
   if (lat < 1000) return 'fast'
   if (lat < 2500) return 'normal'
@@ -1668,10 +1732,22 @@ function getModelTooltip(channel: Channel, modelName: string): string {
     return `探活异常：${getModelErrorMessage(channel, modelName)} (点击查看详情与诊断)`
   }
   const checkedAt = entry?.checkedAt ? ` 最近检测：${formatModelCheckedAt(entry.checkedAt)}。` : ''
+  const performance = getModelPerformance(channel, modelName)
+  if (performance) {
+    const probe = entry?.ttft != null ? ` 探活 TTFT：${formatLatencySec(entry.ttft)}。` : ''
+    return `真实请求 TTFT（平滑）：${formatLatencySec(performance.ttftMs)}；最近一次：${formatLatencySec(performance.lastTtftMs)}；${performance.samples} 次成功样本。${probe} 最近请求：${formatModelCheckedAt(performance.updatedAt)}。`
+  }
   if (entry?.ttft != null || entry?.latency != null) {
     return `模型调用成功，首字响应耗时 ${formatLatencySec(entry.ttft ?? entry.latency)}。${checkedAt}点击查看详情`
   }
   return '尚无该模型的探活记录，点击可查看状态或单独发送真实探活请求'
+}
+
+function getModelPerformance(channel: Channel, modelName: string) {
+  return channel.modelPerformance?.find((p) => {
+    const age = Date.now() - Date.parse(p.updatedAt)
+    return p.model.toLowerCase() === modelName.toLowerCase() && age >= 0 && age < 30 * 60_000 && p.ttftMs > 0
+  })
 }
 
 function isModelProbing(channel: Channel, modelName: string): boolean {
@@ -1704,7 +1780,9 @@ const modelLatencyRows = computed<ModelLatencyRow[]>(() => {
     return {
       name,
       selected: selectedModelNames.value.includes(name),
-      checkedAtLabel: entry?.checkedAt ? formatModelCheckedAt(entry.checkedAt) : '',
+      checkedAtLabel: getModelPerformance(channel, name)
+        ? `实测 ${formatModelCheckedAt(getModelPerformance(channel, name)?.updatedAt)}`
+        : entry?.checkedAt ? `探活 ${formatModelCheckedAt(entry.checkedAt)}` : '',
       latencyClass: getModelLatencyClass(channel, name),
       latencyDisplay: getModelLatencyDisplay(channel, name),
       latencyTooltip: getModelTooltip(channel, name),
@@ -1728,12 +1806,21 @@ async function probeSingleModel(
   options?: { silentBusy?: boolean },
 ): Promise<ModelProbeOutcome> {
   const key = getModelKey(channel, modelName)
+  const snapshot = { ...channel }
+  const startedAt = new Date().toISOString()
   modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: true }
   const t0 = performance.now()
   const isPrimary = isPrimaryModel(channel, modelName)
   try {
     if (gatewayApiActive.value && channel.gatewayId) {
       const probeRes = await probeChannelDetails(channel.gatewayId, modelName)
+      await refreshChannels()
+      if (modelLatencies.value[key]) modelLatencies.value[key].probing = false
+      if (Array.isArray(probeRes) && probeRes[0]?.accepted === false) return 'failed'
+      const current = currentDiagnosticChannel(snapshot, modelName,
+        (Array.isArray(probeRes) ? probeRes[0]?.checkedAt : undefined) || startedAt)
+      if (!current) return 'failed'
+      channel = current
       if (probeRes === 'busy') {
         modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: false, message: '渠道已有探活任务正在执行' }
         if (!options?.silentBusy) showToast(`渠道“${channel.name}”已有探活任务，请稍后重试`)
@@ -1752,7 +1839,7 @@ async function probeSingleModel(
           status: 'error',
           error: errMsg,
           message: errMsg,
-          checkedAt: new Date().toISOString(),
+          checkedAt: startedAt,
         }
         if (isPrimary) {
           channel.status = 'offline'
@@ -1787,7 +1874,7 @@ async function probeSingleModel(
           status: res.status,
           error: errMsg,
           message: hasErr ? errMsg! : (res.status === 'degraded' ? '响应稍慢' : ''),
-          checkedAt: new Date().toISOString(),
+          checkedAt: res.checkedAt || startedAt,
         }
         if (isPrimary) {
           channel.latency = lat
@@ -1824,6 +1911,9 @@ async function probeSingleModel(
     }
     return 'failed'
   } catch (err: any) {
+    const current = currentDiagnosticChannel(snapshot, modelName, startedAt)
+    if (!current) return 'failed'
+    channel = current
     const errMsg = err?.message || '请求超时或网络异常'
     modelLatencies.value[key] = {
       latency: null,
@@ -1905,25 +1995,27 @@ async function batchDeleteSelectedModels(channel?: Channel | null) {
     danger: true,
     confirmText: `确认删除 (${toDelete.length})`,
     onConfirm: async () => {
-      channel.modelNames = remaining
-      channel.models = remaining.length
+      const target = { ...channel }
+      target.modelNames = remaining
+      target.models = remaining.length
       if (isDeletingPrimary) {
-        channel.primaryModel = remaining[0]
+        target.primaryModel = remaining[0]
         const newKey = getModelKey(channel, remaining[0])
         const cached = modelLatencies.value[newKey]
         if (cached) {
-          channel.latency = cached.latency ?? null
-          channel.ttft = cached.ttft ?? null
-          if (cached.status) channel.status = toChannelStatus(cached.status)
-          if (cached.error) channel.lastError = cached.error
+          target.latency = cached.latency ?? null
+          target.ttft = cached.ttft ?? null
+          if (cached.status) target.status = toChannelStatus(cached.status)
+          if (cached.error) target.lastError = cached.error
         }
       }
+      if (!(await persistChannel(target))) return
+      Object.assign(channel, target)
       toDelete.forEach((m) => {
         delete modelLatencies.value[getModelKey(channel, m)]
       })
       selectedModelNames.value = []
 
-      if (!(await persistChannel(channel))) return
       await refreshChannels()
 
       const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
@@ -1940,20 +2032,22 @@ async function setAsPrimaryModel(channel?: Channel | null, modelName?: string) {
   if (!channel || !modelName) return
   if (channel.primaryModel === modelName) return
 
-  channel.primaryModel = modelName
+  const target = { ...channel }
+  target.primaryModel = modelName
   const rest = (channel.modelNames || []).filter((m) => m !== modelName)
-  channel.modelNames = [modelName, ...rest]
+  target.modelNames = [modelName, ...rest]
 
   const key = getModelKey(channel, modelName)
   const cached = modelLatencies.value[key]
   if (cached) {
-    channel.latency = cached.latency ?? null
-    channel.ttft = cached.ttft ?? null
-    if (cached.status) channel.status = toChannelStatus(cached.status)
-    if (cached.error) channel.lastError = cached.error
+    target.latency = cached.latency ?? null
+    target.ttft = cached.ttft ?? null
+    if (cached.status) target.status = toChannelStatus(cached.status)
+    if (cached.error) target.lastError = cached.error
   }
 
-  if (!(await persistChannel(channel))) return
+  if (!(await persistChannel(target))) return
+  Object.assign(channel, target)
   await refreshChannels()
 
   const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
@@ -2124,6 +2218,9 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  ++newModelsRevision
+  ++editModelsRevision
+  ++channelsRefreshRevision
   stopLogsStream()
   window.removeEventListener('desktop-shortcut', onDesktopShortcut)
   window.removeEventListener('resize', checkTabsFit)
@@ -2133,7 +2230,6 @@ onBeforeUnmount(() => {
   }
 })
 
-watch(channels, () => { if (!gatewayApiActive.value) void saveChannels() }, { deep: true })
 
 async function refreshGatewayHealth() {
   const health = await checkGatewayHealth()
@@ -2181,7 +2277,7 @@ const activeModelProviders = computed<ModelProviderSpeedTestItem[]>(() => {
     const isProbing = Boolean(entry?.probing || ch.probing)
     const isFailed = !isProbing && isModelFailed(ch, upstream)
     const errMsg = isFailed ? getModelErrorMessage(ch, upstream) : ''
-    const latMs = entry?.latency != null ? entry.latency : (ch.modelNames?.[0] === upstream && ch.latency != null && ch.status !== 'offline' ? ch.latency : null)
+    const latMs = getModelPerformance(ch, upstream)?.ttftMs ?? entry?.ttft ?? entry?.latency ?? (ch.modelNames?.[0] === upstream && ch.latency != null && ch.status !== 'offline' ? ch.latency : null)
 
     list.push({
       channel: ch,
@@ -2250,7 +2346,7 @@ function getFastestProviderInfo(modelName?: string | null): { channelName: strin
     if (!upstream) return null
     const key = getModelKey(ch, upstream)
     const entry = modelLatencies.value[key]
-    const entryLat = entry?.ttft != null ? entry.ttft : (entry?.latency != null ? entry.latency : null)
+    const entryLat = getModelPerformance(ch, upstream)?.ttftMs ?? entry?.ttft ?? entry?.latency ?? null
     const latMs = entryLat != null ? entryLat : (ch.modelNames?.[0] === upstream && ch.status !== 'offline' ? (ch.ttft ?? ch.latency) : null)
     const failed = isModelFailed(ch, upstream)
     if (!ch.enabled || failed || latMs == null || latMs <= 0) return null
@@ -2380,7 +2476,7 @@ function getLogDiagnostic(log: RequestLog): {
       badge: 'success',
       codeText: `${log.status_code} OK`,
       title: '请求执行成功',
-      message: `上游渠道【${log.channel_name}】响应正常，全链路耗时 ${formatLatencySec(log.latency_ms)}，首字耗时 ${formatLatencySec(log.ttft_ms || log.latency_ms)}。`,
+      message: `上游渠道【${log.channel_name}】响应正常，全链路耗时 ${formatLatencySec(log.latency_ms)}，首字耗时 ${(log.ttft_ms ?? 0) > 0 ? formatLatencySec(log.ttft_ms) : '未测量'}。`,
     }
   }
   if (log.status_code === 429) {
@@ -2403,6 +2499,14 @@ function getLogDiagnostic(log: RequestLog): {
   }
 }
 
+function scheduleChannelRefresh(log: RequestLog) {
+  if (log.status_code <= 0 || modelPerformanceRefreshTimer) return
+  modelPerformanceRefreshTimer = setTimeout(() => {
+    modelPerformanceRefreshTimer = null
+    void refreshChannels()
+  }, 500)
+}
+
 function startLogsStream() {
   if (logsUnsubscribe) return
   logsUnsubscribe = subscribeLogs({
@@ -2410,6 +2514,7 @@ function startLogsStream() {
       logsStreamConnected.value = true
     },
     onCreated: (newLog) => {
+      scheduleChannelRefresh(newLog)
       logsStreamConnected.value = true
       const idx = desktopLogs.value.findIndex((l) => l.id === newLog.id)
       if (idx !== -1) {
@@ -2444,6 +2549,7 @@ function startLogsStream() {
       if (activeLogDetail.value && activeLogDetail.value.id === updatedLog.id) {
         activeLogDetail.value = { ...activeLogDetail.value, ...updatedLog }
       }
+      scheduleChannelRefresh(updatedLog)
     },
     onCleared: () => {
       desktopLogs.value = []
@@ -2458,6 +2564,10 @@ function startLogsStream() {
 }
 
 function stopLogsStream() {
+  if (modelPerformanceRefreshTimer) {
+    clearTimeout(modelPerformanceRefreshTimer)
+    modelPerformanceRefreshTimer = null
+  }
   if (logsUnsubscribe) {
     logsUnsubscribe()
     logsUnsubscribe = null
@@ -2492,30 +2602,131 @@ function inferProtocolFromUrl(url: string): Channel['protocol'] | null {
 }
 
 watch(newChannelUrl, (url) => {
+  newDetectionRevision++
+  isDetectingNewProtocol.value = false
+  newProtocolDetectMessage.value = null
+  newProtoSupportsOpenai.value = null
+  newProtoSupportsAnthropic.value = null
+  newProtoSupportsResponses.value = null
   if (hasManuallyChangedNewProtocol.value) return
   const inferred = inferProtocolFromUrl(url)
   if (inferred) {
     newChannelProtocol.value = inferred
   }
-})
+}, { flush: 'sync' })
+
+function invalidateNewProtocolDetection() {
+  ++newDetectionRevision
+  isDetectingNewProtocol.value = false
+  newProtocolDetectMessage.value = null
+  newProtoSupportsOpenai.value = null
+  newProtoSupportsAnthropic.value = null
+  newProtoSupportsResponses.value = null
+}
+
+function invalidateEditProtocolDetection() {
+  ++editDetectionRevision
+  isDetectingEditProtocol.value = false
+  editProtocolDetectMessage.value = null
+  editProtoSupportsOpenai.value = null
+  editProtoSupportsAnthropic.value = null
+  editProtoSupportsResponses.value = null
+}
+
+function manuallySelectNewProtocol(protocol: Channel['protocol']) {
+  ++newDetectionRevision
+  isDetectingNewProtocol.value = false
+  newChannelProtocol.value = protocol
+  hasManuallyChangedNewProtocol.value = true
+}
+
+function manuallySelectEditProtocol(protocol: Channel['protocol']) {
+  ++editDetectionRevision
+  isDetectingEditProtocol.value = false
+  editChannelProtocol.value = protocol
+  hasManuallyChangedEditProtocol.value = true
+}
 
 watch(editChannelUrl, (url) => {
+  editDetectionRevision++
+  isDetectingEditProtocol.value = false
+  editDetectionApiKey.value = ''
+  editProtocolDetectMessage.value = null
+  editProtoSupportsOpenai.value = null
+  editProtoSupportsAnthropic.value = null
+  editProtoSupportsResponses.value = null
   if (hasManuallyChangedEditProtocol.value) return
   const inferred = inferProtocolFromUrl(url)
   if (inferred) {
     editChannelProtocol.value = inferred
   }
-})
+}, { flush: 'sync' })
+
+watch(newChannelPrimaryModel, () => {
+  if (applyingDetectedNewModels) return
+  invalidateNewProtocolDetection()
+}, { flush: 'sync' })
+
+watch([editDetectionApiKey, editChannelPrimaryModel], () => {
+  if (applyingDetectedEditModels) return
+  invalidateEditProtocolDetection()
+}, { flush: 'sync' })
+
+watch(showEditChannel, (open) => {
+  if (!open) {
+    editDetectionRevision++
+    isDetectingEditProtocol.value = false
+    editDetectionApiKey.value = ''
+  }
+}, { flush: 'sync' })
+watch(showAddChannel, (open) => {
+  if (!open) {
+    newDetectionRevision++
+    isDetectingNewProtocol.value = false
+  }
+}, { flush: 'sync' })
+
+watch(() => newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '', () => {
+  ++newDetectionRevision
+  isDetectingNewProtocol.value = false
+  newProtocolDetectMessage.value = null
+  newProtoSupportsOpenai.value = null
+  newProtoSupportsAnthropic.value = null
+  newProtoSupportsResponses.value = null
+}, { flush: 'sync' })
+
+watch([newChannelUrl, newChannelProtocol, showAddChannel,
+  () => newChannelKeys.value.map(row => row.secret).join('\n')], () => {
+  ++newModelsRevision
+  isFetchingNewModels.value = false
+}, { flush: 'sync' })
+watch([editChannelUrl, editChannelProtocol, editDetectionApiKey, showEditChannel,
+  () => editingChannel.value?.gatewayId], () => {
+  ++editModelsRevision
+  isFetchingEditModels.value = false
+}, { flush: 'sync' })
 
 async function runDetectProtocol(mode: 'new' | 'edit') {
   const url = mode === 'new' ? newChannelUrl.value.trim() : editChannelUrl.value.trim()
-  const apiKey = mode === 'new' ? newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '' : ''
+  const apiKey = mode === 'new' ? newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '' : editDetectionApiKey.value.trim()
   const channelId = mode === 'edit' ? editingChannel.value?.gatewayId : undefined
 
   if (!url) {
     showToast('请先填写 Base URL，再进行协议识别')
     return
   }
+  if (mode === 'edit' && editEndpointChanged.value && !apiKey) {
+    editProtocolDetectMessage.value = { type: 'error', text: 'Base URL 已修改，请输入新地址的检测 Key' }
+    return
+  }
+  const revision = mode === 'new' ? ++newDetectionRevision : ++editDetectionRevision
+  const model = mode === 'new' ? newChannelPrimaryModel.value : editChannelPrimaryModel.value
+  const isCurrent = () => mode === 'new'
+    ? revision === newDetectionRevision && showAddChannel.value && newChannelPrimaryModel.value === model
+      && (newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '') === apiKey
+    : revision === editDetectionRevision && showEditChannel.value
+      && editingChannel.value?.gatewayId === channelId && editChannelPrimaryModel.value === model
+      && editDetectionApiKey.value.trim() === apiKey
 
   if (mode === 'new') {
     isDetectingNewProtocol.value = true
@@ -2526,7 +2737,8 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
   }
 
   try {
-    const res = await detectChannelProtocol(url, apiKey, channelId)
+    const res = await detectChannelProtocol(url, apiKey, channelId, model || undefined)
+    if (!isCurrent()) return
     if (!res.ok) {
       const msg = res.error || '识别失败，请检查网络或 URL'
       showToast(msg)
@@ -2538,9 +2750,9 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
       return
     }
 
-    const supportsOpenai = res.supportsOpenai ?? false
-    const supportsAnthropic = res.supportsAnthropic ?? false
-    const supportsResponses = res.supportsResponses ?? false
+    const supportsOpenai = res.supportsOpenai ?? null
+    const supportsAnthropic = res.supportsAnthropic ?? null
+    const supportsResponses = res.supportsResponses ?? null
 
     if (mode === 'new') {
       newProtoSupportsOpenai.value = supportsOpenai
@@ -2552,16 +2764,6 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
       editProtoSupportsResponses.value = supportsResponses
     }
 
-    saveChannelDetectedProtocols({
-      channelId: mode === 'edit' ? channelId : undefined,
-      url,
-      supportsOpenai,
-      supportsAnthropic,
-      supportsResponses,
-      detectedProtocol: res.detectedProtocol,
-      models: res.models,
-    })
-
     if (res.detectedProtocol) {
       if (mode === 'new') {
         newChannelProtocol.value = res.detectedProtocol
@@ -2572,22 +2774,21 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
       }
     }
 
-    // If models were discovered, auto-populate when model list is empty
+    // If models were discovered, auto-populate when model list is empty. This
+    // is part of the accepted probe result and must not invalidate that result.
     if (res.models && res.models.length > 0) {
       if (mode === 'new' && newChannelModelNames.value.length === 0) {
+        applyingDetectedNewModels = true
         newChannelModelNames.value = res.models
-        if (!newChannelPrimaryModel.value) {
-          newChannelPrimaryModel.value = res.models[0]
-        }
+        if (!newChannelPrimaryModel.value) newChannelPrimaryModel.value = res.models[0]
+        applyingDetectedNewModels = false
       } else if (mode === 'edit' && editChannelModelNames.value.length === 0) {
+        applyingDetectedEditModels = true
         editChannelModelNames.value = res.models
-        if (!editChannelPrimaryModel.value) {
-          editChannelPrimaryModel.value = res.models[0]
-        }
+        if (!editChannelPrimaryModel.value) editChannelPrimaryModel.value = res.models[0]
+        applyingDetectedEditModels = false
       }
     }
-
-    const protoName = formatProtocolName(res.detectedProtocol || 'openai-compatible')
 
     const supportedList: string[] = []
     if (supportsOpenai) supportedList.push('OpenAI 兼容')
@@ -2596,23 +2797,25 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
 
     let summary = ''
     if (supportedList.length >= 2) {
-      summary = `端点同时支持 ${supportedList.join('、')} 协议（双向免转换直通）`
+      summary = `端点同时支持 ${supportedList.join('、')} 协议`
     } else if (supportedList.length === 1) {
       summary = `端点支持 ${supportedList[0]} 协议`
     } else {
-      summary = `已识别为 ${protoName}`
+      summary = '未确认可用协议，已保留当前选择'
     }
 
     const countInfo = res.models?.length ? ` · 发现 ${res.models.length} 个模型` : ''
-    const successText = `${summary}${countInfo}`
-    showToast(`✓ ${successText}`)
+    const successText = `${summary}${countInfo}${res.message ? ` · ${res.message}` : ''}`
+    const resultType = supportedList.length ? 'success' : 'error'
+    showToast(successText)
 
     if (mode === 'new') {
-      newProtocolDetectMessage.value = { type: 'success', text: successText }
+      newProtocolDetectMessage.value = { type: resultType, text: successText }
     } else {
-      editProtocolDetectMessage.value = { type: 'success', text: successText }
+      editProtocolDetectMessage.value = { type: resultType, text: successText }
     }
   } catch (err: unknown) {
+    if (!isCurrent()) return
     const errText = err instanceof Error ? err.message : '自动识别请求异常'
     showToast(errText)
     if (mode === 'new') {
@@ -2621,9 +2824,9 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
       editProtocolDetectMessage.value = { type: 'error', text: errText }
     }
   } finally {
-    if (mode === 'new') {
+    if (mode === 'new' && revision === newDetectionRevision) {
       isDetectingNewProtocol.value = false
-    } else {
+    } else if (mode === 'edit' && revision === editDetectionRevision) {
       isDetectingEditProtocol.value = false
     }
   }
@@ -2635,18 +2838,40 @@ type UpstreamModelsPayload = {
 }
 
 async function fetchUpstreamModels(mode: 'new' | 'edit') {
-  const url = mode === 'new' ? newChannelUrl.value : editChannelUrl.value
-  const apiKey = mode === 'new' ? newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '' : ''
+  const url = (mode === 'new' ? newChannelUrl.value : editChannelUrl.value).trim()
+  const apiKey = mode === 'new' ? newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '' : editDetectionApiKey.value.trim()
   const protocol = mode === 'new' ? newChannelProtocol.value : editChannelProtocol.value
+  const channelId = mode === 'edit' ? editingChannel.value?.gatewayId : undefined
   const setLoading = mode === 'new' ? (value: boolean) => { isFetchingNewModels.value = value } : (value: boolean) => { isFetchingEditModels.value = value }
   if (!url.trim()) {
     showToast('请先填写 Base URL，再获取上游模型')
     return
   }
+  if (mode === 'edit' && editEndpointChanged.value && !apiKey) {
+    showToast('Base URL 已修改，请输入新地址的检测 Key 后获取模型')
+    return
+  }
+  const revision = mode === 'new' ? ++newModelsRevision : ++editModelsRevision
+  const draftModels = JSON.stringify(mode === 'new'
+    ? [newChannelPrimaryModel.value, newChannelModelNames.value]
+    : [editChannelPrimaryModel.value, editChannelModelNames.value])
+  const isCurrent = () => {
+    if (mode === 'new') {
+      return revision === newModelsRevision && showAddChannel.value
+        && newChannelUrl.value.trim() === url && newChannelProtocol.value === protocol
+        && (newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '') === apiKey
+        && JSON.stringify([newChannelPrimaryModel.value, newChannelModelNames.value]) === draftModels
+    }
+    return revision === editModelsRevision && showEditChannel.value
+      && editingChannel.value?.gatewayId === channelId && editChannelUrl.value.trim() === url
+      && editChannelProtocol.value === protocol && editDetectionApiKey.value.trim() === apiKey
+      && JSON.stringify([editChannelPrimaryModel.value, editChannelModelNames.value]) === draftModels
+  }
   setLoading(true)
   try {
     // 优先通过本地网关后端代理请求，避免浏览器 CORS 拦截
-    const proxyRes = await apiFetchUpstreamModels(url.trim(), apiKey.trim(), protocol, mode === 'edit' ? editingChannel.value?.gatewayId : undefined)
+    const proxyRes = await apiFetchUpstreamModels(url, apiKey, protocol, channelId)
+    if (!isCurrent()) return
     if (!proxyRes.ok && gatewayApiActive.value) {
       showToast(proxyRes.error || '获取模型失败')
       return
@@ -2682,14 +2907,17 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
     for (const targetUrl of candidateUrls) {
       try {
         const response = await fetch(targetUrl, {
+          redirect: 'error',
           headers: {
             Accept: 'application/json',
             ...(apiKey && !apiKey.includes('***') ? { Authorization: `Bearer ${apiKey}`, 'x-api-key': apiKey } : {}),
           },
           signal: AbortSignal.timeout(6000),
         })
+        if (!isCurrent()) return
         if (response.ok) {
           const payload = await response.json() as UpstreamModelsPayload
+          if (!isCurrent()) return
           const items = payload.data ?? payload.models ?? []
           fetchedModels = modelsFromText(items.map((item) => typeof item === 'string' ? item : item.id ?? item.name ?? '').join('\n'))
           if (fetchedModels.length > 0) break
@@ -2714,10 +2942,12 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
           }
         }
       } catch (err: any) {
+        if (!isCurrent()) return
         lastErrMsg = err?.message || '网络连接错误'
       }
     }
 
+    if (!isCurrent()) return
     if (fetchedModels.length > 0) {
       if (mode === 'new') {
         newChannelModelNames.value = fetchedModels
@@ -2735,9 +2965,10 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
       showToast(proxyRes.error ? `获取失败: ${proxyRes.error}` : (lastErrMsg ? `获取失败: ${lastErrMsg}` : '获取上游模型失败，请检查 Base URL 或网络'))
     }
   } catch (err: any) {
+    if (!isCurrent()) return
     showToast(`获取上游模型失败: ${err?.message || '未知错误'}`)
   } finally {
-    setLoading(false)
+    if ((mode === 'new' ? newModelsRevision : editModelsRevision) === revision) setLoading(false)
   }
 }
 
@@ -2764,6 +2995,14 @@ async function addChannel() {
   }
   if (isCreatingChannel.value) return
   isCreatingChannel.value = true
+  const detectedProtocols = {
+    url: normalizeEndpointUrl(rawUrl),
+    supportsOpenai: newProtoSupportsOpenai.value,
+    supportsAnthropic: newProtoSupportsAnthropic.value,
+    supportsResponses: newProtoSupportsResponses.value,
+    detectedProtocol: newChannelProtocol.value,
+    models: [...newChannelModelNames.value],
+  }
   try {
     // Reuse the transactional channel + key insertion: never leave a half-created pool.
     await configRequest('config/import', {
@@ -2774,14 +3013,7 @@ async function addChannel() {
         keys: keyDrafts.map(({ name: keyName, secret }, position) => ({ name: keyName, secret, enabled: true, position })),
       }],
     })
-    saveChannelDetectedProtocols({
-      url: normalizeEndpointUrl(rawUrl),
-      supportsOpenai: newProtoSupportsOpenai.value,
-      supportsAnthropic: newProtoSupportsAnthropic.value,
-      supportsResponses: newProtoSupportsResponses.value,
-      detectedProtocol: newChannelProtocol.value,
-      models: newChannelModelNames.value,
-    })
+    saveChannelDetectedProtocols(detectedProtocols)
     await refreshChannels()
     showToast(`渠道“${name}”创建成功，共 ${keyDrafts.length} 把 Key`)
   } catch (error) {
@@ -2832,74 +3064,95 @@ async function refreshLogs() {
 
 async function refreshSystemInfo() {
   if (gatewayApiActive.value) {
+    const revision = settingsRevision.value
     const info = await getSystemInfo()
     if (info) {
       systemInfo.value = info
-      logRetentionDays.value = info.log_retention_days
-      logMaxCount.value = info.log_max_count ?? 5000
-      routingStrategy.value = info.routing_strategy
-      hideDockIcon.value = info.hide_dock_icon ?? false
+      if (revision === settingsRevision.value) {
+        applySystemSetting('log_retention_days', logRetentionDays, info.log_retention_days)
+        applySystemSetting('log_max_count', logMaxCount, info.log_max_count ?? 5000)
+        applySystemSetting('routing_strategy', routingStrategy, info.routing_strategy)
+        applySystemSetting('hide_dock_icon', hideDockIcon, info.hide_dock_icon ?? false)
+      }
     }
   }
 }
 
 async function handleSetHideDockIcon(val: boolean) {
-  const previous = hideDockIcon.value
-  hideDockIcon.value = val
-  if (gatewayApiActive.value) {
-    const ok = await updateSettings({ hide_dock_icon: val })
-    if (ok) {
-      showToast(val ? '已隐藏 Dock 图标（仅在菜单栏托盘常驻）' : '已恢复在 Dock 程序坞显示')
-      await refreshSystemInfo()
-    } else {
-      hideDockIcon.value = previous
-      showToast('设置更新失败')
-    }
+  await persistGatewaySetting('hide_dock_icon', hideDockIcon, val,
+    val ? '已隐藏 Dock 图标（仅在菜单栏托盘常驻）' : '已恢复在 Dock 程序坞显示', true)
+}
+
+function applySystemSetting<K extends keyof GatewaySettings>(key: K, field: Ref<NonNullable<GatewaySettings[K]>>, value: NonNullable<GatewaySettings[K]>) {
+  const state = settingSaves.get(key)
+  if (state?.pending) return
+  field.value = value
+  if (state) state.confirmed = value
+}
+
+async function persistGatewaySetting<K extends keyof GatewaySettings>(
+  key: K, field: Ref<NonNullable<GatewaySettings[K]>>, value: NonNullable<GatewaySettings[K]>,
+  successMessage: string, refreshInfo = false,
+) {
+  let state = settingSaves.get(key)
+  if (!state) {
+    state = { revision: 0, pending: 0, confirmed: field.value, queue: Promise.resolve() }
+    settingSaves.set(key, state)
   }
+  const saveState = state
+  const revision = ++saveState.revision
+  ++settingsRevision.value
+  ++saveState.pending
+  field.value = value
+  // Serialize writes for each setting so the server receives edits in order.
+  const task = saveState.queue.then(async () => {
+    let ok: boolean
+    try {
+      ok = await saveGatewaySettings({ [key]: value })
+    } catch {
+      ok = false
+    }
+    if (ok) saveState.confirmed = value
+    ++settingsRevision.value
+    --saveState.pending
+    if (revision !== saveState.revision) return
+    field.value = saveState.confirmed as NonNullable<GatewaySettings[K]>
+    if (ok) {
+      showToast(successMessage)
+      if (refreshInfo) await refreshSystemInfo()
+    } else {
+      showSettingsSaveFailure('设置更新失败')
+    }
+  })
+  saveState.queue = task.catch(() => {})
+  await task
+}
+
+async function saveGatewaySettings(settings: Parameters<typeof updateSettings>[0]): Promise<boolean> {
+  // Let optimistic controls render before rolling back a disconnected edit.
+  if (!gatewayApiActive.value) {
+    await nextTick()
+    return false
+  }
+  return updateSettings(settings)
+}
+
+function showSettingsSaveFailure(message: string) {
+  showToast(gatewayApiActive.value ? `${message}，更改未保存，请重试` : '本地网关未连接，设置更改未保存，请连接后重试')
 }
 
 async function setRoutingStrategy(strategy: GlobalRouteStrategy) {
-  const previous = routingStrategy.value
-  routingStrategy.value = strategy
-  if (gatewayApiActive.value) {
-    const ok = await updateSettings({ routing_strategy: strategy })
-    if (ok) {
-      showToast('网关路由策略已更新')
-    } else {
-      routingStrategy.value = previous
-      showToast('网关路由策略更新失败')
-    }
-  }
+  await persistGatewaySetting('routing_strategy', routingStrategy, strategy, '网关路由策略已更新')
 }
 
 async function handleSetLogRetention(days: number) {
-  const previous = logRetentionDays.value
-  logRetentionDays.value = days
-  if (gatewayApiActive.value) {
-    const ok = await updateSettings({ log_retention_days: days })
-    if (ok) {
-      showToast(days > 0 ? `日志保留时长已设为 ${days} 天` : '已设为永久保留日志')
-      await refreshSystemInfo()
-    } else {
-      logRetentionDays.value = previous
-      showToast('日志保留时长更新失败')
-    }
-  }
+  await persistGatewaySetting('log_retention_days', logRetentionDays, days,
+    days > 0 ? `日志保留时长已设为 ${days} 天` : '已设为永久保留日志', true)
 }
 
 async function handleSetLogMaxCount(count: number) {
-  const previous = logMaxCount.value
-  logMaxCount.value = count
-  if (gatewayApiActive.value) {
-    const ok = await updateSettings({ log_max_count: count })
-    if (ok) {
-      showToast(count > 0 ? `日志容量上限已设为 ${count.toLocaleString()} 条` : '已设为不限制流水条数')
-      await refreshSystemInfo()
-    } else {
-      logMaxCount.value = previous
-      showToast('日志容量上限更新失败')
-    }
-  }
+  await persistGatewaySetting('log_max_count', logMaxCount, count,
+    count > 0 ? `日志容量上限已设为 ${count.toLocaleString()} 条` : '已设为不限制流水条数', true)
 }
 
 async function handlePruneLogs() {
@@ -3550,7 +3803,6 @@ function handleContextMenu(event: MouseEvent) {
             :gateway-key="gatewayApiKey"
             :routing-strategy="routingStrategy"
             :custom-model-mappings="customModelMappings"
-            @save="onClientPlatformSave"
             @update-routing-strategy="setRoutingStrategy"
           />
         </section>
@@ -3676,8 +3928,8 @@ function handleContextMenu(event: MouseEvent) {
                       <span class="m26-pill-total" :title="'总响应耗时: ' + formatLatencySec(log.latency_ms)">
                         {{ formatDurationPill(log.latency_ms) }}
                       </span>
-                      <span class="m26-pill-ttft" :title="'首字耗时 (TTFT): ' + formatLatencySec(log.ttft_ms || log.latency_ms)">
-                        {{ formatDurationPill(log.ttft_ms || log.latency_ms) }}
+                      <span class="m26-pill-ttft" :title="'首字耗时 (TTFT): ' + ((log.ttft_ms ?? 0) > 0 ? formatLatencySec(log.ttft_ms) : '未测量')">
+                        {{ (log.ttft_ms ?? 0) > 0 ? formatDurationPill(log.ttft_ms) : '-' }}
                       </span>
                       <span v-if="log.is_stream" class="m26-pill-stream" title="SSE 流式传输">流</span>
                     </div>
@@ -3832,13 +4084,13 @@ function handleContextMenu(event: MouseEvent) {
                   'unsupported': newProtoSupportsOpenai === false,
                   'active': newChannelProtocol === 'openai-compatible',
                 }"
-                @click="newChannelProtocol = 'openai-compatible'; hasManuallyChangedNewProtocol = true"
+              @click="manuallySelectNewProtocol('openai-compatible')"
               >
                 <div class="supplier-proto-card-top">
                   <span class="supplier-proto-card-name">OpenAI 兼容</span>
                   <span v-if="newProtoSupportsOpenai === true" class="supplier-card-badge ok">✓ 支持</span>
                   <span v-else-if="newProtoSupportsOpenai === false" class="supplier-card-badge no">✕ 不支持</span>
-                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                  <span v-else class="supplier-card-badge maybe">未确认</span>
                 </div>
                 <span class="supplier-proto-card-sub">/v1/chat/completions</span>
               </div>
@@ -3851,15 +4103,15 @@ function handleContextMenu(event: MouseEvent) {
                   'unsupported': newProtoSupportsAnthropic === false,
                   'active': newChannelProtocol === 'anthropic',
                 }"
-                @click="newChannelProtocol = 'anthropic'; hasManuallyChangedNewProtocol = true"
+              @click="manuallySelectNewProtocol('anthropic')"
               >
                 <div class="supplier-proto-card-top">
                   <span class="supplier-proto-card-name">Anthropic 原生</span>
                   <span v-if="newProtoSupportsAnthropic === true" class="supplier-card-badge ok">✓ 支持</span>
                   <span v-else-if="newProtoSupportsAnthropic === false" class="supplier-card-badge no">✕ 不支持</span>
-                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                  <span v-else class="supplier-card-badge maybe">未确认</span>
                 </div>
-                <span class="supplier-proto-card-sub">/v1/messages (Claude)</span>
+                <span class="supplier-proto-card-sub">/v1/messages</span>
               </div>
 
               <!-- Responses 规范 -->
@@ -3870,18 +4122,22 @@ function handleContextMenu(event: MouseEvent) {
                   'unsupported': newProtoSupportsResponses === false,
                   'active': newChannelProtocol === 'openai-responses',
                 }"
-                @click="newChannelProtocol = 'openai-responses'; hasManuallyChangedNewProtocol = true"
+              @click="manuallySelectNewProtocol('openai-responses')"
               >
                 <div class="supplier-proto-card-top">
                   <span class="supplier-proto-card-name">Responses 规范</span>
                   <span v-if="newProtoSupportsResponses === true" class="supplier-card-badge ok">✓ 支持</span>
                   <span v-else-if="newProtoSupportsResponses === false" class="supplier-card-badge no">✕ 不支持</span>
-                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                  <span v-else class="supplier-card-badge maybe">未确认</span>
                 </div>
                 <span class="supplier-proto-card-sub">/v1/responses</span>
               </div>
             </div>
           </div>
+
+          <p v-if="newProtocolDetectMessage" class="supplier-detect-result" :class="newProtocolDetectMessage.type" role="status">
+            {{ newProtocolDetectMessage.text }}
+          </p>
 
           <!-- 4. 模型管理 (按自然填写顺序第四行) -->
           <div class="supplier-models-wrap">
@@ -3980,6 +4236,11 @@ function handleContextMenu(event: MouseEvent) {
               </button>
             </div>
 
+            <div v-if="editEndpointChanged" class="m26-form-group">
+              <label class="m26-label" for="edit-detection-api-key">新地址检测 Key</label>
+              <input id="edit-detection-api-key" v-model="editDetectionApiKey" type="password" autocomplete="off" class="m26-input supplier-input" />
+            </div>
+
             <!-- 全部协议支持状态卡片列表 (整行全宽展开) -->
             <div class="supplier-proto-cards-row">
               <!-- OpenAI 兼容协议 -->
@@ -3990,13 +4251,13 @@ function handleContextMenu(event: MouseEvent) {
                   'unsupported': editProtoSupportsOpenai === false,
                   'active': editChannelProtocol === 'openai-compatible',
                 }"
-                @click="editChannelProtocol = 'openai-compatible'; hasManuallyChangedEditProtocol = true"
+                @click="manuallySelectEditProtocol('openai-compatible')"
               >
                 <div class="supplier-proto-card-top">
                   <span class="supplier-proto-card-name">OpenAI 兼容</span>
                   <span v-if="editProtoSupportsOpenai === true" class="supplier-card-badge ok">✓ 支持</span>
                   <span v-else-if="editProtoSupportsOpenai === false" class="supplier-card-badge no">✕ 不支持</span>
-                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                  <span v-else class="supplier-card-badge maybe">未确认</span>
                 </div>
                 <span class="supplier-proto-card-sub">/v1/chat/completions</span>
               </div>
@@ -4009,15 +4270,15 @@ function handleContextMenu(event: MouseEvent) {
                   'unsupported': editProtoSupportsAnthropic === false,
                   'active': editChannelProtocol === 'anthropic',
                 }"
-                @click="editChannelProtocol = 'anthropic'; hasManuallyChangedEditProtocol = true"
+                @click="manuallySelectEditProtocol('anthropic')"
               >
                 <div class="supplier-proto-card-top">
                   <span class="supplier-proto-card-name">Anthropic 原生</span>
                   <span v-if="editProtoSupportsAnthropic === true" class="supplier-card-badge ok">✓ 支持</span>
                   <span v-else-if="editProtoSupportsAnthropic === false" class="supplier-card-badge no">✕ 不支持</span>
-                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                  <span v-else class="supplier-card-badge maybe">未确认</span>
                 </div>
-                <span class="supplier-proto-card-sub">/v1/messages (Claude)</span>
+                <span class="supplier-proto-card-sub">/v1/messages</span>
               </div>
 
               <!-- Responses 规范 -->
@@ -4028,18 +4289,22 @@ function handleContextMenu(event: MouseEvent) {
                   'unsupported': editProtoSupportsResponses === false,
                   'active': editChannelProtocol === 'openai-responses',
                 }"
-                @click="editChannelProtocol = 'openai-responses'; hasManuallyChangedEditProtocol = true"
+                @click="manuallySelectEditProtocol('openai-responses')"
               >
                 <div class="supplier-proto-card-top">
                   <span class="supplier-proto-card-name">Responses 规范</span>
                   <span v-if="editProtoSupportsResponses === true" class="supplier-card-badge ok">✓ 支持</span>
                   <span v-else-if="editProtoSupportsResponses === false" class="supplier-card-badge no">✕ 不支持</span>
-                  <span v-else class="supplier-card-badge maybe">未探测</span>
+                  <span v-else class="supplier-card-badge maybe">未确认</span>
                 </div>
                 <span class="supplier-proto-card-sub">/v1/responses</span>
               </div>
             </div>
           </div>
+
+          <p v-if="editProtocolDetectMessage" class="supplier-detect-result" :class="editProtocolDetectMessage.type" role="status">
+            {{ editProtocolDetectMessage.text }}
+          </p>
 
           <!-- 4. 模型管理 (按自然填写顺序第四行) -->
           <div class="supplier-models-wrap">
@@ -4454,6 +4719,18 @@ function handleContextMenu(event: MouseEvent) {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.supplier-detect-result {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #64748b;
+  overflow-wrap: anywhere;
+}
+
+.supplier-detect-result.error {
+  color: #dc2626;
 }
 
 .supplier-label-row {

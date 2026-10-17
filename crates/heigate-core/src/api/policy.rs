@@ -61,15 +61,33 @@ pub fn best_auto_choice_matching(
     ch: Option<&Channel>,
     allowed: Option<&[String]>,
 ) -> AutoModelChoice {
-    let Some(ch) = ch else {
-        return AutoModelChoice {
+    auto_choice_for_strategy(ch, allowed, crate::router::ROUTE_SMART_QUALITY)
+}
+
+pub(crate) fn auto_choice_for_strategy(
+    ch: Option<&Channel>,
+    allowed: Option<&[String]>,
+    strategy: &str,
+) -> AutoModelChoice {
+    auto_choices_for_strategy(ch, allowed, strategy)
+        .into_iter()
+        .next()
+        .unwrap_or(AutoModelChoice {
             name: String::new(),
             rank: RANK_UNKNOWN,
             lat: i64::MAX,
             order: 0,
-        };
-    };
+        })
+}
 
+pub(crate) fn auto_choices_for_strategy(
+    ch: Option<&Channel>,
+    allowed: Option<&[String]>,
+    strategy: &str,
+) -> Vec<AutoModelChoice> {
+    let Some(ch) = ch else {
+        return Vec::new();
+    };
     let mut models = vec![ch.primary_model.clone()];
     models.extend(ch.extra_models.clone());
 
@@ -85,21 +103,7 @@ pub fn best_auto_choice_matching(
         }
     }
 
-    if models.is_empty() {
-        return AutoModelChoice {
-            name: String::new(),
-            rank: RANK_UNKNOWN,
-            lat: i64::MAX,
-            order: 0,
-        };
-    }
-
-    let mut best = AutoModelChoice {
-        name: String::new(),
-        rank: RANK_UNKNOWN,
-        lat: i64::MAX,
-        order: models.len() + 1,
-    };
+    let mut choices = Vec::new();
 
     for (index, name) in models.iter().enumerate() {
         let name = name.trim();
@@ -145,14 +149,27 @@ pub fn best_auto_choice_matching(
             break;
         }
 
-        let better = current.rank < best.rank
-            || (current.rank == best.rank && current.lat < best.lat)
-            || (current.rank == best.rank && current.lat == best.lat && current.order < best.order);
-        if better {
-            best = current;
+        if let Some(performance) = ch.fresh_model_performance(name) {
+            current.lat = performance.ttft_ms.round() as i64;
+            let health_at = ch
+                .model_health
+                .iter()
+                .find(|h| h.model.eq_ignore_ascii_case(name))
+                .and_then(|h| h.checked_at);
+            if health_at.is_none_or(|at| performance.updated_at > at) {
+                current.rank = 0;
+            }
         }
+
+        choices.push(current);
     }
-    best
+    if strategy == crate::router::ROUTE_MANUAL_PRIORITY {
+        choices.sort_by_key(|choice| choice.order);
+    } else {
+        choices.sort_by_key(|choice| (choice.rank, choice.lat, choice.order));
+    }
+    choices.dedup_by(|a, b| a.name == b.name);
+    choices
 }
 
 /// Selects the best configured model for a channel.
@@ -481,16 +498,15 @@ fn is_empty_error_detail(value: &Value) -> bool {
 /// Detects an error frame inside an SSE prefix, returning its message and
 /// status.
 pub fn upstream_stream_error(prefix: &str) -> Option<(String, i32)> {
-    for line in prefix.split('\n') {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let payload = rest.trim();
+    let mut decoder = crate::protocol::stream::SseEventDecoder::default();
+    let mut events = decoder.feed(prefix.as_bytes());
+    events.extend(decoder.finish());
+    for event in events {
+        let payload = String::from_utf8_lossy(&event);
         if payload.is_empty() || payload == "[DONE]" {
             continue;
         }
-        if let Some(found) = upstream_error_payload(payload) {
+        if let Some(found) = upstream_error_payload(&payload) {
             return Some(found);
         }
     }
@@ -499,35 +515,20 @@ pub fn upstream_stream_error(prefix: &str) -> Option<(String, i32)> {
 
 /// Whether an SSE prefix already carries model output.
 pub fn upstream_stream_has_output(prefix: &str) -> bool {
-    for line in prefix.split('\n') {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let payload = rest.trim();
+    let mut decoder = crate::protocol::stream::SseEventDecoder::default();
+    let mut events = decoder.feed(prefix.as_bytes());
+    events.extend(decoder.finish());
+    for event in events {
+        let payload = String::from_utf8_lossy(&event);
         if payload.is_empty() || payload == "[DONE]" {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        let Ok(value) = serde_json::from_str::<Value>(&payload) else {
             continue;
         };
-        match value.get("type").and_then(Value::as_str) {
-            Some("response.output_text.delta")
-            | Some("response.reasoning_text.delta")
-            | Some("response.reasoning_summary_text.delta")
-            | Some("response.function_call_arguments.delta")
-            | Some("response.audio.delta")
-            | Some("content_block_delta") => return true,
-            _ => {}
-        }
-        if let Some(choices) = value.get("choices").and_then(Value::as_array) {
-            if let Some(choice) = choices.first() {
-                if let Some(delta) = choice.get("delta").and_then(Value::as_object) {
-                    if !delta.is_empty() {
-                        return true;
-                    }
-                }
-            }
+        let (text, other) = crate::api::forward::semantic_stream_output(&value);
+        if text || other {
+            return true;
         }
     }
     false
@@ -539,6 +540,34 @@ mod tests {
     //! `TestUpstreamErrorPayloadPolicy`).
 
     use super::*;
+
+    #[test]
+    fn auto_latency_prefers_fresh_live_model_performance_without_erasing_probe() {
+        let channel = Channel {
+            primary_model: "primary".into(),
+            extra_models: vec!["extra".into()],
+            last_status: STATUS_OPERATIONAL.into(),
+            last_ttft_ms: Some(50),
+            model_health: vec![crate::store::ModelHealth {
+                model: "extra".into(),
+                status: STATUS_OPERATIONAL.into(),
+                ttft_ms: Some(999),
+                ..Default::default()
+            }],
+            model_performance: vec![crate::store::ModelPerformance {
+                model: "extra".into(),
+                ttft_ms: 20.0,
+                last_ttft_ms: 20,
+                samples: 3,
+                updated_at: chrono::Utc::now(),
+            }],
+            ..Default::default()
+        };
+        let choice = auto_choice_for_strategy(Some(&channel), None, crate::router::ROUTE_LATENCY);
+        assert_eq!(choice.name, "extra");
+        assert_eq!(choice.lat, 20);
+        assert_eq!(channel.model_health[0].ttft_ms, Some(999));
+    }
 
     fn is_error(body: &str) -> bool {
         upstream_error_payload(body).is_some()
