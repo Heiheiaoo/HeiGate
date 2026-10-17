@@ -465,7 +465,7 @@ pub fn restore() -> Result<CodexConfigStatus, String> {
         return Err(format!("恢复 Codex 模型目录失败: {error}"));
     }
     let config_result = match config_content.as_deref() {
-        Some(content) if content.is_empty() => atomic_remove(&path),
+        Some("") => atomic_remove(&path),
         Some(content) => atomic_write(&path, content),
         None => atomic_remove(&path),
     };
