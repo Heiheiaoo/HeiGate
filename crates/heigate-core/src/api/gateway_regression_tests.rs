@@ -89,7 +89,7 @@ async fn old_primary_outcome_keeps_model_health_but_not_replacement_headline() {
     }
     let saved = store.get(channel.id).unwrap();
     assert_eq!(saved.primary_model, "replacement");
-    assert_eq!(saved.last_status, "unknown");
+    assert_eq!(saved.last_status, "operational");
     assert_eq!(saved.last_latency_ms, None);
     assert!(saved
         .model_health

@@ -308,6 +308,8 @@ impl Router {
                 || fresh.endpoint != channel.endpoint
                 || fresh.provider != channel.provider
                 || fresh.api_mode != channel.api_mode
+                || fresh.primary_model != channel.primary_model
+                || fresh.primary_model != model
                 || !channel.has_model(model)
                 || !fresh.has_model(model)
                 || fresh

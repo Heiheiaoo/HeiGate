@@ -958,7 +958,8 @@ impl Store {
              ON CONFLICT(channel_id,model) DO UPDATE SET status=excluded.status,latency_ms=excluded.latency_ms,ttft_ms=excluded.ttft_ms,error=excluded.error,checked_at=excluded.checked_at",
             params![expected.id, health.model, health.status, health.latency_ms, health.ttft_ms, health.error, format_time(checked_at)],
         )?;
-        if fresh.has_model(&health.model)
+        if fresh.primary_model == expected.primary_model
+            && fresh.primary_model == health.model
             && !fresh.last_checked_at.is_some_and(|time| time > checked_at)
         {
             mutate_headline(&mut fresh);
@@ -989,6 +990,7 @@ impl Store {
         };
         Ok(current.enabled
             && current.same_upstream(expected)
+            && current.primary_model == expected.primary_model
             && current.has_model(model)
             && lease.is_current_in(&conn, model)?)
     }
