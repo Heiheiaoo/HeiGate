@@ -16,7 +16,6 @@ const channel: Channel = {
   lastCheck: '刚刚',
   accent: '#3b82f6',
   enabled: true,
-  primaryModel: 'gpt-4o',
   modelNames: ['gpt-4o', 'gpt-4o-mini'],
   injectionState: 'detected',
   injectionTokens: 640,
@@ -70,13 +69,13 @@ describe('ChannelInjectionContent', () => {
 
     await copyModel?.trigger('click')
     await copyContent.trigger('click')
-    await wrapper.get('button[title="仅检测主模型（推荐，速度快且省 Token）"]').trigger('click')
+    await wrapper.get('button[title="仅检测首个模型（推荐，速度快且省 Token）"]').trigger('click')
     await wrapper.get('button[title="逐一检测全部模型（耗时可能较长）"]').trigger('click')
     await wrapper.get('button[aria-label="关闭"]').trigger('click')
 
     expect(wrapper.emitted('copy-model')).toEqual([['gpt-4o']])
     expect(wrapper.emitted('copy-content')).toEqual([[results[0].content]])
-    expect(wrapper.emitted('check-primary')).toHaveLength(1)
+    expect(wrapper.emitted('check-one')).toHaveLength(1)
     expect(wrapper.emitted('check-all')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
@@ -85,7 +84,7 @@ describe('ChannelInjectionContent', () => {
     const wrapper = mountContent({ results: [], checking: true })
 
     expect(wrapper.text()).toContain('该渠道尚未执行注入检测')
-    expect(wrapper.get('button[title="仅检测主模型（推荐，速度快且省 Token）"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('button[title="仅检测首个模型（推荐，速度快且省 Token）"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('button[title="逐一检测全部模型（耗时可能较长）"]').attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('全量检测中...')
   })

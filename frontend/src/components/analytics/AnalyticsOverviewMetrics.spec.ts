@@ -11,8 +11,8 @@ function mountContent(overrides: Record<string, unknown> = {}) {
       enabledChannelsCount: 2,
       averageLatency: 420,
       routingStrategy: 'latency',
-      modelCount: 4,
-      availableModels: 3,
+      modelIdCount: 4,
+      channelCountWithModels: 3,
       ...overrides,
     },
   })
@@ -25,7 +25,7 @@ describe('AnalyticsOverviewMetrics', () => {
     expect(wrapper.text()).toContain('0.42s')
     expect(wrapper.text()).toContain('最低延迟')
     expect(wrapper.text()).toContain('4')
-    expect(wrapper.text()).toContain('3 家上游提供')
+    expect(wrapper.text()).toContain('3 家渠道配置了模型')
   })
 
   it('labels routing strategies and slow latency', () => {

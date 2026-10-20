@@ -21,9 +21,9 @@ If you juggle several AI API endpoints — official keys, a relay, a local Ollam
 - **Multi-channel routing** — pick a channel by latency, a quality score, or round robin
 - **Automatic failover** — when a channel errors, rate-limits, or times out, the request moves to the next one; repeated failures trip a circuit breaker with a cooldown
 - **Protocol translation** — talk to an OpenAI-compatible upstream with an Anthropic client; requests and responses (including streaming) are converted on the fly
-- **Health probes** — on demand, exercise the primary model with a tiny arithmetic question, with queued checks for every configured model when you ask for them; nothing spends quota in the background
+- **Health probes** — on demand, exercise the first model in a channel's model list with a tiny arithmetic question, with queued checks for every configured model when you ask for them; nothing spends quota in the background
 - **Usage tracking** — every request records its channel, model, tokens, time to first token, and failover chain locally, with daily/model/channel rollups
-- **Client access** — connect Claude Code, Cursor, Codex CLI, and other clients with the gateway URL and API key
+- **Hermes integration** — configure Hermes in the app and route requests through the local gateway
 
 Everything lives in a local SQLite file (macOS: `~/Library/Application Support/HeiGate`; Windows: `%APPDATA%\HeiGate`). Nothing is uploaded. The gateway listens on loopback only.
 
@@ -54,25 +54,12 @@ xattr -dr com.apple.quarantine /Applications/HeiGate.app
 
 ## Connect your tools
 
-Start HeiGate, add a channel in the UI, then copy the gateway URL and API key from Settings into your client. Manual setup works with any OpenAI-, Responses-, or Anthropic-compatible tool.
+Add a provider in HeiGate. Gateway Configuration shows the shared URL and key at the top; enter them in any tool you want to connect. All requests use the same provider routing rules.
 
-The client page can write local settings and restart Hermes. For other clients, saving gateway settings only updates HeiGate routing, while saving a direct-connection draft stores it on this device; configure and launch the client manually. Connection tests make one real inference request using the selected endpoint, key, and model.
-
-The gateway key shown in the UI authenticates clients. It is stored as `gateway.key` in the data directory (macOS: `~/Library/Application Support/HeiGate/gateway.key` with `0600` permissions; Windows: `%APPDATA%\HeiGate\gateway.key`).
-
-**Claude Code**
-
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:28888/claude_code"
-export ANTHROPIC_AUTH_TOKEN="<gateway key from the UI>"
-```
-
-**OpenAI-compatible clients** (Cursor, VS Code extensions, and so on)
-
-- Base URL: `http://127.0.0.1:28888/v1` (client-specific paths supported, e.g. `http://127.0.0.1:28888/hermes/v1`)
+The default gateway URL is `http://127.0.0.1:28888/v1`. Its key is stored as `gateway.key` in the data directory (macOS: `~/Library/Application Support/HeiGate/gateway.key` with `0600` permissions; Windows: `%APPDATA%\HeiGate\gateway.key`).
 - API key: `<gateway key from the UI>`
 
-The gateway exposes `POST /v1/messages`, `POST /v1/chat/completions`, `POST /v1/responses`, and `GET /v1/models` (plus dedicated client routes `/{client}/v1/*`).
+The gateway exposes a shared `/v1` API: `POST /v1/messages`, `POST /v1/chat/completions`, `POST /v1/responses`, and `GET /v1/models`. All endpoints use the same gateway routing configuration.
 
 ## Build from source
 

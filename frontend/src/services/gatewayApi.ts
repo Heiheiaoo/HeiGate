@@ -142,17 +142,6 @@ export async function getChannel(id: number, includeSecrets = true): Promise<Api
   }
 }
 
-export async function getGatewayKey(): Promise<string | null> {
-  try {
-    const response = await request('/session')
-    if (!response.ok) return null
-    const payload = await response.json() as { data?: { api_key?: string } }
-    return typeof payload.data?.api_key === 'string' && payload.data.api_key ? payload.data.api_key : null
-  } catch {
-    return null
-  }
-}
-
 export async function createChannel(channel: Partial<ApiChannel> & { apiKey: string }): Promise<ApiChannel | null> {
   try {
     const response = await request('/channels', { method: 'POST', body: JSON.stringify(toPayload(channel)) })
@@ -272,7 +261,7 @@ export type ModelInjectionResult = {
   checked_at: string
 }
 
-// Checks the primary model, or every model the channel lists when all is true.
+// Checks the first configured model, or every model the channel lists when all is true.
 // The call is synchronous and a full sweep runs one request per model (plus an
 // extraction for injected ones), hence the long deadlines.
 export async function injectionCheck(
@@ -474,6 +463,22 @@ export async function getSystemInfo(): Promise<SystemInfo | null> {
   }
 }
 
+export type GatewayConnectionInfo = {
+  base_url: string
+  api_key: string
+}
+
+export async function getGatewayConnection(): Promise<GatewayConnectionInfo | null> {
+  try {
+    const response = await request('/gateway/connection')
+    if (!response.ok) return null
+    const payload = await response.json() as { data?: GatewayConnectionInfo }
+    return payload.data ?? null
+  } catch {
+    return null
+  }
+}
+
 export async function updateSettings(settings: {
   log_retention_days?: number
   log_max_count?: number
@@ -650,44 +655,6 @@ export async function getAnalytics(days = 7): Promise<AnalyticsResult | null> {
   }
 }
 
-export async function getCustomModelMappings(): Promise<Record<string, string>> {
-  try {
-    const response = await request('/custom-model-mappings')
-    if (!response.ok) return {}
-    const payload = await response.json() as { data?: Record<string, string> }
-    return payload.data ?? {}
-  } catch {
-    return {}
-  }
-}
-
-export async function setCustomModelMapping(rawModel: string, targetModel: string): Promise<Record<string, string> | null> {
-  try {
-    const response = await request('/custom-model-mappings', {
-      method: 'POST',
-      body: JSON.stringify({ raw_model: rawModel, target_model: targetModel }),
-    })
-    if (!response.ok) return null
-    const payload = await response.json() as { data?: Record<string, string> }
-    return payload.data ?? null
-  } catch {
-    return null
-  }
-}
-
-export async function deleteCustomModelMapping(rawModel: string): Promise<Record<string, string> | null> {
-  try {
-    const response = await request(`/custom-model-mappings?raw_model=${encodeURIComponent(rawModel)}`, {
-      method: 'DELETE',
-    })
-    if (!response.ok) return null
-    const payload = await response.json() as { data?: Record<string, string> }
-    return payload.data ?? null
-  } catch {
-    return null
-  }
-}
-
 export type ClientPlatformBackendConfig = {
   strategy?: string
   allowed_channels?: string[]
@@ -716,62 +683,6 @@ export async function getClientConfigs(): Promise<Record<string, ClientPlatformB
 export interface ClientConfigUpdateResult {
   ok: boolean
   message?: string
-  config?: CodexLocalConfigStatus
-}
-
-export type CodexLocalConfigStatus = {
-  path: string
-  exists: boolean
-  managed: boolean
-  modified: boolean
-  backup_exists: boolean
-  parse_error?: string | null
-  provider?: string | null
-  catalog_path?: string
-  catalog_managed?: boolean
-}
-
-export async function getCodexConfigStatus(): Promise<CodexLocalConfigStatus> {
-  const response = await request('/clients/codex/status')
-  const payload = await response.json() as { data?: CodexLocalConfigStatus; error?: string }
-  if (!response.ok || !payload.data) throw new Error(payload.error || '读取 Codex 配置状态失败')
-  return payload.data
-}
-
-export type CodexApplyOptions = {
-  model: string
-  mode: 'direct' | 'gateway'
-  channel_id?: number
-  models?: string[]
-  restart?: boolean
-}
-
-async function codexConfigAction(action: 'apply' | 'restore', options?: CodexApplyOptions): Promise<ClientConfigUpdateResult> {
-  try {
-    const response = await request(`/clients/codex/${action}`, {
-      method: 'POST',
-      ...(action === 'apply' ? { body: JSON.stringify(options) } : {}),
-    })
-    const payload = await response.json() as {
-      data?: { status?: string; message?: string; config?: CodexLocalConfigStatus }
-      error?: string
-    }
-    return {
-      ok: response.ok && payload.data?.status === 'ok',
-      message: payload.error || payload.data?.message,
-      config: payload.data?.config,
-    }
-  } catch (err: any) {
-    return { ok: false, message: err?.message }
-  }
-}
-
-export function applyCodexConfig(options: CodexApplyOptions): Promise<ClientConfigUpdateResult> {
-  return codexConfigAction('apply', options)
-}
-
-export function restoreCodexConfig(): Promise<ClientConfigUpdateResult> {
-  return codexConfigAction('restore')
 }
 
 export async function updateClientConfig(
@@ -794,30 +705,5 @@ export async function updateClientConfig(
     }
   } catch (err: any) {
     return { ok: false, message: err?.message }
-  }
-}
-
-
-export async function probeClientConnection(config: {
-  provider: 'openai' | 'anthropic'
-  api_mode: 'chat_completions' | 'responses'
-  endpoint: string
-  api_key: string
-  primary_model: string
-}): Promise<ProbeResult> {
-  const response = await request('/clients/probe', {
-    method: 'POST',
-    body: JSON.stringify(config),
-  }, PROBE_TIMEOUT_MS)
-  const payload = await response.json() as { data?: unknown[]; error?: string }
-  if (!response.ok || !payload.data?.length) {
-    throw new Error(payload.error || '未收到有效的探测结果')
-  }
-  const item = asRecord(payload.data[0])
-  return {
-    model: String(item.model ?? ''),
-    status: String(item.status ?? 'unknown'),
-    latencyMs: numberOrNull(item.latency_ms),
-    message: String(item.message ?? ''),
   }
 }

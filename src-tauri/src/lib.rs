@@ -3,6 +3,7 @@
 //! frontend's relative-path API calls hit the gateway exactly as they did under
 //! the previous native shells.
 
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -122,6 +123,11 @@ pub fn run() {
             let bound = heigate_core::server::bind()?;
             let port = bound.port;
             let static_dir = static_dir(&app.handle().clone());
+            let mut frontend_hasher = std::collections::hash_map::DefaultHasher::new();
+            std::fs::read(static_dir.join("index.html"))
+                .unwrap_or_default()
+                .hash(&mut frontend_hasher);
+            let frontend_cache_key = frontend_hasher.finish();
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
             tauri::async_runtime::spawn(async move {
@@ -143,7 +149,7 @@ pub fn run() {
                 }
             }
 
-            let url = format!("http://127.0.0.1:{port}/")
+            let url = format!("http://127.0.0.1:{port}/?ui={frontend_cache_key:016x}")
                 .parse::<tauri::Url>()
                 .expect("valid local server url");
 

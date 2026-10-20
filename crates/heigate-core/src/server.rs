@@ -69,12 +69,6 @@ pub fn build_state(gateway_port: u16) -> std::io::Result<SharedState> {
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     let gateway_key = load_or_create_gateway_key(&datadir::gateway_key_path())?;
 
-    // Restore the persisted custom model mappings: the UI reads them from the
-    // in-memory table, which otherwise starts empty after every restart.
-    if let Ok(raw) = store.get_setting("custom_model_mappings", "{}") {
-        crate::canonical::load_custom_model_mappings(&raw);
-    }
-
     let router = Arc::new(ChannelRouter::new(store.clone()));
     let gateway = Arc::new(Gateway::new(store.clone(), router.clone()));
     let runner = Arc::new(ProbeRunner::with_key_pool(
@@ -100,7 +94,6 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         .route("/config/export", get(crate::api::config::export))
         .route("/config/preview", post(crate::api::config::preview))
         .route("/config/import", post(crate::api::config::import))
-        .route("/session", get(handlers::session))
         .route(
             "/channels",
             get(handlers::list_channels).post(handlers::create_channel),
@@ -143,12 +136,6 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
             post(handlers::duplicate_channel),
         )
         .route("/models", get(handlers::list_models))
-        .route(
-            "/custom-model-mappings",
-            get(handlers::get_custom_mappings)
-                .post(handlers::set_custom_mapping)
-                .delete(handlers::delete_custom_mapping),
-        )
         .route("/analytics", get(handlers::analytics))
         .route(
             "/logs",
@@ -157,18 +144,9 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         .route("/logs/stream", get(handlers::stream_logs))
         .route("/logs/prune", post(handlers::prune_logs))
         .route("/system", get(handlers::system_info))
+        .route("/gateway/connection", get(handlers::gateway_connection))
         .route("/settings", put(handlers::update_settings))
         .route("/clients/config", get(handlers::get_client_configs))
-        .route(
-            "/clients/codex/status",
-            get(handlers::get_codex_config_status),
-        )
-        .route("/clients/codex/apply", post(handlers::apply_codex_config))
-        .route(
-            "/clients/codex/restore",
-            post(handlers::restore_codex_config),
-        )
-        .route("/clients/probe", post(handlers::probe_client))
         .route("/clients/{id}/config", put(handlers::update_client_config))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn(same_origin_only));
@@ -181,27 +159,6 @@ pub fn router(state: SharedState, static_dir: PathBuf) -> Router {
         )
         .route("/v1/responses", post(handlers::forward_responses))
         .route("/v1/models", get(handlers::gateway_models))
-        .route(
-            "/{client}/v1/messages",
-            post(handlers::forward_client_messages),
-        )
-        .route(
-            "/{client}/v1/chat/completions",
-            post(handlers::forward_client_chat_completions),
-        )
-        .route(
-            "/{client}/v1/responses",
-            post(handlers::forward_client_responses),
-        )
-        .route("/{client}/v1/models", get(handlers::gateway_client_models))
-        .route(
-            "/{client}/messages",
-            post(handlers::forward_client_messages),
-        )
-        .route(
-            "/{client}/chat/completions",
-            post(handlers::forward_client_chat_completions),
-        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(middleware::from_fn_with_state(GatewayKey(key), bearer_auth))
         .layer(middleware::from_fn(loopback_only));

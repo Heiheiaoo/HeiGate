@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createChannel, listChannels, probeChannelDetails, injectionCheck, updateClientConfig, probeClientConnection, detectChannelProtocol } from '@/services/gatewayApi'
+import { createChannel, listChannels, probeChannelDetails, injectionCheck, updateClientConfig, detectChannelProtocol } from '@/services/gatewayApi'
 
 type FetchArgs = [input: string, init?: RequestInit]
 
@@ -136,26 +136,7 @@ describe('client operations', () => {
     await expect(updateClientConfig('hermes', {})).resolves.toMatchObject({ ok: false, message: expect.stringContaining('重启失败') })
     mockFetch({ data: { status: 'error', message: '失败' } })
     await expect(updateClientConfig('hermes', {})).resolves.toMatchObject({ ok: false })
-    mockFetch({})
-    await expect(updateClientConfig('codex', {})).resolves.toMatchObject({ ok: false })
   })
 
-  it('probes the exact draft endpoint, key and model and reads measured results', async () => {
-    const spy = mockFetch({ data: [{ model: 'draft-model', status: 'operational', latency_ms: 423 }] })
-    const config = { provider: 'openai' as const, api_mode: 'responses' as const, endpoint: 'https://example.test/v1', api_key: 'draft-key', primary_model: 'draft-model' }
-    await expect(probeClientConnection(config)).resolves.toMatchObject({ status: 'operational', latencyMs: 423 })
-    const [url, init] = spy.mock.calls[0] as unknown as FetchArgs
-    expect(url).toBe('/api/clients/probe')
-    expect(init?.method).toBe('POST')
-    expect(JSON.parse(init?.body as string)).toEqual(config)
-    expect((init?.headers as Record<string, string>)['X-HeiGate-Request']).toBe('1')
-  })
 
-  it('rejects failed or empty probe responses', async () => {
-    mockFetch({ error: 'invalid endpoint' }, false)
-    const config = { provider: 'openai' as const, api_mode: 'chat_completions' as const, endpoint: '', api_key: '', primary_model: '' }
-    await expect(probeClientConnection(config)).rejects.toThrow('invalid endpoint')
-    mockFetch({ data: [] })
-    await expect(probeClientConnection(config)).rejects.toThrow('未收到有效的探测结果')
-  })
 })

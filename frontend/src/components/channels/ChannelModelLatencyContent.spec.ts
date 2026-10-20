@@ -15,7 +15,6 @@ const channel: Channel = {
   lastCheck: '刚刚',
   accent: '#3b82f6',
   enabled: true,
-  primaryModel: 'gpt-4o',
   modelNames: ['gpt-4o', 'gpt-4o-mini'],
 }
 
@@ -31,7 +30,6 @@ const rows: ModelLatencyRow[] = [
     injectionClass: 'clean',
     injectionTooltip: '输入统计正常',
     injectionLabel: '正常',
-    primary: true,
     probing: false,
     checkingInjection: false,
     copied: false,
@@ -47,7 +45,6 @@ const rows: ModelLatencyRow[] = [
     injectionClass: 'unknown',
     injectionTooltip: '尚未检测',
     injectionLabel: '未检测',
-    primary: false,
     probing: false,
     checkingInjection: false,
     copied: false,
@@ -69,11 +66,11 @@ function mountContent() {
 }
 
 describe('ChannelModelLatencyContent', () => {
-  it('renders measured latency, primary state, and failed model details', () => {
+  it('renders measured latency and failed model details', () => {
     const wrapper = mountContent()
 
     expect(wrapper.text()).toContain('0.25s')
-    expect(wrapper.find('[aria-label="当前主模型"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="当前主模型"]').exists()).toBe(false)
     expect(wrapper.get('.m26-model-lat-pill').attributes('title')).toBe('模型调用成功')
     expect(wrapper.findAll('.m26-model-lat-pill')[1].attributes('title')).toBe('探活异常：timeout')
     expect(wrapper.text()).toContain('未检测')
@@ -84,12 +81,10 @@ describe('ChannelModelLatencyContent', () => {
     const batchProbe = wrapper.findAll('button').find((button) => button.attributes('aria-label')?.includes('批量探活'))
     await batchProbe?.trigger('click')
     await wrapper.findAll('input[type="checkbox"]')[2].trigger('change')
-    await wrapper.get('button[aria-label="设 gpt-4o-mini 为主模型"]').trigger('click')
     await wrapper.get('button[aria-label="探活 gpt-4o-mini"]').trigger('click')
 
     expect(wrapper.emitted('batch-action')).toEqual([['probe']])
     expect(wrapper.emitted('toggle-selection')).toEqual([['gpt-4o-mini']])
-    expect(wrapper.emitted('set-primary')).toEqual([['gpt-4o-mini']])
     expect(wrapper.emitted('probe-model')).toEqual([['gpt-4o-mini']])
   })
 

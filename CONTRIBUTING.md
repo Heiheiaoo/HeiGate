@@ -44,7 +44,7 @@ CI 会跑同样的检查，外加 `cargo test --workspace`、以及 macOS / Wind
 ```
 feat: 支持自定义探活间隔
 fix: 流式响应中断时补齐 message_stop
-docs: 补充 Codex 配置说明
+docs: 补充 Hermes 配置说明
 ```
 
 ## 安全问题

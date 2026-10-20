@@ -21,9 +21,9 @@
 - **多渠道路由** — 按延迟、质量评分或轮询挑选渠道
 - **自动故障转移** — 某个渠道报错、限流或超时，请求自动切到下一个；连续失败会触发熔断和冷却
 - **协议互通** — 用 Anthropic 的客户端调 OpenAI 兼容的上游，请求和响应（含流式）实时转换
-- **健康探活** — 手动触发，用主模型执行轻量算术题，需要时再队列检查全部模型，验证密钥、端点、模型名是否真的可用；不在后台定时消耗额度
+- **健康探活** — 手动触发，用渠道列表中的首个模型执行轻量算术题，需要时再队列检查全部模型，验证密钥、端点、模型名是否真的可用；不在后台定时消耗额度
 - **用量统计** — 每次请求的渠道、模型、token、首字延迟、失败链路都记在本地，可按天/模型/渠道汇总
-- **客户端接入** — 通过网关地址和 API Key 手动接入 Claude Code、Cursor、Codex CLI 等工具
+- **Hermes 接入** — 在应用中配置 Hermes，并通过本地网关调度供应商
 
 数据保存在系统用户目录下的 SQLite 文件里（macOS：`~/Library/Application Support/HeiGate`，Windows：`%APPDATA%\HeiGate`），不上传任何地方。网关只监听回环地址。
 
@@ -54,25 +54,12 @@ xattr -dr com.apple.quarantine /Applications/HeiGate.app
 
 ## 连接你的工具
 
-启动 HeiGate 后，在界面里添加渠道，然后将设置页显示的网关地址和 API Key 填入客户端。支持任何兼容 OpenAI、Responses 或 Anthropic 协议的工具。
+启动 HeiGate 后，在界面里添加供应商。网关配置页顶部显示统一地址和 Key；将它们填入需要连接的工具，所有请求共用同一套供应商调度规则。
 
-客户端页中，Hermes 支持写入本地配置并重启；其他客户端的「保存网关设置」只更新 HeiGate 路由策略，「保存直连草稿」只保存此设备上的草稿，需要手动配置和启动客户端。连通性测试会用所选地址、密钥和模型发起一次真实推理请求。
-
-界面上的「网关密钥」用于客户端认证，它保存在数据目录下的 `gateway.key`（macOS：`~/Library/Application Support/HeiGate/gateway.key`，权限 `0600`；Windows：`%APPDATA%\HeiGate\gateway.key`）。
-
-**Claude Code**
-
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:28888/claude_code"
-export ANTHROPIC_AUTH_TOKEN="<界面里的网关密钥>"
-```
-
-**OpenAI 兼容客户端**（Cursor、各类 VS Code 插件等）
-
-- Base URL：`http://127.0.0.1:28888/v1`（各独立客户端可分别指定专属路径，如 Hermes 专享 `http://127.0.0.1:28888/hermes/v1`）
+默认网关地址为 `http://127.0.0.1:28888/v1`。网关密钥保存在数据目录下的 `gateway.key`（macOS：`~/Library/Application Support/HeiGate/gateway.key`，权限 `0600`；Windows：`%APPDATA%\HeiGate\gateway.key`）。
 - API Key：`<界面里的网关密钥>`
 
-网关提供这些端点：`POST /v1/messages`、`POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`，以及各平台专享前缀端点（如 `/{client}/v1/*`）。
+网关提供统一的 `/v1` API：`POST /v1/messages`、`POST /v1/chat/completions`、`POST /v1/responses` 和 `GET /v1/models`。所有接口使用同一套网关调度配置。
 
 ## 从源码构建
 

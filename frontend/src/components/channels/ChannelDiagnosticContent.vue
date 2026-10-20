@@ -52,7 +52,7 @@ function getTroubleshootingAdvice(channel: Channel): TroubleshootingAdvice[] {
     tips.push({ title: '检查服务商账户余额', detail: '上游返回余额不足或预扣费失败，请登录服务商后台确认是否有可用额度。' })
     tips.push({ title: '检查模型购买套餐', detail: '部分中转平台需要单独给该模型或分组充值后才能调用。' })
   } else if (error.includes('404')) {
-    tips.push({ title: '核对探活主模型', detail: `上游可能未开通当前主模型（${channel.primaryModel || channel.modelNames?.[0] || '未知'}），或者官方已经迭代该版本。` })
+    tips.push({ title: '核对模型 ID', detail: `上游可能未开通该渠道配置的模型（${channel.modelNames?.[0] || '未知'}），或者官方已经迭代该版本。` })
     tips.push({ title: '检查 Base URL 格式', detail: `当前为 ${channel.url}。请确认该地址是否缺少或多加了版本路径（例如 /v1）。` })
   } else if (error.includes('401')) {
     tips.push({ title: '检查 API 密钥', detail: '上游返回未授权。请确认 API Key 是否正确、前后有无多余空格，以及该 Key 是否仍然有效。' })
@@ -88,7 +88,7 @@ function formatLatencySec(ms: number | null | undefined): string {
     </div>
 
     <div class="m26-diag-meta-grid">
-      <div class="m26-diag-meta-item"><span class="label">探活主模型</span><span class="value font-mono">{{ props.channel.modelNames?.[0] || '默认模型' }}</span></div>
+      <div class="m26-diag-meta-item"><span class="label">配置模型数</span><span class="value font-mono">{{ props.channel.modelNames?.length || 0 }}</span></div>
       <div class="m26-diag-meta-item"><span class="label">接口协议</span><span class="value font-mono">{{ props.channel.protocol }}</span></div>
       <div class="m26-diag-meta-item"><span class="label">上游返回耗时</span><span class="value font-mono">{{ props.channel.latency ? formatLatencySec(props.channel.latency) : '超时' }}</span></div>
       <div class="m26-diag-meta-item"><span class="label">最近检测时间</span><span class="value">{{ props.channel.lastCheck }}</span></div>

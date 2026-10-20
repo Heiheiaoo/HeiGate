@@ -1,4 +1,4 @@
-//! Gateway request/response policy: model aliasing, auto-model ranking, and
+//! Gateway request/response policy: model ID checks, auto-model ranking, and
 //! the upstream error-detection rules. Ported from the Go `internal/api/gateway.go`
 //! policy helpers.
 
@@ -16,14 +16,11 @@ pub const AUTO_MODEL_NAME: &str = "Auto";
 /// Bounds how much of an untrusted value is echoed back in an error message.
 const MAX_ECHOED_ERROR_TEXT: usize = 200;
 
-/// Whether the channel advertises `model` as its primary or an extra model.
+/// Whether the channel advertises this exact model ID.
 pub fn channel_supports_model(ch: &Channel, model: &str) -> bool {
-    if ch.primary_model.eq_ignore_ascii_case(model) {
-        return true;
-    }
-    ch.extra_models
+    ch.configured_models()
         .iter()
-        .any(|m| m.eq_ignore_ascii_case(model))
+        .any(|candidate| candidate.eq_ignore_ascii_case(model.trim()))
 }
 
 /// Whether a channel is a sensible target right now: enabled, not benched by an
@@ -88,8 +85,7 @@ pub(crate) fn auto_choices_for_strategy(
     let Some(ch) = ch else {
         return Vec::new();
     };
-    let mut models = vec![ch.primary_model.clone()];
-    models.extend(ch.extra_models.clone());
+    let mut models = ch.configured_models();
 
     if let Some(allowed) = allowed {
         if !allowed.is_empty() {
@@ -116,20 +112,6 @@ pub(crate) fn auto_choices_for_strategy(
             lat: i64::MAX,
             order: index,
         };
-
-        if name.eq_ignore_ascii_case(&ch.primary_model) {
-            match ch.last_status.as_str() {
-                STATUS_OPERATIONAL | "healthy" => current.rank = 0,
-                STATUS_DEGRADED => current.rank = 1,
-                STATUS_ERROR | STATUS_FAILED => current.rank = 3,
-                _ => {}
-            }
-            if let Some(ttft) = ch.last_ttft_ms.filter(|v| *v > 0) {
-                current.lat = ttft;
-            } else if let Some(latency) = ch.last_latency_ms.filter(|v| *v > 0) {
-                current.lat = latency;
-            }
-        }
 
         for health in &ch.model_health {
             if !health.model.trim().eq_ignore_ascii_case(name) {
@@ -696,19 +678,19 @@ mod tests {
     }
 
     #[test]
-    fn auto_model_choice_prefers_operational_primary() {
+    fn auto_model_choice_uses_configured_models_without_a_primary_slot() {
         let channel = Channel {
-            primary_model: "gpt-4o".to_string(),
-            extra_models: vec!["gpt-4o-mini".to_string()],
+            primary_model: String::new(),
+            extra_models: vec!["gpt-4o".to_string()],
             last_status: STATUS_OPERATIONAL.to_string(),
             ..Default::default()
         };
         assert_eq!(best_auto_model(Some(&channel)), "gpt-4o");
 
-        // A healthy extra model beats an errored primary.
+        // A healthy configured model ranks ahead of an unprobed model.
         let channel = Channel {
-            primary_model: "gpt-4o".to_string(),
-            extra_models: vec!["gpt-4o-mini".to_string()],
+            primary_model: String::new(),
+            extra_models: vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()],
             last_status: STATUS_ERROR.to_string(),
             model_health: vec![crate::store::ModelHealth {
                 model: "gpt-4o-mini".to_string(),

@@ -10,7 +10,6 @@ import {
   duplicateChannel as apiDuplicateChannel,
   fetchUpstreamModels as apiFetchUpstreamModels,
   detectChannelProtocol,
-  getGatewayKey,
   injectionCheck,
   type ModelInjectionResult,
   getSystemInfo,
@@ -22,19 +21,11 @@ import {
   updateChannel,
   updateSettings,
   getAnalytics,
-  getCustomModelMappings,
-  setCustomModelMapping,
-  deleteCustomModelMapping,
   type ApiChannel,
   type RequestLog,
   type SystemInfo,
   type AnalyticsResult,
 } from '@/services/gatewayApi'
-import {
-  getCanonicalGroupKey as modelGroupKey,
-  isModelEquivalent,
-  selectCanonicalDisplayName,
-} from '@/services/modelNaming'
 import { vFocusTrap, openModalCount } from '@/directives/focusTrap'
 import ChannelToolbar from '@/components/channels/ChannelToolbar.vue'
 import ChannelKeyManager from '@/components/channels/ChannelKeyManager.vue'
@@ -49,10 +40,7 @@ import ChannelGridView from '@/components/channels/ChannelGridView.vue'
 import ChannelModelManager from '@/components/channels/ChannelModelManager.vue'
 import ChannelDiagnosticContent from '@/components/channels/ChannelDiagnosticContent.vue'
 import ChannelModelLatencyContent from '@/components/channels/ChannelModelLatencyContent.vue'
-import ChannelProviderSpeedTestContent from '@/components/channels/ChannelProviderSpeedTestContent.vue'
 import ChannelInjectionContent from '@/components/channels/ChannelInjectionContent.vue'
-import ChannelModelAliasContent from '@/components/channels/ChannelModelAliasContent.vue'
-import ModelMappingContent from '@/components/channels/ModelMappingContent.vue'
 import AnalyticsOverviewMetrics from '@/components/analytics/AnalyticsOverviewMetrics.vue'
 import AnalyticsModelBreakdown from '@/components/analytics/AnalyticsModelBreakdown.vue'
 import AnalyticsChannelPerformance from '@/components/analytics/AnalyticsChannelPerformance.vue'
@@ -60,10 +48,9 @@ import AnalyticsTrendCharts from '@/components/analytics/AnalyticsTrendCharts.vu
 import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import LogsView from '@/components/logs/LogsView.vue'
 import StorageSettings from '@/components/settings/StorageSettings.vue'
-import ModelRulesSettings from '@/components/settings/ModelRulesSettings.vue'
 import DesktopGeneralSettings from '@/components/settings/DesktopGeneralSettings.vue'
 import ClientsView from '@/components/clients/ClientsView.vue'
-import type { Channel, ChannelFilterStatus, ModelLatencyRow, ModelProviderSpeedTestRow } from '@/components/channels/types'
+import type { Channel, ChannelFilterStatus, ModelLatencyRow } from '@/components/channels/types'
 // Re-exported so existing imports of Channel from this view keep working; the
 // canonical definition lives in components/channels/types.ts.
 export type { Channel }
@@ -73,8 +60,8 @@ export type GlobalRouteStrategy = 'smart_quality' | 'latency' | 'round_robin'
 // (the Vite dev server) it is absent and the UI draws its own window chrome.
 const isDesktop = ref(typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__))
 const savedSection = typeof localStorage !== 'undefined' ? (localStorage.getItem('heigate_active_section') as any) : null
-const activeSection = ref<'clients' | 'analytics' | 'channels' | 'models' | 'logs' | 'settings'>(
-  savedSection && ['clients', 'analytics', 'channels', 'models', 'logs', 'settings'].includes(savedSection) ? savedSection : 'clients'
+const activeSection = ref<'clients' | 'analytics' | 'channels' | 'logs' | 'settings'>(
+  savedSection && ['clients', 'analytics', 'channels', 'logs', 'settings'].includes(savedSection) ? savedSection : 'clients'
 )
 watch(activeSection, async (val) => {
   if (typeof localStorage !== 'undefined') {
@@ -136,15 +123,6 @@ const modelLatencies = ref<Record<string, {
   checkedAt?: string | null
 }>>({})
 const isProbingAllModels = ref(false)
-
-// Model Multi-Provider Speed Test Modal
-const activeModelSpeedTestName = ref<string | null>(null)
-const isProbingModelProviders = ref(false)
-const modelSpeedTestQuery = ref('')
-
-
-
-
 
 // Analytics state & helpers
 const analyticsDays = ref(7)
@@ -219,7 +197,7 @@ const newChannelUrl = ref('')
 const newChannelKeys = ref<ChannelKeyDraft[]>([{ name: 'Key 1', secret: '' }])
 const newChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const newChannelEnabled = ref(true)
-const newChannelPrimaryModel = ref('')
+const newChannelProbeModel = ref('')
 const newChannelModelNames = ref<string[]>([])
 const isFetchingNewModels = ref(false)
 const isDetectingNewProtocol = ref(false)
@@ -235,7 +213,7 @@ const editChannelName = ref('')
 const editChannelUrl = ref('')
 const editChannelProtocol = ref<Channel['protocol']>('openai-compatible')
 const editChannelEnabled = ref(true)
-const editChannelPrimaryModel = ref('')
+const editChannelProbeModel = ref('')
 const editChannelModelNames = ref<string[]>([])
 const isFetchingEditModels = ref(false)
 const isDetectingEditProtocol = ref(false)
@@ -262,7 +240,6 @@ const gatewayOnline = ref(false)
 const gatewayLatency = ref<number | null>(null)
 const appVersion = ref<string>(__HEIGATE_APP_VERSION__)
 const gatewayLastChecked = ref('尚未检测')
-const gatewayApiKey = ref('')
 
 // System Info & Storage & Logs
 const systemInfo = ref<SystemInfo | null>(null)
@@ -299,13 +276,6 @@ function showToast(msg: string) {
     toastMessage.value = ''
   }, 2400)
 }
-
-const gatewayBaseUrl = computed(() => {
-  if (import.meta.env.DEV) return __HEIGATE_DEV_GATEWAY_URL__
-  if (typeof window === 'undefined') return 'http://127.0.0.1:28888/v1'
-  return `${window.location.origin}/v1`
-})
-
 
 const channels = ref<Channel[]>([])
 
@@ -357,419 +327,20 @@ const sortedChannels = computed(() => {
 
 const enabledChannels = computed(() => channels.value.filter((channel) => channel.enabled))
 
-const customModelMappings = ref<Record<string, string>>({})
-
-async function loadCustomModelMappings() {
-  try {
-    const data = await getCustomModelMappings()
-    customModelMappings.value = data || {}
-  } catch {
-    customModelMappings.value = {}
-  }
-}
-
-// Thin wrappers binding the pure helpers in services/modelNaming.ts to the
-// current custom-mapping dictionary. The normalization logic and its tests live
-// in that module; these just supply the reactive mappings.
-function getCanonicalGroupKey(raw: string): string {
-  return modelGroupKey(raw, customModelMappings.value)
-}
-
-function isModelEquivalentFrontend(a: string, b: string): boolean {
-  return isModelEquivalent(a, b, customModelMappings.value)
-}
-
-function selectCanonicalDisplayNameFrontend(models: string[]): string {
-  return selectCanonicalDisplayName(models, customModelMappings.value)
-}
-
-interface AggregateModelCard {
-  name: string
-  canonicalKey: string
-  rawNames: string[]
-  aliases: string[]
-  providerCount: number
-  status: 'healthy' | 'degraded' | 'unknown' | 'offline'
-  latencies: number[]
-  providers: string[]
-  channelDetails: Array<{
-    name: string
-    status: Channel['status']
-    latency: number | null
-    protocol: string
-    upstreamModel: string
-  }>
-}
-
-const models = computed(() => {
-  const groups = new Map<string, {
-    rawModels: Set<string>
-    providers: string[]
-    channelDetails: Array<{
-      name: string
-      status: Channel['status']
-      latency: number | null
-      protocol: string
-      upstreamModel: string
-    }>
-    latencies: number[]
-    status: 'healthy' | 'degraded' | 'unknown' | 'offline'
-  }>()
-
-  channels.value.forEach((channel) => {
-    // Disabled suppliers are completely absent from the model catalog: they
-    // must not advertise models, count as providers, or participate in probes.
-    if (!channel.enabled) return
-    const list = channel.modelNames ?? []
-    list.forEach((rawModelName) => {
-      const groupKey = getCanonicalGroupKey(rawModelName)
-      const current = groups.get(groupKey) ?? {
-        rawModels: new Set<string>(),
-        providers: [],
-        channelDetails: [],
-        latencies: [],
-        status: 'offline',
-      }
-      current.rawModels.add(rawModelName)
-
-      const modelKey = getModelKey(channel, rawModelName)
-      const specificEntry = modelLatencies.value[modelKey]
-      const isPrimary = isPrimaryModel(channel, rawModelName)
-      const performance = getModelPerformance(channel, rawModelName)
-      const effectiveLat = performance?.ttftMs ?? (specificEntry?.latency != null
-        ? (specificEntry.ttft ?? specificEntry.latency)
-        : (isPrimary ? (channel.ttft ?? channel.latency) : null))
-      const effectiveStatus = performance && !isModelFailed(channel, rawModelName) ? 'healthy' : specificEntry?.status
-        ? (specificEntry.status === 'operational' ? 'healthy' : specificEntry.status === 'degraded' ? 'degraded' : 'offline')
-        : (isPrimary ? channel.status : 'unknown')
-
-      if (!current.providers.includes(channel.name)) {
-        current.providers.push(channel.name)
-        current.channelDetails.push({
-          name: channel.name,
-          status: effectiveStatus,
-          latency: effectiveLat,
-          protocol: channel.protocol,
-          upstreamModel: rawModelName,
-        })
-      }
-
-      if (effectiveStatus === 'healthy') current.status = 'healthy'
-      else if (effectiveStatus === 'degraded' && current.status !== 'healthy') current.status = 'degraded'
-      else if (effectiveStatus === 'unknown' && current.status === 'offline') current.status = 'unknown'
-      if (effectiveLat != null && effectiveLat > 0) current.latencies.push(effectiveLat)
-
-      groups.set(groupKey, current)
-    })
-  })
-
-  const list: Array<AggregateModelCard & { avgLatency: number | null; latency: string }> = []
-  groups.forEach((data, groupKey) => {
-    const allRaw = Array.from(data.rawModels)
-    const displayName = selectCanonicalDisplayNameFrontend(allRaw)
-    const seenAliases = new Set<string>()
-    const aliases: string[] = []
-    for (const r of allRaw) {
-      const lower = r.toLowerCase()
-      if (lower !== displayName.toLowerCase() && !seenAliases.has(lower)) {
-        seenAliases.add(lower)
-        aliases.push(r)
-      }
+const configuredModelCount = computed(() => {
+  const ids = new Set<string>()
+  for (const channel of enabledChannels.value) {
+    for (const rawModelId of channel.modelNames ?? []) {
+      const modelId = rawModelId.trim()
+      if (modelId) ids.add(modelId.toLowerCase())
     }
-    const avgLat = data.latencies.length
-      ? Math.round(data.latencies.reduce((sum, value) => sum + value, 0) / data.latencies.length)
-      : null
-
-    list.push({
-      name: displayName,
-      canonicalKey: groupKey,
-      rawNames: allRaw,
-      aliases,
-      providerCount: data.providers.length,
-      status: data.status,
-      latencies: data.latencies,
-      providers: data.providers,
-      channelDetails: data.channelDetails,
-      avgLatency: avgLat,
-      latency: formatLatencySec(avgLat),
-    })
-  })
-
-  return list.sort((a, b) => {
-    const statusWeight = (s: AggregateModelCard['status']) => (s === 'healthy' ? 0 : s === 'degraded' ? 1 : s === 'unknown' ? 2 : 3)
-    const swA = statusWeight(a.status)
-    const swB = statusWeight(b.status)
-    if (swA !== swB) return swA - swB
-    const latA = a.avgLatency != null && a.avgLatency > 0 ? a.avgLatency : 999999
-    const latB = b.avgLatency != null && b.avgLatency > 0 ? b.avgLatency : 999999
-    if (latA !== latB) return latA - latB
-    return a.name.localeCompare(b.name)
-  })
+  }
+  return ids.size
 })
 
-const selectedModelFamily = ref('all')
-
-// Model Aliases Detail Modal state
-const activeAliasModalModel = ref<(AggregateModelCard & { avgLatency: number | null; latency: string }) | null>(null)
-const aliasModalSearch = ref('')
-const copiedAliasText = ref('')
-
-function openAliasModal(model: AggregateModelCard & { avgLatency: number | null; latency: string }) {
-  activeAliasModalModel.value = model
-  aliasModalSearch.value = ''
-  copiedAliasText.value = ''
-}
-
-function closeAliasModal() {
-  activeAliasModalModel.value = null
-}
-
-// All raw models across channels
-const allDetectedChannelModels = computed(() => {
-  const set = new Set<string>()
-  channels.value.forEach((ch) => {
-    if (ch.primaryModel) set.add(ch.primaryModel)
-    if (ch.modelNames) ch.modelNames.forEach((m) => set.add(m))
-  })
-  return Array.from(set).sort()
-})
-
-const existingCanonicalModelNames = computed(() => {
-  return Array.from(new Set(models.value.map((m) => m.name))).sort()
-})
-
-// Quick Classify Modal state
-const showClassifyModal = ref(false)
-const classifySourceModel = ref('')
-const classifyTargetModel = ref('')
-
-function openClassifyDialog(sourceModelName: string, defaultTarget = '') {
-  classifySourceModel.value = sourceModelName
-  classifyTargetModel.value = defaultTarget || (existingCanonicalModelNames.value[0] || '')
-  showClassifyModal.value = true
-}
-
-async function submitClassify({ source, target }: { source: string; target: string }) {
-  if (!source || !target) {
-    showToast('请选择或输入要归入的目标模型')
-    return
-  }
-  const res = await setCustomModelMapping(source, target)
-  if (res) {
-    customModelMappings.value = res
-  } else {
-    await loadCustomModelMappings()
-  }
-  showClassifyModal.value = false
-  showToast(`已成功将“${source}”归入“${target}”`)
-}
-
-// Custom Mappings Manager Modal state
-const showCustomMappingsModal = ref(false)
-
-function openCustomMappingsModal() {
-  showCustomMappingsModal.value = true
-}
-
-async function handleAddManagerMapping({ source, target }: { source: string; target: string }) {
-  if (!source || !target) {
-    showToast('请填写原始模型与目标模型')
-    return
-  }
-  const res = await setCustomModelMapping(source, target)
-  if (res) {
-    customModelMappings.value = res
-  } else {
-    await loadCustomModelMappings()
-  }
-  showToast(`已添加模型归类映射：${source} ➔ ${target}`)
-}
-
-async function handleRemoveCustomMapping(raw: string) {
-  const res = await deleteCustomModelMapping(raw)
-  if (res) {
-    customModelMappings.value = res
-  } else {
-    await loadCustomModelMappings()
-  }
-  showToast(`已解除“${raw}”的模型归类映射`)
-}
-
-// Settings Page form state
-const newMappingSource = ref('')
-const newMappingTarget = ref('')
-
-async function handleAddSettingsMapping() {
-  const source = newMappingSource.value.trim()
-  const target = newMappingTarget.value.trim()
-  if (!source || !target) return
-  const res = await setCustomModelMapping(source, target)
-  if (res) {
-    customModelMappings.value = res
-  } else {
-    await loadCustomModelMappings()
-  }
-  newMappingSource.value = ''
-  newMappingTarget.value = ''
-  showToast(`已添加模型归类映射：${source} ➔ ${target}`)
-}
-
-function copyAlias(text: string) {
-  navigator.clipboard.writeText(text).then(() => {
-    copiedAliasText.value = text
-    showToast(`已复制: ${text}`)
-    setTimeout(() => {
-      if (copiedAliasText.value === text) {
-        copiedAliasText.value = ''
-      }
-    }, 1800)
-  }).catch(() => showToast('复制失败，请手动复制'))
-}
-
-function copyAllAliases(model: AggregateModelCard) {
-  const text = (model.aliases || []).join('\n')
-  if (!text) return
-  navigator.clipboard.writeText(text).then(() => {
-    copiedAliasText.value = '__ALL__'
-    showToast(`已复制全部 ${model.aliases.length} 个上游别名`)
-    setTimeout(() => {
-      if (copiedAliasText.value === '__ALL__') {
-        copiedAliasText.value = ''
-      }
-    }, 1800)
-  }).catch(() => showToast('复制失败，请手动复制'))
-}
-
-const filteredModalAliases = computed(() => {
-  const m = activeAliasModalModel.value
-  if (!m || !m.aliases) return []
-  const q = aliasModalSearch.value.trim().toLowerCase()
-
-  const items = m.aliases.map((alias) => {
-    const matchedChannels = enabledChannels.value.filter((ch) => ch.modelNames?.includes(alias))
-    return {
-      alias,
-      channels: matchedChannels.length > 0
-        ? matchedChannels.map((ch) => ({
-          name: ch.name,
-          status: ch.status,
-          latency: ch.ttft ?? ch.latency,
-          protocol: ch.protocol,
-          upstreamModel: alias,
-        }))
-        : m.channelDetails.filter((c) => c.upstreamModel === alias),
-    }
-  })
-
-  if (!q) return items
-  return items.filter((item) => {
-    return (
-      item.alias.toLowerCase().includes(q) ||
-      item.channels.some((c) => c.name.toLowerCase().includes(q))
-    )
-  })
-})
-
-const filteredModalChannelDetails = computed(() => {
-  const m = activeAliasModalModel.value
-  if (!m || !m.channelDetails) return []
-  const q = aliasModalSearch.value.trim().toLowerCase()
-  if (!q) return m.channelDetails
-  return m.channelDetails.filter((ch) => {
-    return (
-      ch.name.toLowerCase().includes(q) ||
-      ch.upstreamModel.toLowerCase().includes(q)
-    )
-  })
-})
-
-function getModelFamily(name: string): { key: string; label: string; color: string; bg: string; border: string } {
-  const n = (name || '').toLowerCase()
-  if (n === 'auto') {
-    return { key: 'other', label: '智能路由', color: '#6366f1', bg: 'rgba(99, 102, 241, 0.08)', border: 'rgba(99, 102, 241, 0.2)' }
-  }
-  if (n.includes('deepseek')) {
-    return { key: 'deepseek', label: 'DeepSeek', color: '#2563eb', bg: 'rgba(37, 99, 235, 0.08)', border: 'rgba(37, 99, 235, 0.2)' }
-  }
-  if (n.includes('claude')) {
-    return { key: 'claude', label: 'Claude', color: '#d97706', bg: 'rgba(217, 119, 6, 0.08)', border: 'rgba(217, 119, 6, 0.2)' }
-  }
-  if (n.includes('gpt') || n.startsWith('o1') || n.startsWith('o3') || n.includes('chatgpt')) {
-    return { key: 'openai', label: 'OpenAI', color: '#059669', bg: 'rgba(5, 150, 105, 0.08)', border: 'rgba(5, 150, 105, 0.2)' }
-  }
-  if (n.includes('qwen')) {
-    return { key: 'qwen', label: 'Qwen', color: '#7c3aed', bg: 'rgba(124, 58, 237, 0.08)', border: 'rgba(124, 58, 237, 0.2)' }
-  }
-  if (n.includes('glm')) {
-    return { key: 'glm', label: '智谱 GLM', color: '#4f46e5', bg: 'rgba(79, 70, 229, 0.08)', border: 'rgba(79, 70, 229, 0.2)' }
-  }
-  if (n.includes('kimi') || n.includes('moonshot')) {
-    return { key: 'kimi', label: 'Kimi 月暗', color: '#0284c7', bg: 'rgba(2, 132, 199, 0.08)', border: 'rgba(2, 132, 199, 0.2)' }
-  }
-  if (n.includes('minimax')) {
-    return { key: 'minimax', label: 'MiniMax', color: '#e11d48', bg: 'rgba(225, 29, 72, 0.08)', border: 'rgba(225, 29, 72, 0.2)' }
-  }
-  if (n.includes('mimo')) {
-    return { key: 'mimo', label: 'MiMO', color: '#ff6900', bg: 'rgba(255, 105, 0, 0.08)', border: 'rgba(255, 105, 0, 0.2)' }
-  }
-  if (n.includes('doubao') || n.includes('skylark')) {
-    return { key: 'doubao', label: '字节豆包', color: '#0284c7', bg: 'rgba(2, 132, 199, 0.08)', border: 'rgba(2, 132, 199, 0.2)' }
-  }
-  if (n.includes('gemini')) {
-    return { key: 'gemini', label: 'Gemini', color: '#ea580c', bg: 'rgba(234, 88, 12, 0.08)', border: 'rgba(234, 88, 12, 0.2)' }
-  }
-  if (n.includes('llama')) {
-    return { key: 'llama', label: 'Llama', color: '#0891b2', bg: 'rgba(8, 145, 178, 0.08)', border: 'rgba(8, 145, 178, 0.2)' }
-  }
-  return { key: 'other', label: '通用模型', color: '#64748b', bg: 'rgba(100, 116, 139, 0.08)', border: 'rgba(100, 116, 139, 0.2)' }
-}
-
-const modelFamilyTabs = computed(() => {
-  const counts: Record<string, number> = {}
-  models.value.forEach((m) => {
-    const fam = getModelFamily(m.name).key
-    counts[fam] = (counts[fam] || 0) + 1
-  })
-  const tabs = [{ key: 'all', label: '全部', count: models.value.length }]
-  const order = ['deepseek', 'qwen', 'glm', 'kimi', 'minimax', 'mimo', 'doubao', 'claude', 'openai', 'gemini', 'llama', 'other']
-  const labelMap: Record<string, string> = {
-    deepseek: 'DeepSeek',
-    claude: 'Claude',
-    openai: 'OpenAI',
-    qwen: 'Qwen',
-    glm: '智谱 GLM',
-    kimi: 'Kimi',
-    minimax: 'MiniMax',
-    mimo: 'MiMO',
-    doubao: '豆包',
-    gemini: 'Gemini',
-    llama: 'Llama',
-    other: '其他',
-  }
-  order.forEach((k) => {
-    if (counts[k]) {
-      tabs.push({ key: k, label: labelMap[k] || k, count: counts[k] })
-    }
-  })
-  return tabs
-})
-
-const filteredModels = computed(() => {
-  let list = models.value
-  if (selectedModelFamily.value !== 'all') {
-    list = list.filter((m) => getModelFamily(m.name).key === selectedModelFamily.value)
-  }
-  const query = channelSearch.value.trim().toLowerCase()
-  if (!query) return list
-  return list.filter((m) => {
-    return (
-      m.name.toLowerCase().includes(query) ||
-      m.providers.some((p) => p.toLowerCase().includes(query)) ||
-      m.aliases.some((a) => a.toLowerCase().includes(query)) ||
-      m.channelDetails.some((ch) => ch.upstreamModel.toLowerCase().includes(query))
-    )
-  })
-})
+const channelsWithModels = computed(() => enabledChannels.value.filter((channel) =>
+  channel.modelNames?.some((modelId) => modelId.trim())
+).length)
 
 const filteredLogs = computed(() => {
   const query = channelSearch.value.trim().toLowerCase()
@@ -784,7 +355,6 @@ const filteredLogs = computed(() => {
   })
 })
 
-const availableModels = computed(() => new Set(models.value.flatMap((model) => model.providers)).size)
 const healthyChannels = computed(() => enabledChannels.value.filter((channel) => channel.status === 'healthy').length)
 
 const averageLatency = computed(() => {
@@ -849,9 +419,7 @@ function fromDesktopChannel(item: ApiChannel): Channel {
 }
 
 function toDesktopChannel(channel: Channel): ApiChannel {
-  const primary = (channel.primaryModel || channel.modelNames?.[0] || 'gpt-4o-mini').trim()
-  const extras = (channel.modelNames || []).map((m) => m.trim()).filter((m) => m && m !== primary)
-  const uniqueExtras = Array.from(new Set(extras))
+  const uniqueExtras = Array.from(new Set((channel.modelNames || []).map((m) => m.trim()).filter(Boolean)))
   return {
     id: channel.gatewayId ?? 0,
     name: channel.name,
@@ -859,7 +427,9 @@ function toDesktopChannel(channel: Channel): ApiChannel {
     apiMode: channel.protocol === 'openai-responses' ? 'responses' : 'chat_completions',
     url: channel.url,
     apiKey: channel.apiKey,
-    primaryModel: primary,
+    // Keep the legacy API field empty. The gateway now routes using the
+    // requested model ID and stores every channel model in extra_models.
+    primaryModel: '',
     extraModels: uniqueExtras,
     enabled: channel.enabled,
     status: channel.status,
@@ -928,8 +498,8 @@ async function refreshChannels() {
         checkedAt: health.checkedAt,
       }
     }
-    const primaryModel = channel.primaryModel || channel.modelNames?.[0]
-    if (primaryModel) getModelInjection(channel, primaryModel)
+    const probeModel = firstConfiguredModel(channel)
+    if (probeModel) getModelInjection(channel, probeModel)
   }
   if (showInjectionModal.value && injectionChannel.value?.gatewayId) {
     const current = channels.value.find(channel => channel.gatewayId === injectionChannel.value?.gatewayId)
@@ -967,13 +537,13 @@ async function probeChannel(channel: Channel) {
     await refreshChannels()
     const visible = channels.value.find(item => item.gatewayId === snapshot.gatewayId && item.url === snapshot.url && item.protocol === snapshot.protocol)
     if (visible) visible.probing = false
-    const primaryResult = Array.isArray(details) ? details.find(item => isPrimaryModel(snapshot, item.model)) : undefined
-    if (primaryResult?.accepted === false) {
+    const firstResult = Array.isArray(details) ? details.find(item => isFirstConfiguredModel(snapshot, item.model)) : undefined
+    if (firstResult?.accepted === false) {
       channel.probing = false
       showToast('渠道配置或状态已更新，旧探活结果已忽略')
       return
     }
-    const current = currentDiagnosticChannel(snapshot, snapshot.primaryModel || snapshot.modelNames?.[0] || '', primaryResult?.checkedAt || startedAt)
+    const current = currentDiagnosticChannel(snapshot, firstConfiguredModel(snapshot), firstResult?.checkedAt || startedAt)
     channel.probing = false
     if (!current) return
     channel = current
@@ -1016,30 +586,11 @@ async function probeChannel(channel: Channel) {
           checkedAt: res.checkedAt || startedAt,
         }
       }
-      const primaryRes = details.find((d) => isPrimaryModel(channel, d.model)) || details[0]
-      if (primaryRes) {
-        const isOk = primaryRes.status === 'operational' || primaryRes.status === 'degraded' || primaryRes.status === 'healthy'
-        channel.latency = primaryRes.latencyMs ?? null
-        channel.ttft = primaryRes.ttftMs ?? null
-        if (isOk) {
-          channel.status = primaryRes.status === 'degraded' ? 'degraded' : 'healthy'
-          channel.lastError = ''
-        } else {
-          channel.status = 'offline'
-          channel.lastError = primaryRes.message || '主模型探活失败'
-        }
-      }
     }
     channel.probing = false
-    const primaryRes = details?.find((d) => isPrimaryModel(channel, d.model)) || details?.[0]
-    const pModelName = primaryRes?.model || channel.primaryModel || '主模型'
-    if (primaryRes && (primaryRes.status === 'healthy' || primaryRes.status === 'operational')) {
-      showToast(`渠道“${channel.name}”探活成功，主模型 [${pModelName}] 状态就绪`)
-    } else if (primaryRes && primaryRes.status === 'degraded') {
-      showToast(`渠道“${channel.name}”探活完成，主模型 [${pModelName}] 响应稍慢`)
-    } else {
-      showToast(`渠道“${channel.name}”探活异常，主模型 [${pModelName}] 调用失败`)
-    }
+    const acceptedResults = details.filter((item) => item.accepted !== false)
+    const successfulCount = acceptedResults.filter((item) => ['healthy', 'operational', 'degraded'].includes(item.status)).length
+    showToast(`渠道“${channel.name}”探活完成：${successfulCount}/${acceptedResults.length} 个模型可用`)
     return
   }
   channel.probing = false
@@ -1055,7 +606,7 @@ async function probeAllChannels() {
     for (const channel of enabledChannels.value) {
       await probeChannel(channel)
     }
-    showToast('全部渠道主模型探活完成')
+    showToast('全部渠道探活完成')
   } finally {
     isProbingAllChannels.value = false
   }
@@ -1100,7 +651,7 @@ function copyInjectionContent(content?: string) {
 function getModelInjection(channel: Channel, modelName: string): ModelInjectionResult | null {
   const key = getModelKey(channel, modelName)
   const cached = modelInjections.value[key]
-  if (isPrimaryModel(channel, modelName) && channel.injectionState && channel.injectionState !== 'unknown') {
+  if (isFirstConfiguredModel(channel, modelName) && channel.injectionState && channel.injectionState !== 'unknown') {
     const persisted: ModelInjectionResult = {
       model: modelName,
       state: channel.injectionState,
@@ -1173,7 +724,7 @@ async function checkSingleModelInjection(channel: Channel, modelName: string) {
     if (!current) return
     channel = current
     modelInjections.value[key] = r
-    if (isPrimaryModel(channel, modelName)) {
+    if (isFirstConfiguredModel(channel, modelName)) {
       channel.injectionState = r.state
       channel.injectionTokens = r.prompt_tokens
       channel.injectionContent = r.content || r.message || ''
@@ -1241,7 +792,7 @@ async function checkModelsInjection(channel: Channel, models: string[]): Promise
           channel = current
           modelInjections.value[getModelKey(channel, result.model)] = result
           results.push(result)
-          if (isPrimaryModel(channel, result.model)) {
+          if (isFirstConfiguredModel(channel, result.model)) {
             channel.injectionState = result.state
             channel.injectionTokens = result.prompt_tokens
             channel.injectionContent = result.content || result.message || ''
@@ -1278,7 +829,7 @@ function openModelInjectionDetail(channel: Channel, modelName: string) {
 
 function openInjectionModal(channel: Channel) {
   injectionChannel.value = channel
-  // Seed the list from cached per-model results or the persisted primary-model result
+  // Seed the list from cached per-model results or the persisted first-model result
   const list: ModelInjectionResult[] = []
   for (const m of (channel.modelNames || [])) {
     const result = getModelInjection(channel, m)
@@ -1288,7 +839,7 @@ function openInjectionModal(channel: Channel) {
     injectionResults.value = list
   } else if (channel.injectionState && channel.injectionState !== 'unknown') {
     injectionResults.value = [{
-      model: channel.primaryModel || channel.modelNames?.[0] || '(主模型)',
+      model: firstConfiguredModel(channel) || '(模型)',
       state: channel.injectionState,
       prompt_tokens: channel.injectionTokens ?? 0,
       content: channel.injectionContent,
@@ -1332,8 +883,9 @@ async function runInjectionCheck(all: boolean) {
     return
   }
   const acceptedResults = results.filter(item => item.accepted !== false)
-  const checkedAt = acceptedResults.find(item => item.model === snapshot.primaryModel)?.checked_at || acceptedResults[0]?.checked_at || ''
-  const current = currentDiagnosticChannel(snapshot, snapshot.primaryModel || snapshot.modelNames?.[0] || '', checkedAt, true)
+  const probeModel = firstConfiguredModel(snapshot)
+  const checkedAt = acceptedResults.find(item => item.model.toLowerCase() === probeModel.toLowerCase())?.checked_at || acceptedResults[0]?.checked_at || ''
+  const current = currentDiagnosticChannel(snapshot, probeModel, checkedAt, true)
   if (!current || injectionChannel.value?.gatewayId !== snapshot.gatewayId) return
   channel = current
   injectionChannel.value = current
@@ -1343,12 +895,12 @@ async function runInjectionCheck(all: boolean) {
     modelInjections.value[k] = r
   }
 
-  const primary = acceptedResults.find((r) => r.model === channel.primaryModel) ?? acceptedResults[0]
-  if (primary) {
-    channel.injectionState = primary.state
-    channel.injectionTokens = primary.prompt_tokens
-    channel.injectionContent = primary.content || primary.message || ''
-    channel.injectionCheckedAt = primary.checked_at
+  const summaryResult = acceptedResults.find((r) => r.model.toLowerCase() === probeModel.toLowerCase()) ?? acceptedResults[0]
+  if (summaryResult) {
+    channel.injectionState = summaryResult.state
+    channel.injectionTokens = summaryResult.prompt_tokens
+    channel.injectionContent = summaryResult.content || summaryResult.message || ''
+    channel.injectionCheckedAt = summaryResult.checked_at
   }
 
   const injected = acceptedResults.filter((r) => r.state === 'detected').length
@@ -1374,9 +926,11 @@ async function openEditChannel(channel: Channel) {
 
   editChannelProtocol.value = channel.protocol
   editChannelEnabled.value = channel.enabled
-  const primary = channel.primaryModel || channel.modelNames?.[0] || 'gpt-4o-mini'
-  editChannelPrimaryModel.value = primary
-  editChannelModelNames.value = channel.modelNames?.length ? [...channel.modelNames] : [primary]
+  const configuredModels = channel.modelNames?.length
+    ? [...channel.modelNames]
+    : channel.primaryModel ? [channel.primaryModel] : []
+  editChannelModelNames.value = configuredModels
+  editChannelProbeModel.value = configuredModels[0] || ''
   const cached = getChannelDetectedProtocols(channel.gatewayId, channel.url)
   if (cached) {
     editProtoSupportsOpenai.value = cached.supportsOpenai
@@ -1413,45 +967,24 @@ async function saveEditChannel() {
   try {
     const name = editChannelName.value.trim()
     const rawUrl = editChannelUrl.value.trim()
-    const primaryModel = (editChannelPrimaryModel.value.trim() || editChannelModelNames.value[0] || 'gpt-4o-mini').trim()
-    const otherModels = editChannelModelNames.value.map((m) => m.trim()).filter((m) => m && m !== primaryModel)
-    const modelNames = [primaryModel, ...Array.from(new Set(otherModels))]
-    if (!name || !rawUrl || !primaryModel) {
-      showToast('请完整填写渠道名称、Base URL 与模型')
+    const modelNames = Array.from(new Set(editChannelModelNames.value.map((m) => m.trim()).filter(Boolean)))
+    if (!name || !rawUrl || modelNames.length === 0) {
+      showToast('请填写渠道名称、Base URL，并至少配置一个模型')
       return
     }
     const finalUrl = normalizeEndpointUrl(rawUrl)
     const target = { ...editingChannel.value }
-    const primaryChanged = target.primaryModel !== primaryModel
     target.name = name
     target.url = finalUrl
     target.protocol = editChannelProtocol.value
     target.enabled = editChannelEnabled.value
-    target.primaryModel = primaryModel
+    target.primaryModel = ''
     target.modelNames = modelNames
     target.models = target.modelNames.length
     target.accent = target.protocol === 'anthropic' ? '#f59e0b' : target.protocol === 'openai-responses' ? '#3b82f6' : '#10b981'
 
     // Credentials are managed by the embedded key panel, never overwrite them here.
     target.apiKey = ''
-
-    // If primary model changed, sync target status/latency from cached primary model if exists
-    if (primaryChanged) {
-      const primaryKey = getModelKey(target, primaryModel)
-      const cached = modelLatencies.value[primaryKey]
-      if (cached && !cached.probing) {
-        const isOk = cached.status === 'operational' || cached.status === 'degraded' || cached.status === 'healthy'
-        target.latency = cached.latency
-        target.ttft = cached.ttft ?? null
-        if (isOk) {
-          target.status = cached.status === 'degraded' ? 'degraded' : 'healthy'
-          target.lastError = ''
-        } else if (cached.status === 'error' || cached.status === 'failed' || cached.status === 'timeout') {
-          target.status = 'offline'
-          target.lastError = cached.error || cached.message || '主模型调用异常'
-        }
-      }
-    }
 
     const detectedProtocols = {
       channelId: target.gatewayId,
@@ -1628,11 +1161,14 @@ function openModelLatencyModal(channel: Channel) {
   }
 }
 
-function isPrimaryModel(channel?: Channel | null, modelName?: string): boolean {
+function firstConfiguredModel(channel?: Channel | null): string {
+  return channel?.modelNames?.find((model) => model.trim()) || channel?.primaryModel || ''
+}
+
+function isFirstConfiguredModel(channel?: Channel | null, modelName?: string): boolean {
   if (!channel || !modelName) return false
-  if (channel.primaryModel) return channel.primaryModel === modelName
-  if (channel.modelNames && channel.modelNames.length > 0) return channel.modelNames[0] === modelName
-  return false
+  const first = firstConfiguredModel(channel)
+  return Boolean(first) && first.toLowerCase() === modelName.toLowerCase()
 }
 
 function getModelKey(channel: Channel, modelName: string) {
@@ -1642,13 +1178,12 @@ function getModelKey(channel: Channel, modelName: string) {
 function currentDiagnosticChannel(snapshot: Channel, model: string, checkedAt: string, injection = false): Channel | undefined {
   const current = channels.value.find(item => item.gatewayId === snapshot.gatewayId)
   if (!current?.enabled || current.url !== snapshot.url || current.protocol !== snapshot.protocol
-    || current.primaryModel !== snapshot.primaryModel || !current.modelNames?.includes(model)) return undefined
-  const recorded = injection ? (isPrimaryModel(current, model) ? current.injectionCheckedAt : modelInjections.value[getModelKey(current, model)]?.checked_at)
+    || !current.modelNames?.some((name) => name.toLowerCase() === model.toLowerCase())) return undefined
+  const recorded = injection ? (isFirstConfiguredModel(current, model) ? current.injectionCheckedAt : modelInjections.value[getModelKey(current, model)]?.checked_at)
     : current.modelHealth?.find(item => item.model === model)?.checkedAt
   const sampleTime = Date.parse(checkedAt)
   if (!Number.isFinite(sampleTime)) return undefined
   if (recorded && Date.parse(recorded) > sampleTime) return undefined
-  if (!injection && isPrimaryModel(current, model) && Date.parse(current.lastCheck) > sampleTime) return undefined
   return current
 }
 
@@ -1699,12 +1234,6 @@ function getModelLatencyDisplay(channel: Channel, modelName: string): string {
   const entry = modelLatencies.value[key]
   if (entry?.ttft != null) return formatLatencySec(entry.ttft)
   if (entry?.latency != null) return formatLatencySec(entry.latency)
-  // The channel-level latency is measured on its primary model. Showing it for
-  // every model would invent a number for models that were never measured —
-  // which is why a whole list used to display one identical value.
-  if (isPrimaryModel(channel, modelName) && channel.latency != null && channel.status !== 'offline') {
-    return formatLatencySec(channel.ttft ?? channel.latency)
-  }
   return '—'
 }
 
@@ -1715,8 +1244,7 @@ function getModelLatencyClass(channel: Channel, modelName: string): string {
   if (isModelFailed(channel, modelName)) {
     return 'timeout'
   }
-  const inheritChannel = isPrimaryModel(channel, modelName) && channel.status !== 'offline'
-  const lat = getModelPerformance(channel, modelName)?.ttftMs ?? entry?.ttft ?? entry?.latency ?? (inheritChannel ? channel.latency : null)
+  const lat = getModelPerformance(channel, modelName)?.ttftMs ?? entry?.ttft ?? entry?.latency ?? null
   if (lat == null) return 'idle'
   if (lat < 1000) return 'fast'
   if (lat < 2500) return 'normal'
@@ -1758,18 +1286,7 @@ function isModelProbing(channel: Channel, modelName: string): boolean {
 const filteredModalModels = computed(() => {
   const ch = activeModelLatencyChannel.value
   if (!ch) return []
-  const rawList = ch.modelNames?.length ? ch.modelNames : [ch.name]
-  const list = Array.from(new Set(rawList.map((m) => m.trim()).filter(Boolean)))
-
-  // The configured order, not a ranking: the primary model first, then exactly
-  // as the channel lists them. Ranking by probe result made the rows rearrange
-  // themselves mid-probe, moving the row the user was about to act on.
-  const primaryIndex = list.findIndex((model) => isPrimaryModel(ch, model))
-  if (primaryIndex > 0) {
-    const [primary] = list.splice(primaryIndex, 1)
-    list.unshift(primary)
-  }
-  return list
+  return Array.from(new Set((ch.modelNames ?? []).map((m) => m.trim()).filter(Boolean)))
 })
 
 const modelLatencyRows = computed<ModelLatencyRow[]>(() => {
@@ -1790,7 +1307,6 @@ const modelLatencyRows = computed<ModelLatencyRow[]>(() => {
       injectionClass: getModelInjectionClass(channel, name),
       injectionTooltip: getModelInjectionTooltip(channel, name),
       injectionLabel: getModelInjectionLabel(channel, name),
-      primary: isPrimaryModel(channel, name),
       probing: isModelProbing(channel, name),
       checkingInjection: isModelCheckingInjection(channel, name),
       copied: copiedModelId.value === name,
@@ -1810,7 +1326,7 @@ async function probeSingleModel(
   const startedAt = new Date().toISOString()
   modelLatencies.value[key] = { ...(modelLatencies.value[key] || {}), probing: true }
   const t0 = performance.now()
-  const isPrimary = isPrimaryModel(channel, modelName)
+  const isSummary = isFirstConfiguredModel(channel, modelName)
   try {
     if (gatewayApiActive.value && channel.gatewayId) {
       const probeRes = await probeChannelDetails(channel.gatewayId, modelName)
@@ -1841,7 +1357,7 @@ async function probeSingleModel(
           message: errMsg,
           checkedAt: startedAt,
         }
-        if (isPrimary) {
+        if (isSummary) {
           channel.status = 'offline'
           channel.lastError = errMsg
         }
@@ -1876,7 +1392,7 @@ async function probeSingleModel(
           message: hasErr ? errMsg! : (res.status === 'degraded' ? '响应稍慢' : ''),
           checkedAt: res.checkedAt || startedAt,
         }
-        if (isPrimary) {
+        if (isSummary) {
           channel.latency = lat
           channel.ttft = res.ttftMs ?? null
           if (isOk) {
@@ -1903,7 +1419,7 @@ async function probeSingleModel(
       message: errMsg,
       checkedAt: new Date().toISOString(),
     }
-    if (isPrimary) {
+    if (isSummary) {
       channel.latency = null
       channel.ttft = null
       channel.status = 'offline'
@@ -1924,7 +1440,7 @@ async function probeSingleModel(
       message: errMsg,
       checkedAt: new Date().toISOString(),
     }
-    if (isPrimary) {
+    if (isSummary) {
       channel.latency = null
       channel.ttft = null
       channel.status = 'offline'
@@ -1965,14 +1481,6 @@ async function probeAllChannelModels(channel: Channel, requestedModels = channel
   }
 }
 
-function toChannelStatus(s?: string): 'healthy' | 'degraded' | 'offline' | 'unknown' {
-  if (!s) return 'unknown'
-  if (s === 'healthy' || s === 'operational') return 'healthy'
-  if (s === 'degraded') return 'degraded'
-  if (s === 'offline' || s === 'error' || s === 'failed' || s === 'timeout') return 'offline'
-  return 'unknown'
-}
-
 async function batchDeleteSelectedModels(channel?: Channel | null) {
   if (!channel) return
   const toDelete = [...selectedModelNames.value]
@@ -1984,31 +1492,17 @@ async function batchDeleteSelectedModels(channel?: Channel | null) {
     return
   }
 
-  const isDeletingPrimary = toDelete.includes(channel.primaryModel || '')
-
   confirmModal.value = {
     title: '批量删除模型确认',
     message: `确定要从渠道 “${channel.name}” 中批量删除已选的 ${toDelete.length} 个模型吗？`,
-    description: isDeletingPrimary
-      ? `注意：已选模型中包含当前主模型，删除后将自动将 “${remaining[0]}” 设为新的主模型。`
-      : `删除后，网关将不再通过渠道 “${channel.name}” 分发这 ${toDelete.length} 个模型的请求。`,
+    description: `删除后，网关将不再通过渠道 “${channel.name}” 分发这 ${toDelete.length} 个模型的请求。`,
     danger: true,
     confirmText: `确认删除 (${toDelete.length})`,
     onConfirm: async () => {
       const target = { ...channel }
       target.modelNames = remaining
       target.models = remaining.length
-      if (isDeletingPrimary) {
-        target.primaryModel = remaining[0]
-        const newKey = getModelKey(channel, remaining[0])
-        const cached = modelLatencies.value[newKey]
-        if (cached) {
-          target.latency = cached.latency ?? null
-          target.ttft = cached.ttft ?? null
-          if (cached.status) target.status = toChannelStatus(cached.status)
-          if (cached.error) target.lastError = cached.error
-        }
-      }
+      target.primaryModel = ''
       if (!(await persistChannel(target))) return
       Object.assign(channel, target)
       toDelete.forEach((m) => {
@@ -2028,38 +1522,13 @@ async function batchDeleteSelectedModels(channel?: Channel | null) {
   }
 }
 
-async function setAsPrimaryModel(channel?: Channel | null, modelName?: string) {
-  if (!channel || !modelName) return
-  if (channel.primaryModel === modelName) return
+function batchDeleteProblematicModels(channel?: Channel | null) {
+  if (!channel) return
+  const problemModels = (channel.modelNames ?? []).filter((model) => isModelFailed(channel, model))
+  if (problemModels.length === 0) return
 
-  const target = { ...channel }
-  target.primaryModel = modelName
-  const rest = (channel.modelNames || []).filter((m) => m !== modelName)
-  target.modelNames = [modelName, ...rest]
-
-  const key = getModelKey(channel, modelName)
-  const cached = modelLatencies.value[key]
-  if (cached) {
-    target.latency = cached.latency ?? null
-    target.ttft = cached.ttft ?? null
-    if (cached.status) target.status = toChannelStatus(cached.status)
-    if (cached.error) target.lastError = cached.error
-  }
-
-  if (!(await persistChannel(target))) return
-  Object.assign(channel, target)
-  await refreshChannels()
-
-  const fresh = channels.value.find((c) => (channel.gatewayId ? c.gatewayId === channel.gatewayId : c.name === channel.name))
-  if (fresh) {
-    activeModelLatencyChannel.value = fresh
-  }
-
-  showToast(`已将 “${modelName}” 设为主模型；如需验证，请手动探活`)
-}
-
-function setPrimaryFromRow(channel: Channel, modelName: string) {
-  void setAsPrimaryModel(channel, modelName)
+  selectedModelNames.value = problemModels
+  void batchDeleteSelectedModels(channel)
 }
 
 // ============================================================================
@@ -2171,7 +1640,7 @@ function onDesktopShortcut(e: Event) {
   if (action === 'new-channel') {
     showAddChannel.value = true
   } else if (action === 'search') {
-    if (activeSection.value !== 'channels' && activeSection.value !== 'models' && activeSection.value !== 'logs') {
+    if (activeSection.value !== 'channels' && activeSection.value !== 'logs') {
       activeSection.value = 'channels'
     }
     nextTick(() => {
@@ -2206,8 +1675,6 @@ onMounted(async () => {
   const saved = await readValue<Channel[]>('channels')
   if (Array.isArray(saved)) channels.value = saved
   await refreshChannels()
-  await loadCustomModelMappings()
-  gatewayApiKey.value = (await getGatewayKey()) ?? ''
   await refreshGatewayHealth()
   await refreshSystemInfo()
   await refreshLogs()
@@ -2247,182 +1714,6 @@ function copyModelId(modelName: string) {
       if (copiedModelId.value === modelName) copiedModelId.value = ''
     }, 2000)
   }).catch(() => showToast('复制失败，请手动复制'))
-}
-
-interface ModelProviderSpeedTestItem {
-  channel: Channel
-  upstreamModel: string
-  isPrimary: boolean
-  latencyMs: number | null
-  latencyDisplay: string
-  latencyClass: string
-  isProbing: boolean
-  isFailed: boolean
-  errorMessage: string
-  tooltip: string
-}
-
-const activeModelProviders = computed<ModelProviderSpeedTestItem[]>(() => {
-  const modelName = activeModelSpeedTestName.value
-  if (!modelName) return []
-
-  const list: ModelProviderSpeedTestItem[] = []
-  channels.value.forEach((ch) => {
-    if (!ch.enabled) return
-    const upstream = ch.modelNames?.find((n) => isModelEquivalentFrontend(n, modelName))
-    if (!upstream) return
-
-    const key = getModelKey(ch, upstream)
-    const entry = modelLatencies.value[key]
-    const isProbing = Boolean(entry?.probing || ch.probing)
-    const isFailed = !isProbing && isModelFailed(ch, upstream)
-    const errMsg = isFailed ? getModelErrorMessage(ch, upstream) : ''
-    const latMs = getModelPerformance(ch, upstream)?.ttftMs ?? entry?.ttft ?? entry?.latency ?? (ch.modelNames?.[0] === upstream && ch.latency != null && ch.status !== 'offline' ? ch.latency : null)
-
-    list.push({
-      channel: ch,
-      upstreamModel: upstream,
-      isPrimary: isPrimaryModel(ch, upstream),
-      latencyMs: latMs,
-      latencyDisplay: getModelLatencyDisplay(ch, upstream),
-      latencyClass: getModelLatencyClass(ch, upstream),
-      isProbing,
-      isFailed,
-      errorMessage: errMsg,
-      tooltip: getModelTooltip(ch, upstream),
-    })
-  })
-
-  const q = modelSpeedTestQuery.value.trim().toLowerCase()
-  let filtered = list
-  if (q) {
-    filtered = list.filter((item) =>
-      item.channel.name.toLowerCase().includes(q) ||
-      item.channel.url.toLowerCase().includes(q) ||
-      item.channel.protocol.toLowerCase().includes(q) ||
-      item.upstreamModel.toLowerCase().includes(q)
-    )
-  }
-
-  return filtered.sort((a, b) => {
-    if (a.channel.enabled !== b.channel.enabled) {
-      return a.channel.enabled ? -1 : 1
-    }
-    const score = (item: ModelProviderSpeedTestItem) => {
-      if (item.isFailed) return 9999999
-      if (item.isProbing) return 9999990
-      if (item.latencyMs != null && item.latencyMs > 0) return item.latencyMs
-      return 9999900
-    }
-    return score(a) - score(b)
-  })
-})
-
-const activeModelProviderRows = computed<ModelProviderSpeedTestRow[]>(() => activeModelProviders.value.map((item) => ({
-  channel: item.channel,
-  upstreamModel: item.upstreamModel,
-  protocolLabel: protocolShortLabel(item.channel.protocol),
-  latencyDisplay: item.latencyDisplay,
-  latencyClass: item.latencyClass,
-  isProbing: item.isProbing,
-  isFailed: item.isFailed,
-  tooltip: item.tooltip,
-  preferred: isFastestProvider(item),
-})))
-
-const activeModelFastestProvider = computed(() => getFastestProviderInfo(activeModelSpeedTestName.value))
-
-function isFastestProvider(item: ModelProviderSpeedTestItem): boolean {
-  const healthy = activeModelProviders.value.filter(
-    (p) => p.channel.enabled && !p.isFailed && !p.isProbing && p.latencyMs != null && p.latencyMs > 0
-  )
-  return healthy.length > 0 && healthy[0].channel.name === item.channel.name && healthy[0].upstreamModel === item.upstreamModel
-}
-
-function getFastestProviderInfo(modelName?: string | null): { channelName: string; latency: number } | null {
-  if (!modelName) return null
-  const providers = channels.value.map((ch) => {
-    const upstream = ch.modelNames?.find((n) => isModelEquivalentFrontend(n, modelName))
-    if (!upstream) return null
-    const key = getModelKey(ch, upstream)
-    const entry = modelLatencies.value[key]
-    const entryLat = getModelPerformance(ch, upstream)?.ttftMs ?? entry?.ttft ?? entry?.latency ?? null
-    const latMs = entryLat != null ? entryLat : (ch.modelNames?.[0] === upstream && ch.status !== 'offline' ? (ch.ttft ?? ch.latency) : null)
-    const failed = isModelFailed(ch, upstream)
-    if (!ch.enabled || failed || latMs == null || latMs <= 0) return null
-    return { channelName: ch.name, latency: latMs }
-  }).filter((x): x is { channelName: string; latency: number } => x !== null)
-
-  if (!providers.length) return null
-  providers.sort((a, b) => a.latency - b.latency)
-  return providers[0]
-}
-
-async function probeAllProvidersForModel(modelName?: string | null) {
-  const target = modelName || activeModelSpeedTestName.value
-  if (!target) return
-  if (isProbingModelProviders.value) return
-  isProbingModelProviders.value = true
-
-  const matchingChannels: Array<{ channel: Channel; upstreamModel: string }> = []
-  channels.value.forEach((ch) => {
-    if (!ch.enabled) return
-    const upstream = ch.modelNames?.find((n) => isModelEquivalentFrontend(n, target))
-    if (upstream) {
-      matchingChannels.push({ channel: ch, upstreamModel: upstream })
-    }
-  })
-
-  if (matchingChannels.length === 0) {
-    isProbingModelProviders.value = false
-    showToast(`暂无提供模型 “${target}” 的供应商渠道`)
-    return
-  }
-
-  matchingChannels.forEach(({ channel, upstreamModel }) => {
-    const key = getModelKey(channel, upstreamModel)
-    modelLatencies.value[key] = {
-      ...(modelLatencies.value[key] || {}),
-      probing: true,
-    }
-  })
-
-  await Promise.allSettled(
-    matchingChannels.map(({ channel, upstreamModel }) =>
-      probeSingleModel(channel, upstreamModel)
-    )
-  )
-
-  isProbingModelProviders.value = false
-
-  const healthyCount = matchingChannels.filter(({ channel, upstreamModel }) => {
-    const key = getModelKey(channel, upstreamModel)
-    const entry = modelLatencies.value[key]
-    return entry?.latency != null && entry.latency > 0 && !isModelFailed(channel, upstreamModel)
-  }).length
-
-  const fastest = getFastestProviderInfo(target)
-  if (fastest) {
-    showToast(`探活完成：${target} 优选供应商为 “${fastest.channelName}” (首字 ${formatLatencySec(fastest.latency)})`)
-  } else {
-    showToast(`已完成 “${target}” 全部 ${matchingChannels.length} 家供应商探活 (可用: ${healthyCount}/${matchingChannels.length})`)
-  }
-}
-
-function openModelSpeedTestFor(modelName: string) {
-  activeModelSpeedTestName.value = modelName
-  modelSpeedTestQuery.value = ''
-  void probeAllProvidersForModel(modelName)
-}
-
-function openModelSpeedTestFromAlias(modelName: string) {
-  closeAliasModal()
-  openModelSpeedTestFor(modelName)
-}
-
-function closeModelSpeedTestModal() {
-  activeModelSpeedTestName.value = null
-  modelSpeedTestQuery.value = ''
 }
 
 function openLogDetail(log: RequestLog) {
@@ -2662,13 +1953,17 @@ watch(editChannelUrl, (url) => {
   }
 }, { flush: 'sync' })
 
-watch(newChannelPrimaryModel, () => {
-  if (applyingDetectedNewModels) return
-  invalidateNewProtocolDetection()
-}, { flush: 'sync' })
+watch(newChannelModelNames, (models) => {
+  newChannelProbeModel.value = models[0] || ''
+  if (!applyingDetectedNewModels) invalidateNewProtocolDetection()
+}, { deep: true, flush: 'sync' })
 
-watch([editDetectionApiKey, editChannelPrimaryModel], () => {
-  if (applyingDetectedEditModels) return
+watch(editChannelModelNames, (models) => {
+  editChannelProbeModel.value = models[0] || ''
+  if (!applyingDetectedEditModels) invalidateEditProtocolDetection()
+}, { deep: true, flush: 'sync' })
+
+watch(editDetectionApiKey, () => {
   invalidateEditProtocolDetection()
 }, { flush: 'sync' })
 
@@ -2720,12 +2015,12 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
     return
   }
   const revision = mode === 'new' ? ++newDetectionRevision : ++editDetectionRevision
-  const model = mode === 'new' ? newChannelPrimaryModel.value : editChannelPrimaryModel.value
+  const model = mode === 'new' ? newChannelProbeModel.value : editChannelProbeModel.value
   const isCurrent = () => mode === 'new'
-    ? revision === newDetectionRevision && showAddChannel.value && newChannelPrimaryModel.value === model
+    ? revision === newDetectionRevision && showAddChannel.value && newChannelProbeModel.value === model
       && (newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '') === apiKey
     : revision === editDetectionRevision && showEditChannel.value
-      && editingChannel.value?.gatewayId === channelId && editChannelPrimaryModel.value === model
+      && editingChannel.value?.gatewayId === channelId && editChannelProbeModel.value === model
       && editDetectionApiKey.value.trim() === apiKey
 
   if (mode === 'new') {
@@ -2780,12 +2075,12 @@ async function runDetectProtocol(mode: 'new' | 'edit') {
       if (mode === 'new' && newChannelModelNames.value.length === 0) {
         applyingDetectedNewModels = true
         newChannelModelNames.value = res.models
-        if (!newChannelPrimaryModel.value) newChannelPrimaryModel.value = res.models[0]
+        if (!newChannelProbeModel.value) newChannelProbeModel.value = res.models[0]
         applyingDetectedNewModels = false
       } else if (mode === 'edit' && editChannelModelNames.value.length === 0) {
         applyingDetectedEditModels = true
         editChannelModelNames.value = res.models
-        if (!editChannelPrimaryModel.value) editChannelPrimaryModel.value = res.models[0]
+        if (!editChannelProbeModel.value) editChannelProbeModel.value = res.models[0]
         applyingDetectedEditModels = false
       }
     }
@@ -2853,19 +2148,19 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
   }
   const revision = mode === 'new' ? ++newModelsRevision : ++editModelsRevision
   const draftModels = JSON.stringify(mode === 'new'
-    ? [newChannelPrimaryModel.value, newChannelModelNames.value]
-    : [editChannelPrimaryModel.value, editChannelModelNames.value])
+    ? [newChannelProbeModel.value, newChannelModelNames.value]
+    : [editChannelProbeModel.value, editChannelModelNames.value])
   const isCurrent = () => {
     if (mode === 'new') {
       return revision === newModelsRevision && showAddChannel.value
         && newChannelUrl.value.trim() === url && newChannelProtocol.value === protocol
         && (newChannelKeys.value.map(row => row.secret.trim()).find(Boolean) || '') === apiKey
-        && JSON.stringify([newChannelPrimaryModel.value, newChannelModelNames.value]) === draftModels
+        && JSON.stringify([newChannelProbeModel.value, newChannelModelNames.value]) === draftModels
     }
     return revision === editModelsRevision && showEditChannel.value
       && editingChannel.value?.gatewayId === channelId && editChannelUrl.value.trim() === url
       && editChannelProtocol.value === protocol && editDetectionApiKey.value.trim() === apiKey
-      && JSON.stringify([editChannelPrimaryModel.value, editChannelModelNames.value]) === draftModels
+      && JSON.stringify([editChannelProbeModel.value, editChannelModelNames.value]) === draftModels
   }
   setLoading(true)
   try {
@@ -2879,13 +2174,13 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
     if (proxyRes.ok && proxyRes.models && proxyRes.models.length > 0) {
       if (mode === 'new') {
         newChannelModelNames.value = proxyRes.models
-        if (!newChannelPrimaryModel.value || !proxyRes.models.includes(newChannelPrimaryModel.value)) {
-          newChannelPrimaryModel.value = proxyRes.models[0] || ''
+        if (!newChannelProbeModel.value || !proxyRes.models.includes(newChannelProbeModel.value)) {
+          newChannelProbeModel.value = proxyRes.models[0] || ''
         }
       } else {
         editChannelModelNames.value = proxyRes.models
-        if (!editChannelPrimaryModel.value || !proxyRes.models.includes(editChannelPrimaryModel.value)) {
-          editChannelPrimaryModel.value = proxyRes.models[0] || ''
+        if (!editChannelProbeModel.value || !proxyRes.models.includes(editChannelProbeModel.value)) {
+          editChannelProbeModel.value = proxyRes.models[0] || ''
         }
       }
       showToast(`已获取 ${proxyRes.models.length} 个上游模型`)
@@ -2951,13 +2246,13 @@ async function fetchUpstreamModels(mode: 'new' | 'edit') {
     if (fetchedModels.length > 0) {
       if (mode === 'new') {
         newChannelModelNames.value = fetchedModels
-        if (!newChannelPrimaryModel.value || !fetchedModels.includes(newChannelPrimaryModel.value)) {
-          newChannelPrimaryModel.value = fetchedModels[0] || ''
+        if (!newChannelProbeModel.value || !fetchedModels.includes(newChannelProbeModel.value)) {
+          newChannelProbeModel.value = fetchedModels[0] || ''
         }
       } else {
         editChannelModelNames.value = fetchedModels
-        if (!editChannelPrimaryModel.value || !fetchedModels.includes(editChannelPrimaryModel.value)) {
-          editChannelPrimaryModel.value = fetchedModels[0] || ''
+        if (!editChannelProbeModel.value || !fetchedModels.includes(editChannelProbeModel.value)) {
+          editChannelProbeModel.value = fetchedModels[0] || ''
         }
       }
       showToast(`已获取 ${fetchedModels.length} 个上游模型`)
@@ -2977,12 +2272,9 @@ const isCreatingChannel = ref(false)
 async function addChannel() {
   const rawUrl = newChannelUrl.value.trim()
   const name = newChannelName.value.trim()
-  const primaryModel = newChannelPrimaryModel.value.trim()
-  const rawModels = newChannelModelNames.value.map((m) => m.trim()).filter(Boolean)
-  const model = primaryModel || rawModels[0] || ''
-  const otherModels = Array.from(new Set(rawModels.filter((m) => m && m !== model)))
-  if (!name || !rawUrl || !newChannelProtocol.value || !model) {
-    showToast('请完整填写渠道名称、接口协议与模型')
+  const modelNames = Array.from(new Set(newChannelModelNames.value.map((m) => m.trim()).filter(Boolean)))
+  if (!name || !rawUrl || !newChannelProtocol.value || modelNames.length === 0) {
+    showToast('请填写渠道名称、接口协议，并至少配置一个模型')
     return
   }
   const keyDrafts = newChannelKeys.value
@@ -3009,7 +2301,7 @@ async function addChannel() {
       format: 'heigate-config', version: 2, includes_secrets: true,
       channels: [{
         name, url: normalizeEndpointUrl(rawUrl), protocol: newChannelProtocol.value,
-        primaryModel: model, modelNames: otherModels, enabled: newChannelEnabled.value,
+        primaryModel: '', modelNames, enabled: newChannelEnabled.value,
         keys: keyDrafts.map(({ name: keyName, secret }, position) => ({ name: keyName, secret, enabled: true, position })),
       }],
     })
@@ -3023,7 +2315,7 @@ async function addChannel() {
   newChannelName.value = ''
   newChannelUrl.value = ''
   newChannelKeys.value = [{ name: 'Key 1', secret: '' }]
-  newChannelPrimaryModel.value = ''
+  newChannelProbeModel.value = ''
   newChannelModelNames.value = []
   newChannelProtocol.value = 'openai-compatible'
   newProtocolDetectMessage.value = null
@@ -3139,10 +2431,6 @@ async function saveGatewaySettings(settings: Parameters<typeof updateSettings>[0
 
 function showSettingsSaveFailure(message: string) {
   showToast(gatewayApiActive.value ? `${message}，更改未保存，请重试` : '本地网关未连接，设置更改未保存，请连接后重试')
-}
-
-async function setRoutingStrategy(strategy: GlobalRouteStrategy) {
-  await persistGatewaySetting('routing_strategy', routingStrategy, strategy, '网关路由策略已更新')
 }
 
 async function handleSetLogRetention(days: number) {
@@ -3333,24 +2621,7 @@ function handleContextMenu(event: MouseEvent) {
       <!-- Center: FLOATING PILL CAPSULE NAV (Flex centered & Auto collapse text when constrained) -->
       <div class="m26-nav-center" ref="navCenterRef">
         <nav class="m26-floating-nav" :class="{ 'compact-tabs': isCompactTabs }">
-          <!-- 1. 客户端 -->
-          <button
-            class="m26-pill-item"
-            :class="{ active: activeSection === 'clients' }"
-            @click="activeSection = 'clients'"
-            title="客户端"
-          >
-            <svg class="m26-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <rect x="2" y="4" width="20" height="16" rx="2" />
-              <path d="M10 4v4" />
-              <path d="M2 8h20" />
-              <path d="m6 14 2 2-2 2" />
-              <line x1="12" y1="18" x2="16" y2="18" />
-            </svg>
-            <span class="m26-pill-text">客户端</span>
-          </button>
-
-          <!-- 2. 看板 -->
+          <!-- 1. 看板 -->
           <button
             class="m26-pill-item"
             :class="{ active: activeSection === 'analytics' }"
@@ -3365,7 +2636,7 @@ function handleContextMenu(event: MouseEvent) {
             <span class="m26-pill-text">看板</span>
           </button>
 
-          <!-- 3. 供应商 -->
+          <!-- 2. 供应商 -->
           <button
             class="m26-pill-item"
             :class="{ active: activeSection === 'channels' }"
@@ -3382,23 +2653,24 @@ function handleContextMenu(event: MouseEvent) {
             <span v-if="channels.length" class="m26-pill-badge">{{ channels.length }}</span>
           </button>
 
-          <!-- 4. 模型 -->
+          <!-- 3. 网关配置 -->
           <button
             class="m26-pill-item"
-            :class="{ active: activeSection === 'models' }"
-            @click="activeSection = 'models'"
-            :title="'模型' + (models.length ? ` (${models.length})` : '')"
+            :class="{ active: activeSection === 'clients' }"
+            @click="activeSection = 'clients'"
+            title="网关配置"
           >
             <svg class="m26-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <polygon points="12 2 2 7 12 12 22 7 12 2" />
-              <polyline points="2 17 12 22 22 17" />
-              <polyline points="2 12 12 17 22 12" />
+              <rect x="2" y="4" width="20" height="16" rx="2" />
+              <path d="M10 4v4" />
+              <path d="M2 8h20" />
+              <path d="m6 14 2 2-2 2" />
+              <line x1="12" y1="18" x2="16" y2="18" />
             </svg>
-            <span class="m26-pill-text">模型</span>
-            <span v-if="models.length" class="m26-pill-badge">{{ models.length }}</span>
+            <span class="m26-pill-text">网关配置</span>
           </button>
 
-          <!-- 5. 日志 -->
+          <!-- 4. 日志 -->
           <button
             class="m26-pill-item"
             :class="{ active: activeSection === 'logs' }"
@@ -3442,7 +2714,7 @@ function handleContextMenu(event: MouseEvent) {
     <!-- Main Content Workspace (Full Width, No Left Sidebar) -->
     <main class="m26-workspace">
       <!-- Scrollable Main Viewport -->
-      <div class="m26-viewport" :class="{ 'is-fixed-header-view': activeSection === 'models' || activeSection === 'channels' || activeSection === 'logs' || activeSection === 'clients' }">
+      <div class="m26-viewport" :class="{ 'is-fixed-header-view': activeSection === 'channels' || activeSection === 'logs' || activeSection === 'clients' }">
         <!-- SECTION: DATA DASHBOARD (KANBAN) -->
         <section v-if="activeSection === 'analytics'" class="m26-section-view">
           <AnalyticsOverviewMetrics
@@ -3451,8 +2723,8 @@ function handleContextMenu(event: MouseEvent) {
             :enabled-channels-count="enabledChannels.length"
             :average-latency="averageLatency"
             :routing-strategy="routingStrategy"
-            :model-count="models.length"
-            :available-models="availableModels"
+            :model-id-count="configuredModelCount"
+            :channel-count-with-models="channelsWithModels"
           />
 
           <!-- Control Bar: Time Range Selector on Left, Refresh on Right -->
@@ -3669,145 +2941,14 @@ function handleContextMenu(event: MouseEvent) {
           </div>
         </section>
 
-        <!-- SECTION 3: MODELS -->
-        <section v-if="activeSection === 'models'" class="m26-section-view m26-models-section">
-          <div class="m26-models-page-header">
-            <div class="m26-models-title-area">
-              <div class="m26-family-pill-group">
-                <button
-                  v-for="tab in modelFamilyTabs"
-                  :key="tab.key"
-                  class="m26-family-pill-btn"
-                  :class="{ active: selectedModelFamily === tab.key }"
-                  @click="selectedModelFamily = tab.key"
-                >
-                  <span>{{ tab.label }}</span>
-                  <span class="m26-family-count font-mono">{{ tab.count }}</span>
-                </button>
-              </div>
-            </div>
-
-            <div class="m26-models-actions-area">
-              <button
-                class="m26-models-merge-btn"
-                @click="openCustomMappingsModal"
-                title="模型归并"
-              >
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M4 6h16M4 12h10M4 18h14" />
-                </svg>
-                <span>模型归并</span>
-              </button>
-            </div>
-          </div>
-
-          <div class="m26-models-scroll-area">
-            <div class="m26-models-grid" v-if="filteredModels.length">
-            <div v-for="m in filteredModels" :key="m.name" class="m26-model-card">
-              <!-- Top Header: Model Name + Copy Icon (left) and Status/Latency Pill (right) -->
-              <div class="m26-model-card-top">
-                <div class="m26-model-title-box">
-                  <span class="m26-model-canonical-name font-mono" :title="m.name">{{ m.name }}</span>
-                  <button
-                    class="m26-model-copy-icon-btn"
-                    @click.stop="copyModelId(m.name)"
-                    :title="'复制模型名称: ' + m.name"
-                    aria-label="复制模型名称"
-                  >
-                    <svg v-if="copiedModelId !== m.name" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <rect x="5" y="5" width="8" height="8" rx="1.5" />
-                      <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
-                    </svg>
-                    <svg v-else viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="#059669" stroke-width="2.2">
-                      <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
-                    </svg>
-                  </button>
-                </div>
-
-                <div class="m26-model-status-chip" :class="m.status">
-                  <span class="m26-status-indicator-dot" :class="m.status"></span>
-                  <span class="m26-status-indicator-text font-mono">
-                    {{ m.status === 'healthy' ? m.latency : m.status === 'degraded' ? `${m.latency} 波动` : m.status === 'unknown' ? '待探活' : '离线' }}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Channel Pills Box -->
-              <div class="m26-model-channels-box">
-                <div class="m26-channels-meta-head">
-                  <span class="m26-channels-count">提供渠道 ({{ m.providerCount }} 家)</span>
-                </div>
-                <div class="m26-channels-pill-list">
-                  <span
-                    v-for="ch in m.channelDetails.slice(0, 4)"
-                    :key="ch.name"
-                    class="m26-channel-mini-pill"
-                    :class="ch.status"
-                    :title="`${ch.name} · ${ch.status === 'healthy' ? '就绪' : ch.status === 'degraded' ? '延迟较高' : '离线'}${ch.latency ? ' · ' + formatLatencySec(ch.latency) : ''}${ch.upstreamModel ? ' · 上游: ' + ch.upstreamModel : ''}`"
-                  >
-                    <span class="prov-dot" :class="ch.status"></span>
-                    <span class="truncate max-w-[90px]">{{ ch.name }}</span>
-                  </span>
-                  <span
-                    v-if="m.channelDetails.length > 4"
-                    class="m26-channel-mini-pill more"
-                    :title="'更多提供渠道：\n' + m.channelDetails.slice(4).map(c => c.name).join('\n')"
-                  >
-                    +{{ m.channelDetails.length - 4 }}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Footer: Detail / Test / Classify Actions -->
-              <div class="m26-model-card-footer">
-                <div class="flex items-center gap-1.5">
-                  <button
-                    class="m26-model-detail-btn"
-                    @click.stop="openAliasModal(m)"
-                    title="查看渠道调用与别名重写映射明细"
-                  >
-                    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <rect x="2" y="3" width="12" height="10" rx="2" />
-                      <line x1="5" y1="7" x2="11" y2="7" />
-                      <line x1="5" y1="10" x2="9" y2="10" />
-                    </svg>
-                    <span>明细</span>
-                  </button>
-                  <button
-                    v-if="m.name !== 'Auto'"
-                    class="m26-model-classify-btn"
-                    @click.stop="openClassifyDialog(m.name)"
-                    title="将此模型归入或合并到其他标准模型"
-                  >
-                    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M2 4h12M4 8h8M6 12h4" />
-                    </svg>
-                    <span>归并</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="m26-empty-state" v-else>
-            <p v-if="channelSearch || selectedModelFamily !== 'all'">未找到匹配的模型条件。</p>
-            <p v-else>暂无可用模型。请先在渠道管理中添加并配置模型。</p>
-          </div>
-        </div>
-      </section>
-
         <!-- SECTION: CLIENTS -->
         <section v-if="activeSection === 'clients'" class="m26-section-view m26-clients-section">
           <ClientsView
             :channels="channels"
-            :gateway-base-url="gatewayBaseUrl"
-            :gateway-key="gatewayApiKey"
-            :routing-strategy="routingStrategy"
-            :custom-model-mappings="customModelMappings"
-            @update-routing-strategy="setRoutingStrategy"
           />
         </section>
 
-        <!-- SECTION 4: LOGS -->
+        <!-- SECTION 3: LOGS -->
         <LogsView
           v-if="activeSection === 'logs'"
           ref="logsViewRef"
@@ -3956,7 +3097,7 @@ function handleContextMenu(event: MouseEvent) {
           </div>
         </section>
 
-        <!-- SECTION 5: SETTINGS -->
+        <!-- SECTION 4: SETTINGS -->
         <section v-if="activeSection === 'settings'" class="m26-section-view">
           <div class="m26-settings-container">
             <DesktopGeneralSettings
@@ -3981,17 +3122,6 @@ function handleContextMenu(event: MouseEvent) {
               @clear-workspace="clearWorkspace"
             />
 
-            <ModelRulesSettings
-              :show-mappings="false"
-              v-model:new-mapping-source="newMappingSource"
-              v-model:new-mapping-target="newMappingTarget"
-              :all-detected-channel-models="allDetectedChannelModels"
-              :existing-canonical-model-names="existingCanonicalModelNames"
-              :custom-model-mappings="customModelMappings"
-              :app-version="appVersion"
-              @add-mapping="handleAddSettingsMapping"
-              @remove-mapping="handleRemoveCustomMapping"
-            />
           </div>
         </section>
       </div>
@@ -4011,7 +3141,7 @@ function handleContextMenu(event: MouseEvent) {
         :copied-injection-text="copiedInjectionText"
         @copy-model="copyModelId"
         @copy-content="copyInjectionContent"
-        @check-primary="runInjectionCheck(false)"
+        @check-one="runInjectionCheck(false)"
         @check-all="runInjectionCheck(true)"
         @close="showInjectionModal = false"
       />
@@ -4142,7 +3272,6 @@ function handleContextMenu(event: MouseEvent) {
           <!-- 4. 模型管理 (按自然填写顺序第四行) -->
           <div class="supplier-models-wrap">
             <ChannelModelManager
-              v-model:primary-model="newChannelPrimaryModel"
               v-model:model-names="newChannelModelNames"
               :is-fetching="isFetchingNewModels"
               @fetch-upstream="fetchUpstreamModels('new')"
@@ -4309,7 +3438,6 @@ function handleContextMenu(event: MouseEvent) {
           <!-- 4. 模型管理 (按自然填写顺序第四行) -->
           <div class="supplier-models-wrap">
             <ChannelModelManager
-              v-model:primary-model="editChannelPrimaryModel"
               v-model:model-names="editChannelModelNames"
               :is-fetching="isFetchingEditModels"
               @fetch-upstream="fetchUpstreamModels('edit')"
@@ -4398,107 +3526,17 @@ function handleContextMenu(event: MouseEvent) {
           :checking-all-injections="isCheckingAllInjections"
           @select-all="toggleSelectAllModels"
           @delete-selected="batchDeleteSelectedModels(activeModelLatencyChannel)"
+          @delete-problematic="batchDeleteProblematicModels(activeModelLatencyChannel)"
           @batch-action="requestBatchModelAction(activeModelLatencyChannel, $event)"
           @toggle-selection="toggleModelSelection"
           @card-click="handleModelCardClick"
           @copy-model="copyModelId"
           @open-model-detail="openModelErrorDetail(activeModelLatencyChannel, $event)"
           @open-injection-detail="openModelInjectionDetail(activeModelLatencyChannel, $event)"
-          @set-primary="setPrimaryFromRow(activeModelLatencyChannel, $event)"
           @probe-model="probeSingleModel(activeModelLatencyChannel, $event)"
           @check-injection="checkSingleModelInjection(activeModelLatencyChannel, $event)"
         />
       </div>
-    </div>
-
-    <!-- MODAL: MODEL MULTI-PROVIDER SPEED TEST (测试此模型所有供应商) -->
-    <div
-      v-if="activeModelSpeedTestName"
-      v-focus-trap role="dialog" aria-modal="true" aria-label="模型测速" class="m26-modal-backdrop"
-      @mousedown="onBackdropMouseDown"
-      @click="handleBackdropClick($event, closeModelSpeedTestModal)"
-    >
-      <ChannelProviderSpeedTestContent
-        v-if="activeModelSpeedTestName"
-        :model-name="activeModelSpeedTestName"
-        :model-family="getModelFamily(activeModelSpeedTestName)"
-        :providers="activeModelProviderRows"
-        :query="modelSpeedTestQuery"
-        :fastest="activeModelFastestProvider"
-        :probing-all="isProbingModelProviders"
-        :copied="copiedModelId === activeModelSpeedTestName"
-        @update:query="modelSpeedTestQuery = $event"
-        @copy-model="copyModelId(activeModelSpeedTestName)"
-        @probe-all="probeAllProvidersForModel(activeModelSpeedTestName)"
-        @probe-provider="probeSingleModel($event.channel, $event.upstreamModel)"
-        @open-diagnostic="openModelErrorDetail($event.channel, $event.upstreamModel)"
-        @close="closeModelSpeedTestModal"
-      />
-    </div>
-
-    <!-- MODAL: MODEL ALIASES DETAIL -->
-    <div
-      v-if="activeAliasModalModel"
-      v-focus-trap role="dialog" aria-modal="true" aria-label="模型别名" class="m26-modal-backdrop"
-      @mousedown="onBackdropMouseDown"
-      @click="handleBackdropClick($event, closeAliasModal)"
-    >
-      <ChannelModelAliasContent
-        v-if="activeAliasModalModel"
-        :model="activeAliasModalModel"
-        :family="getModelFamily(activeAliasModalModel.name)"
-        :aliases="filteredModalAliases"
-        :channel-details="filteredModalChannelDetails"
-        :search="aliasModalSearch"
-        :copied-text="copiedAliasText"
-        :mapped-aliases="customModelMappings"
-        @update:search="aliasModalSearch = $event"
-        @copy-model="copyModelId(activeAliasModalModel.name)"
-        @copy-aliases="copyAllAliases(activeAliasModalModel)"
-        @copy-alias="copyAlias"
-        @remove-mapping="handleRemoveCustomMapping"
-        @open-speed-test="openModelSpeedTestFromAlias(activeAliasModalModel.name)"
-        @open-classify="openClassifyDialog('', activeAliasModalModel.name)"
-        @close="closeAliasModal"
-      />
-    </div>
-
-    <!-- MODAL: QUICK MODEL CLASSIFY -->
-    <div
-      v-if="showClassifyModal"
-      v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-6" class="m26-modal-backdrop"
-      @mousedown="onBackdropMouseDown"
-      @click="handleBackdropClick($event, () => showClassifyModal = false)"
-    >
-      <ModelMappingContent
-        v-if="showClassifyModal"
-        mode="classify"
-        :source-suggestions="allDetectedChannelModels"
-        :target-options="existingCanonicalModelNames"
-        :initial-source="classifySourceModel"
-        :initial-target="classifyTargetModel"
-        @submit="submitClassify"
-        @close="showClassifyModal = false"
-      />
-    </div>
-
-    <!-- MODAL: CUSTOM MODEL MAPPINGS MANAGER -->
-    <div
-      v-if="showCustomMappingsModal"
-      v-focus-trap role="dialog" aria-modal="true" aria-labelledby="m26-modal-title-7" class="m26-modal-backdrop"
-      @mousedown="onBackdropMouseDown"
-      @click="handleBackdropClick($event, () => showCustomMappingsModal = false)"
-    >
-      <ModelMappingContent
-        v-if="showCustomMappingsModal"
-        mode="manage"
-        :source-suggestions="allDetectedChannelModels"
-        :target-options="existingCanonicalModelNames"
-        :mappings="customModelMappings"
-        @submit="handleAddManagerMapping"
-        @remove="handleRemoveCustomMapping"
-        @close="showCustomMappingsModal = false"
-      />
     </div>
 
     <!-- MODAL: CHANNEL PROBE & ERROR DIAGNOSIS -->
@@ -5471,7 +4509,6 @@ function handleContextMenu(event: MouseEvent) {
   margin: 0 auto;
 }
 .m26-section-view.m26-channels-section,
-.m26-section-view.m26-models-section,
 .m26-section-view.m26-clients-section,
 .m26-section-view.m26-logs-section {
   flex: 1;
@@ -5491,8 +4528,7 @@ function handleContextMenu(event: MouseEvent) {
   background: transparent;
   border: none;
 }
-.m26-channels-scroll-area,
-.m26-models-scroll-area {
+.m26-channels-scroll-area {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -5501,8 +4537,7 @@ function handleContextMenu(event: MouseEvent) {
   scrollbar-width: none !important;
   -ms-overflow-style: none !important;
 }
-.m26-channels-scroll-area::-webkit-scrollbar,
-.m26-models-scroll-area::-webkit-scrollbar {
+.m26-channels-scroll-area::-webkit-scrollbar {
   display: none !important;
   width: 0 !important;
   height: 0 !important;
@@ -5937,10 +4972,6 @@ function handleContextMenu(event: MouseEvent) {
   border-radius: 6px;
   white-space: nowrap;
 }
-.m26-model-badge.primary {
-  background: rgba(0, 0, 0, 0.05);
-  color: var(--m26-text-secondary);
-}
 .m26-model-badge.count {
   background: rgba(79, 70, 229, 0.1);
   color: var(--m26-accent);
@@ -6038,1119 +5069,7 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 /* ==========================================================================
-   Section 3: Models View (macOS 26 Glassmorphic Hub)
-   ========================================================================== */
-.m26-models-page-header {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: nowrap;
-  gap: 12px;
-  margin-bottom: 0;
-}
-
-.m26-models-title-area {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  flex: 1;
-}
-
-.m26-family-pill-group {
-  display: flex;
-  align-items: center;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  gap: 4px;
-  background: rgba(0, 0, 0, 0.03);
-  padding: 2px;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.04);
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  box-sizing: border-box;
-}
-.m26-family-pill-group::-webkit-scrollbar {
-  display: none;
-}
-
-.m26-family-pill-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  color: #64748b;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  font-weight: 500;
-  user-select: none;
-  white-space: nowrap;
-  flex-shrink: 0;
-  box-sizing: border-box;
-}
-
-.m26-family-pill-btn:hover {
-  color: #1e293b;
-  background: rgba(255, 255, 255, 0.5);
-}
-
-.m26-family-pill-btn.active {
-  background: #ffffff;
-  color: #0f172a;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  font-weight: 600;
-}
-
-.m26-family-count {
-  font-size: 10px;
-  opacity: 0.7;
-  padding: 0 3px;
-  background: transparent;
-}
-
-.m26-family-pill-btn.active .m26-family-count {
-  background: transparent;
-  opacity: 0.85;
-}
-
-.m26-models-actions-area {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.m26-models-merge-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 11px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #4f46e5, #4338ca);
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  color: #ffffff;
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.25);
-  transition: all 0.16s ease;
-  white-space: nowrap;
-  user-select: none;
-  box-sizing: border-box;
-}
-
-.m26-models-merge-btn:hover {
-  filter: brightness(1.09);
-  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.38);
-  transform: translateY(-1px);
-}
-
-.m26-models-merge-btn:active {
-  transform: translateY(0);
-  filter: brightness(0.96);
-}
-
-.m26-models-merge-btn svg {
-  flex-shrink: 0;
-  color: #ffffff;
-  stroke: #ffffff;
-}
-
-.m26-models-merge-btn:hover svg {
-  color: #ffffff;
-}
-
-/* Models Grid */
-.m26-models-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
-  gap: 10px;
-}
-
-.m26-model-card {
-  background: var(--m26-card-bg);
-  border: 1px solid var(--m26-border);
-  border-radius: 12px;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  min-height: 110px;
-  user-select: none;
-}
-
-.m26-model-card:hover {
-  background: var(--m26-card-hover);
-  border-color: rgba(79, 70, 229, 0.25);
-  transform: translateY(-1.5px);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.05);
-}
-
-/* Card Top: Canonical Name + Copy Icon (left) & Status Chip (right) */
-.m26-model-card-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 26px;
-}
-
-.m26-model-brand-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2.5px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 650;
-  border: 1px solid transparent;
-  letter-spacing: 0.01em;
-}
-
-.m26-model-brand-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.m26-model-brand-name {
-  line-height: 1.2;
-}
-
-.m26-model-status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 8px;
-  border-radius: 9999px;
-  font-size: 11px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.m26-model-status-chip.healthy {
-  background: rgba(5, 150, 105, 0.09);
-  color: var(--m26-emerald);
-  border: 1px solid rgba(5, 150, 105, 0.18);
-}
-
-.m26-model-status-chip.degraded {
-  background: rgba(217, 119, 6, 0.09);
-  color: var(--m26-amber);
-  border: 1px solid rgba(217, 119, 6, 0.18);
-}
-
-.m26-model-status-chip.offline {
-  background: rgba(225, 29, 72, 0.07);
-  color: var(--m26-rose);
-  border: 1px solid rgba(225, 29, 72, 0.15);
-}
-
-.m26-model-status-chip.unknown {
-  background: rgba(100, 116, 139, 0.08);
-  color: #64748b;
-  border: 1px solid rgba(100, 116, 139, 0.16);
-}
-
-.m26-status-indicator-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.m26-status-indicator-dot.healthy {
-  background: var(--m26-emerald);
-  box-shadow: 0 0 5px rgba(5, 150, 105, 0.5);
-}
-
-.m26-status-indicator-dot.degraded {
-  background: var(--m26-amber);
-  box-shadow: 0 0 5px rgba(217, 119, 6, 0.5);
-}
-
-.m26-status-indicator-dot.offline {
-  background: var(--m26-rose);
-}
-
-.m26-status-indicator-dot.unknown {
-  background: #94a3b8;
-}
-
-/* Main Info: Aliases & Routing */
-.m26-model-main-info {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.m26-model-title-box {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex: 1;
-}
-
-.m26-model-canonical-name {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--m26-text);
-  line-height: 1.3;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  letter-spacing: -0.01em;
-}
-
-.m26-model-copy-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
-  color: #94a3b8;
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-  padding: 0;
-  transition: all 0.15s ease;
-  flex-shrink: 0;
-}
-
-.m26-model-copy-icon-btn:hover {
-  color: var(--m26-accent);
-  background: rgba(79, 70, 229, 0.08);
-  border-color: rgba(79, 70, 229, 0.15);
-}
-
-.m26-model-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 1.5px 6px;
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--m26-text-muted);
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid var(--m26-border);
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  flex-shrink: 0;
-  margin-top: 1px;
-}
-
-.m26-model-copy-btn:hover {
-  color: var(--m26-accent);
-  border-color: rgba(79, 70, 229, 0.25);
-  background: rgba(79, 70, 229, 0.05);
-}
-.m26-model-item-info > div:hover .m26-model-row-copy,
-.m26-model-row-copy:focus-visible {
-  opacity: 1;
-}
-.m26-model-row-copy {
-  width: 22px;
-  height: 22px;
-  justify-content: center;
-  padding: 0;
-  overflow: hidden;
-  opacity: 0;
-  background: transparent;
-  border-color: transparent;
-}
-.m26-model-row-copy span {
-  display: none;
-}
-
-/* Compact & Clickable Aliases Row */
-.m26-model-aliases-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 7px;
-  background: rgba(99, 102, 241, 0.04);
-  border: 1px solid rgba(99, 102, 241, 0.1);
-  border-radius: 6px;
-  font-size: 10.5px;
-  overflow: hidden;
-  height: 24px;
-  box-sizing: border-box;
-  transition: all 0.15s ease;
-}
-
-.m26-model-aliases-bar.clickable {
-  cursor: pointer;
-  user-select: none;
-}
-
-.m26-model-aliases-bar.clickable:hover {
-  background: rgba(99, 102, 241, 0.09);
-  border-color: rgba(99, 102, 241, 0.28);
-  transform: translateY(-0.5px);
-  box-shadow: 0 2px 5px rgba(99, 102, 241, 0.08);
-}
-
-.m26-model-aliases-bar.direct {
-  background: rgba(0, 0, 0, 0.02);
-  border-color: rgba(0, 0, 0, 0.05);
-}
-
-.m26-model-aliases-bar.direct.clickable:hover {
-  background: rgba(0, 0, 0, 0.05);
-  border-color: rgba(0, 0, 0, 0.12);
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.04);
-}
-
-.m26-aliases-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-weight: 600;
-  color: #6366f1;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.m26-aliases-tag.direct {
-  color: var(--m26-text-muted);
-}
-
-.m26-aliases-text {
-  color: var(--m26-text-muted);
-  font-size: 10px;
-  opacity: 0.85;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.m26-aliases-more-btn {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  font-size: 9.5px;
-  font-weight: 500;
-  color: #6366f1;
-  opacity: 0.65;
-  flex-shrink: 0;
-  transition: opacity 0.15s ease;
-}
-
-.m26-model-aliases-bar.clickable:hover .m26-aliases-more-btn {
-  opacity: 1;
-}
-
-.m26-model-aliases-bar.direct .m26-aliases-more-btn {
-  color: var(--m26-text-muted);
-}
-
-/* Model Aliases Modal Styles - aligned with supplier modal */
-.m26-modal-sheet.m26-aliases-modal-sheet {
-  width: 100%;
-  max-width: 720px !important;
-  max-height: 88vh;
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 16px;
-  box-shadow: 0 25px 65px rgba(15, 23, 42, 0.16), 0 8px 24px rgba(15, 23, 42, 0.08);
-  display: flex;
-  flex-direction: column;
-}
-
-.m26-modal-sheet.mapping-sheet.mode-manage {
-  width: 92%;
-  max-width: 860px !important;
-  height: 82vh;
-  max-height: 82vh;
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 16px;
-  box-shadow: 0 25px 65px rgba(15, 23, 42, 0.16), 0 8px 24px rgba(15, 23, 42, 0.08);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.m26-modal-sheet.mapping-sheet.mode-manage .m26-modal-body {
-  flex: 1;
-  min-height: 0;
-  max-height: none !important;
-  overflow-y: hidden !important;
-  padding: 14px 20px 16px;
-  gap: 12px;
-}
-
-.m26-aliases-modal-sheet .m26-modal-header {
-  padding: 12px 20px;
-  background: #ffffff;
-  border-bottom: 1px solid #eef2f6;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.m26-alias-modal-body {
-  padding: 18px 20px 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  max-height: calc(88vh - 56px);
-  overflow-y: auto;
-  box-sizing: border-box;
-}
-
-.m26-alias-guide-card {
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: rgba(99, 102, 241, 0.04);
-  border: 1px solid rgba(99, 102, 241, 0.12);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.m26-guide-badge {
-  font-size: 10px;
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #6366f1;
-  color: #ffffff;
-}
-
-.m26-alias-guide-code {
-  font-size: 12px;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-
-.m26-alias-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.m26-alias-section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.m26-alias-section-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--m26-text);
-}
-
-.m26-alias-items-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.m26-alias-item-card {
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #f8fafc;
-  border: 1px solid rgba(15, 23, 42, 0.06);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  transition: border-color 0.15s ease;
-}
-
-.m26-alias-item-card:hover {
-  border-color: rgba(99, 102, 241, 0.2);
-}
-
-.m26-alias-card-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.m26-alias-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: #1e293b;
-  word-break: break-all;
-}
-
-.m26-alias-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2.5px 8px;
-  font-size: 11px;
-  font-weight: 500;
-  border-radius: 6px;
-  border: 1px solid rgba(15, 23, 42, 0.1);
-  background: #ffffff;
-  color: var(--m26-text-secondary);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.15s ease;
-}
-
-.m26-alias-copy-btn:hover {
-  border-color: #6366f1;
-  color: #6366f1;
-  background: rgba(99, 102, 241, 0.04);
-}
-
-.m26-model-classify-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3.5px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 550;
-  background: rgba(0, 0, 0, 0.04);
-  color: var(--m26-text-secondary);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.m26-model-classify-btn:hover {
-  background: rgba(79, 70, 229, 0.08);
-  color: var(--m26-accent);
-  border-color: rgba(79, 70, 229, 0.25);
-}
-
-.m26-custom-mapping-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 10.5px;
-  font-weight: 600;
-  background: rgba(79, 70, 229, 0.08);
-  color: #4f46e5;
-  border: 1px solid rgba(79, 70, 229, 0.2);
-}
-
-.m26-alias-unlink-btn {
-  display: inline-flex;
-  align-items: center;
-  padding: 2.5px 8px;
-  font-size: 11px;
-  font-weight: 500;
-  border-radius: 6px;
-  border: 1px solid rgba(225, 29, 72, 0.2);
-  background: rgba(225, 29, 72, 0.04);
-  color: #e11d48;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.m26-alias-unlink-btn:hover {
-  background: #e11d48;
-  color: #ffffff;
-  border-color: #e11d48;
-}
-
-.m26-badge-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 9999px;
-  font-size: 10px;
-  font-weight: 700;
-  background: var(--m26-accent);
-  color: #ffffff;
-  margin-left: 2px;
-}
-
-.m26-custom-mappings-table {
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 8px;
-  background: #ffffff;
-  overflow: hidden;
-}
-
-.m26-mapping-row {
-  display: flex;
-  align-items: center;
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.05);
-  font-size: 12px;
-}
-
-.m26-mapping-row:last-child {
-  border-bottom: none;
-}
-
-.m26-mapping-row.header {
-  background: rgba(15, 23, 42, 0.02);
-  font-size: 11px;
-  font-weight: 600;
-  color: #64748b;
-}
-
-.m26-mapping-row .col-source {
-  flex: 1;
-  min-width: 0;
-  color: #1e293b;
-  word-break: break-all;
-}
-
-.m26-mapping-row .col-arrow {
-  padding: 0 12px;
-  color: #94a3b8;
-  flex-shrink: 0;
-}
-
-.m26-mapping-row .col-target {
-  flex: 1;
-  min-width: 0;
-  word-break: break-all;
-}
-
-.m26-mapping-row .col-action {
-  flex-shrink: 0;
-  margin-left: 12px;
-}
-
-.m26-alias-providers-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 11px;
-}
-
-.m26-alias-prov-label {
-  color: var(--m26-text-muted);
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-.m26-alias-prov-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.m26-alias-prov-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  background: #ffffff;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  font-size: 11px;
-  color: #334155;
-}
-
-.ch-lat-num {
-  font-size: 10px;
-  font-family: monospace;
-  color: #94a3b8;
-}
-
-.m26-mapping-table-wrapper {
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 10px;
-  overflow: hidden;
-  background: #ffffff;
-}
-
-.m26-mapping-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-  text-align: left;
-}
-
-.m26-mapping-table th {
-  background: #f8fafc;
-  padding: 9px 16px;
-  font-weight: 600;
-  color: var(--m26-text-secondary);
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
-  white-space: nowrap;
-}
-
-.m26-mapping-table td {
-  padding: 10px 16px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.04);
-  white-space: nowrap;
-}
-
-.m26-mapping-table tr:last-child td {
-  border-bottom: none;
-}
-
-.m26-table-copy-icon {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  padding: 2px;
-  color: #94a3b8;
-  display: inline-flex;
-  align-items: center;
-  border-radius: 3px;
-  transition: color 0.15s ease;
-}
-
-.m26-table-copy-icon:hover {
-  color: #6366f1;
-}
-
-.m26-strategy-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 11.5px;
-  font-weight: 550;
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
-.m26-strategy-text.direct {
-  color: #059669;
-}
-
-.m26-strategy-text.rewrite {
-  color: #64748b;
-}
-
-.m26-strategy-text.manual {
-  color: #4f46e5;
-}
-
-.m26-table-unlink-link {
-  font-size: 11px;
-  color: #94a3b8;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  padding: 0 1px;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  transition: color 0.15s ease;
-}
-
-.m26-table-unlink-link:hover {
-  color: #e11d48;
-}
-
-.m26-mapping-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 10.5px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.m26-mapping-chip.rewrite {
-  background: rgba(99, 102, 241, 0.08);
-  color: #4f46e5;
-  border: 1px solid rgba(99, 102, 241, 0.15);
-}
-
-.m26-mapping-chip.direct {
-  background: rgba(16, 185, 129, 0.08);
-  color: #059669;
-  border: 1px solid rgba(16, 185, 129, 0.15);
-}
-
-.m26-empty-alias-tip {
-  padding: 18px;
-  text-align: center;
-  color: var(--m26-text-muted);
-  background: #f8fafc;
-  border-radius: 8px;
-  border: 1px dashed rgba(15, 23, 42, 0.1);
-}
-
-.m26-aliases-modal-sheet .m26-close-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
-  font-size: 14px;
-}
-
-.m26-aliases-modal-sheet .m26-close-btn:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--m26-text);
-}
-
-/* Model Multi-Provider Speed Test Modal Styles */
-.m26-speedtest-modal-sheet {
-  max-width: 800px;
-  width: 94%;
-}
-
-.m26-speedtest-modal-sheet .m26-modal-header {
-  padding: 18px 22px;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.m26-speedtest-modal-sheet .m26-close-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
-  font-size: 14px;
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
-.m26-speedtest-modal-sheet .m26-close-btn:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--m26-text);
-}
-
-.m26-speedtest-body {
-  padding: 16px 22px;
-  max-height: calc(85vh - 160px);
-  overflow-y: auto;
-}
-
-.m26-tag-preferred {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #059669;
-  background: rgba(16, 185, 129, 0.12);
-  border: 1px solid rgba(16, 185, 129, 0.28);
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.12);
-}
-
-.dark .m26-tag-preferred {
-  color: #34d399;
-  background: rgba(16, 185, 129, 0.18);
-  border-color: rgba(52, 211, 153, 0.35);
-}
-
-.m26-tag-disabled {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  color: #94a3b8;
-  background: rgba(148, 163, 184, 0.14);
-}
-
-.m26-fastest-provider-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 500;
-  color: #047857;
-  background: rgba(16, 185, 129, 0.08);
-  border: 1px solid rgba(16, 185, 129, 0.22);
-}
-
-.dark .m26-fastest-provider-pill {
-  color: #6ee7b7;
-  background: rgba(16, 185, 129, 0.16);
-  border-color: rgba(16, 185, 129, 0.32);
-}
-
-.m26-fastest-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #10b981;
-  box-shadow: 0 0 6px #10b981;
-}
-
-.m26-speedtest-alias-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: rgba(99, 102, 241, 0.06);
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 11px;
-}
-
-.dark .m26-speedtest-alias-tag {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: rgba(99, 102, 241, 0.3);
-}
-
-.m26-model-item-card.is-preferred {
-  border-color: rgba(16, 185, 129, 0.45);
-  background: rgba(16, 185, 129, 0.03);
-}
-
-.dark .m26-model-item-card.is-preferred {
-  border-color: rgba(52, 211, 153, 0.45);
-  background: rgba(16, 185, 129, 0.06);
-}
-
-/* Channels Pill Box */
-.m26-model-channels-box {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin-top: 2px;
-}
-
-.m26-channels-meta-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.m26-channels-count {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--m26-text-secondary);
-}
-
-.m26-channels-pill-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-  min-height: 24px;
-}
-
-.m26-channel-mini-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  font-size: 10.5px;
-  font-weight: 500;
-  background: rgba(0, 0, 0, 0.04);
-  color: var(--m26-text);
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  transition: all 0.12s ease;
-  cursor: default;
-}
-
-.m26-channel-mini-pill.healthy {
-  background: rgba(5, 150, 105, 0.06);
-  color: #065f46;
-  border-color: rgba(5, 150, 105, 0.12);
-}
-
-.m26-channel-mini-pill.degraded {
-  background: rgba(217, 119, 6, 0.06);
-  color: #92400e;
-  border-color: rgba(217, 119, 6, 0.12);
-}
-
-.m26-channel-mini-pill.offline {
-  background: rgba(225, 29, 72, 0.05);
-  color: #9f1239;
-  border-color: rgba(225, 29, 72, 0.1);
-}
-
-.m26-channel-mini-pill.more {
-  color: var(--m26-text-muted);
-  font-size: 10px;
-  background: rgba(0, 0, 0, 0.03);
-}
-
-/* Card Footer Action */
-.m26-model-card-footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  margin-top: auto;
-  padding-top: 6px;
-  border-top: 1px solid rgba(0, 0, 0, 0.04);
-}
-
-.m26-model-detail-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3.5px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 550;
-  background: rgba(99, 102, 241, 0.06);
-  color: #4f46e5;
-  border: 1px solid rgba(99, 102, 241, 0.18);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.m26-model-detail-btn:hover {
-  background: rgba(99, 102, 241, 0.14);
-  color: #4338ca;
-  border-color: rgba(99, 102, 241, 0.35);
-}
-
-.m26-model-test-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3.5px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 550;
-  background: rgba(79, 70, 229, 0.08);
-  color: var(--m26-accent);
-  border: 1px solid rgba(79, 70, 229, 0.18);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.m26-model-test-btn:hover {
-  background: var(--m26-accent);
-  color: #ffffff;
-  border-color: var(--m26-accent);
-  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.25);
-}
-
-/* ==========================================================================
-   Section 4: Logs View
+   Section 3: Logs View
    ========================================================================== */
 .m26-logs-header {
   display: flex;
@@ -7255,7 +5174,7 @@ function handleContextMenu(event: MouseEvent) {
 }
 
 /* ==========================================================================
-   Section 5: Settings View (macOS 26 Glassmorphic Design)
+   Section 4: Settings View (macOS 26 Glassmorphic Design)
    ========================================================================== */
 .m26-settings-container {
   display: flex;
@@ -7966,6 +5885,10 @@ function handleContextMenu(event: MouseEvent) {
   border-color: rgba(225, 29, 72, 0.35);
   color: #be123c;
 }
+.m26-delete-problematic:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .m26-confirm-backdrop {
   z-index: 1200;
 }
@@ -8188,42 +6111,6 @@ function handleContextMenu(event: MouseEvent) {
 }
 .m26-model-item-card.is-selected:hover {
   background: rgba(99, 102, 241, 0.08);
-}
-.m26-primary-slot-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 26px;
-  width: 28px;
-  box-sizing: border-box;
-  padding: 0;
-  border-radius: 7px;
-  font-weight: 600;
-  background: rgba(99, 102, 241, 0.1);
-  color: #4f46e5;
-  border: 1px solid rgba(99, 102, 241, 0.28);
-  white-space: nowrap;
-  user-select: none;
-  flex-shrink: 0;
-}
-.m26-btn-micro.set-primary {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 28px;
-  box-sizing: border-box;
-  padding: 0;
-  color: #6366f1;
-  background: rgba(99, 102, 241, 0.08);
-  border-color: rgba(99, 102, 241, 0.22);
-  font-weight: 500;
-  flex-shrink: 0;
-}
-.m26-btn-micro.set-primary:hover {
-  color: #4f46e5;
-  background: rgba(99, 102, 241, 0.16);
-  border-color: rgba(99, 102, 241, 0.4);
 }
 .m26-btn-micro.probe {
   width: 30px;

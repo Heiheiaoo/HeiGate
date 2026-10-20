@@ -107,6 +107,25 @@ pub struct ModelPerformance {
 }
 
 impl Channel {
+    /// Returns every configured model ID, including the legacy primary-model
+    /// column when reading older databases. Model IDs remain distinct; only
+    /// exact duplicates are removed.
+    pub fn configured_models(&self) -> Vec<String> {
+        let mut models = Vec::with_capacity(self.extra_models.len() + 1);
+        let mut seen = HashSet::new();
+        for model in std::iter::once(&self.primary_model).chain(&self.extra_models) {
+            let model = model.trim();
+            if !model.is_empty() && seen.insert(model.to_string()) {
+                models.push(model.to_string());
+            }
+        }
+        models
+    }
+
+    pub fn first_model(&self) -> Option<String> {
+        self.configured_models().into_iter().next()
+    }
+
     pub(crate) fn same_upstream(&self, other: &Channel) -> bool {
         (self.endpoint == other.endpoint
             || crate::probe::same_endpoint(&self.endpoint, &other.endpoint))
@@ -115,7 +134,11 @@ impl Channel {
     }
 
     pub(crate) fn has_model(&self, model: &str) -> bool {
-        self.primary_model == model || self.extra_models.iter().any(|m| m == model)
+        !model.trim().is_empty()
+            && self
+                .configured_models()
+                .iter()
+                .any(|configured| configured.eq_ignore_ascii_case(model.trim()))
     }
 
     fn reset_upstream_runtime(&mut self) {
@@ -365,9 +388,18 @@ impl Store {
         let conn = self.lock();
         conn.execute_batch("PRAGMA foreign_keys = ON")?;
         conn.execute_batch(SCHEMA_SQL)?;
-        // The Claude desktop integration that created this setting was removed.
+        // Remove the obsolete per-client model mapping setting.
         conn.execute(
             "DELETE FROM desktop_settings WHERE key = 'claude_desktop_model_mappings'",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM desktop_settings WHERE key IN (
+                'client_config_codex',
+                'client_config_claude_desktop',
+                'client_config_claude_code',
+                'client_config_generic'
+            )",
             [],
         )?;
         for statement in MIGRATIONS {
@@ -647,7 +679,7 @@ impl Store {
             || current.endpoint != channel.endpoint
             || current.provider != channel.provider
             || current.api_mode != channel.api_mode
-            || !(current.primary_model == model || current.extra_models.iter().any(|m| m == model))
+            || !current.has_model(model)
         {
             return Ok(false);
         }
@@ -773,31 +805,12 @@ impl Store {
                     conn.execute("UPDATE channel_keys SET auth_invalid=0,rate_limit_count=0,cooldown_until=NULL,last_error='',generation=generation+1 WHERE channel_id=?", [channel.id])?;
                     conn.execute("DELETE FROM channel_key_models WHERE key_id IN (SELECT id FROM channel_keys WHERE channel_id=?)", [channel.id])?;
                 } else {
-                    if previous.primary_model != channel.primary_model {
-                        // Primary diagnostics belong to the model; supplier cooldowns stay in force.
-                        channel.reset_primary_runtime();
-                        let health: Option<ModelHealth> = conn.query_row(
-                            "SELECT status,latency_ms,ttft_ms,error,checked_at FROM desktop_model_health WHERE channel_id=? AND model=?",
-                            params![channel.id, channel.primary_model], |row| {
-                                let checked: Option<String> = row.get(4)?;
-                                Ok(ModelHealth {
-                                    model: channel.primary_model.clone(), status: row.get(0)?,
-                                    latency_ms: row.get(1)?, ttft_ms: row.get(2)?, error: row.get(3)?,
-                                    checked_at: parse_time(checked.as_deref()),
-                                })
-                            },
-                        ).optional()?;
-                        if let Some(health) = health {
-                            channel.last_status = health.status;
-                            channel.last_latency_ms = health.latency_ms;
-                            channel.last_ttft_ms = health.ttft_ms;
-                            channel.last_error = health.error;
-                            channel.last_checked_at = health.checked_at;
-                        }
-                    }
                     for model in
                         std::iter::once(&previous.primary_model).chain(&previous.extra_models)
                     {
+                        if model.trim().is_empty() {
+                            continue;
+                        }
                         if !channel.has_model(model) {
                             // Retain the epoch when removing a model, fencing old replies if it is added again.
                             conn.execute("UPDATE channel_key_models SET unavailable_until='',rate_limit_count=0,generation=generation+1 WHERE key_id IN (SELECT id FROM channel_keys WHERE channel_id=?) AND model=?", params![channel.id, model])?;
@@ -847,8 +860,7 @@ impl Store {
             conn.commit()?;
         }
 
-        let mut models = vec![channel.primary_model.clone()];
-        models.extend(channel.extra_models.clone());
+        let models = channel.configured_models();
         self.prune_model_health(channel.id, &models)
     }
 
@@ -946,8 +958,7 @@ impl Store {
              ON CONFLICT(channel_id,model) DO UPDATE SET status=excluded.status,latency_ms=excluded.latency_ms,ttft_ms=excluded.ttft_ms,error=excluded.error,checked_at=excluded.checked_at",
             params![expected.id, health.model, health.status, health.latency_ms, health.ttft_ms, health.error, format_time(checked_at)],
         )?;
-        if fresh.primary_model == expected.primary_model
-            && fresh.primary_model == health.model
+        if fresh.has_model(&health.model)
             && !fresh.last_checked_at.is_some_and(|time| time > checked_at)
         {
             mutate_headline(&mut fresh);
@@ -960,7 +971,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Persist only diagnostics for the same upstream, credential epoch and primary model.
+    /// Persist diagnostics only while the upstream, model and credential epoch are current.
     pub(crate) fn diagnostic_is_current(
         &self,
         expected: &Channel,
@@ -978,7 +989,6 @@ impl Store {
         };
         Ok(current.enabled
             && current.same_upstream(expected)
-            && current.primary_model == expected.primary_model
             && current.has_model(model)
             && lease.is_current_in(&conn, model)?)
     }
@@ -986,6 +996,7 @@ impl Store {
     pub fn set_injection(
         &self,
         expected: &Channel,
+        model: &str,
         lease: &crate::key_pool::KeyLease,
         checked_at: DateTime<Utc>,
         state: &str,
@@ -1004,11 +1015,11 @@ impl Store {
         };
         if !current.enabled
             || !current.same_upstream(expected)
-            || current.primary_model != expected.primary_model
+            || !current.has_model(model)
             || current
                 .injection_checked_at
                 .is_some_and(|time| time > checked_at)
-            || !lease.is_current_in(&tx, &expected.primary_model)?
+            || !lease.is_current_in(&tx, model)?
         {
             return Ok(false);
         }
@@ -1958,6 +1969,7 @@ mod tests {
         assert!(!store
             .set_injection(
                 &old_channel,
+                &channel.primary_model,
                 &fresh_lease,
                 Utc::now(),
                 "detected",
@@ -1970,11 +1982,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(store
-            .set_injection(&channel, &fresh, Utc::now(), "clean", 20, "")
+            .set_injection(
+                &channel,
+                &channel.primary_model,
+                &fresh,
+                Utc::now(),
+                "clean",
+                20,
+                "",
+            )
             .unwrap());
         assert!(!store
             .set_injection(
                 &channel,
+                &channel.primary_model,
                 &fresh,
                 Utc::now() - chrono::Duration::seconds(2),
                 "detected",
@@ -2101,7 +2122,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_model_switch_resets_diagnostics_and_preserves_supplier_and_model_state() {
+    fn model_order_changes_preserve_channel_diagnostics_and_model_state() {
         for has_health in [false, true] {
             let store = Store::open_in_memory().unwrap();
             let mut ch = channel("source");
@@ -2169,22 +2190,17 @@ mod tests {
             ch.extra_models = vec![old_model.clone()];
             store.save(&mut ch).unwrap();
             let saved = store.get(ch.id).unwrap();
-            assert_eq!(
-                saved.last_status,
-                if has_health { "degraded" } else { "unknown" }
-            );
-            assert_eq!(saved.last_latency_ms, has_health.then_some(200));
-            assert_eq!(saved.last_ttft_ms, has_health.then_some(150));
-            assert_eq!(
-                saved.last_error,
-                if has_health { "slow extra model" } else { "" }
-            );
-            assert_eq!(saved.last_checked_at, has_health.then_some(now));
-            assert!(saved.last_ping_latency_ms.is_none());
-            assert_eq!(saved.probe_streak, 0);
-            assert_eq!(saved.injection_state, "unknown");
-            assert!(saved.injection_tokens.is_none() && saved.injection_checked_at.is_none());
-            assert!(saved.injection_content.is_empty());
+            assert_eq!(saved.last_status, "operational");
+            assert_eq!(saved.last_latency_ms, Some(900));
+            assert_eq!(saved.last_ttft_ms, Some(800));
+            assert!(saved.last_error.is_empty());
+            assert_eq!(saved.last_checked_at, Some(now));
+            assert_eq!(saved.last_ping_latency_ms, Some(100));
+            assert_eq!(saved.probe_streak, 4);
+            assert_eq!(saved.injection_state, "detected");
+            assert_eq!(saved.injection_tokens, Some(900));
+            assert_eq!(saved.injection_checked_at, Some(now));
+            assert_eq!(saved.injection_content, "old primary content");
             assert_eq!(saved.failure_count, 3);
             assert_eq!(saved.circuit_state, "open");
             assert_eq!(

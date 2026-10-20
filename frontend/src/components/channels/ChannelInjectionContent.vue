@@ -13,7 +13,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'copy-model', modelName: string): void
   (e: 'copy-content', content: string): void
-  (e: 'check-primary'): void
+  (e: 'check-one'): void
   (e: 'check-all'): void
   (e: 'close'): void
 }>()
@@ -75,7 +75,12 @@ function injectionStateLabel(channel: Channel | null): string {
           <div class="m26-inject-row-head">
             <div class="flex items-center gap-2 min-w-0 flex-1">
               <span class="m26-inject-model" :title="result.model">{{ result.model }}</span>
-              <button class="m26-model-copy-btn" title="复制模型名称" @click.stop="emit('copy-model', result.model)">
+              <button
+                class="m26-model-copy-btn"
+                :title="props.copiedModelId === result.model ? '已复制模型名称' : '复制模型名称'"
+                :aria-label="props.copiedModelId === result.model ? `已复制模型名称 ${result.model}` : `复制模型名称 ${result.model}`"
+                @click.stop="emit('copy-model', result.model)"
+              >
                 <svg v-if="props.copiedModelId !== result.model" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                   <rect x="5" y="5" width="8" height="8" rx="1.5" />
                   <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
@@ -83,7 +88,6 @@ function injectionStateLabel(channel: Channel | null): string {
                 <svg v-else viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="#059669" stroke-width="2.2" aria-hidden="true">
                   <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
                 </svg>
-                <span>{{ props.copiedModelId === result.model ? '已复制' : '复制' }}</span>
               </button>
             </div>
             <div class="flex items-center gap-2">
@@ -100,7 +104,12 @@ function injectionStateLabel(channel: Channel | null): string {
                 </svg>
                 <span class="m26-inject-content-title">模型返回的提示词内容（需人工判断）:</span>
               </div>
-              <button class="m26-model-copy-btn" title="复制完整注入 Prompt 内容" @click.stop="emit('copy-content', result.content)">
+              <button
+                class="m26-model-copy-btn"
+                :title="props.copiedInjectionText === result.content ? '已复制注入 Prompt 内容' : '复制完整注入 Prompt 内容'"
+                :aria-label="props.copiedInjectionText === result.content ? '已复制注入 Prompt 内容' : '复制完整注入 Prompt 内容'"
+                @click.stop="emit('copy-content', result.content)"
+              >
                 <svg v-if="props.copiedInjectionText !== result.content" viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                   <rect x="5" y="5" width="8" height="8" rx="1.5" />
                   <path d="M3 11V3a1.5 1.5 0 0 1 1.5-1.5h8" />
@@ -108,7 +117,6 @@ function injectionStateLabel(channel: Channel | null): string {
                 <svg v-else viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#059669" stroke-width="2.2" aria-hidden="true">
                   <polyline points="13.5 4.5 6.5 11.5 2.5 7.5" />
                 </svg>
-                <span>{{ props.copiedInjectionText === result.content ? '已复制 Prompt' : '复制 Prompt' }}</span>
               </button>
             </div>
             <pre class="m26-inject-content">{{ result.content }}</pre>
@@ -131,14 +139,14 @@ function injectionStateLabel(channel: Channel | null): string {
           <span class="m26-spin-dot"></span>
           <span>正在向上游探测系统提示词注入，请稍候...</span>
         </span>
-        <span v-else class="m26-inject-tip">真实上游请求 · 输入 token 数仅作参考，建议优先检测主模型</span>
+        <span v-else class="m26-inject-tip">真实上游请求 · 输入 token 数仅作参考，可先检测首个模型</span>
       </div>
       <div class="m26-inject-footer-actions">
-        <button class="m26-inject-btn secondary" :disabled="props.checking" title="仅检测主模型（推荐，速度快且省 Token）" @click="emit('check-primary')">
+        <button class="m26-inject-btn secondary" :disabled="props.checking" title="仅检测首个模型（推荐，速度快且省 Token）" @click="emit('check-one')">
           <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
             <circle cx="8" cy="8" r="6" /><circle cx="8" cy="8" r="2" />
           </svg>
-          <span>{{ props.checking ? '检测中...' : '检测主模型' }}</span>
+          <span>{{ props.checking ? '检测中...' : '检测首个模型' }}</span>
         </button>
         <button class="m26-inject-btn primary" :disabled="props.checking" title="逐一检测全部模型（耗时可能较长）" @click="emit('check-all')">
           <span v-if="props.checking" class="m26-spin-dot white"></span>

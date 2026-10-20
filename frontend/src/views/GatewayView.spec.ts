@@ -11,7 +11,6 @@ import LogDetailContent from '@/components/logs/LogDetailContent.vue'
 import LogsView from '@/components/logs/LogsView.vue'
 import StorageSettings from '@/components/settings/StorageSettings.vue'
 import DesktopGeneralSettings from '@/components/settings/DesktopGeneralSettings.vue'
-import ClientsView from '@/components/clients/ClientsView.vue'
 import { listChannels, updateChannel, duplicateChannel, deleteChannel, updateSettings, getSystemInfo, detectChannelProtocol, fetchUpstreamModels, probeChannelDetails, injectionCheck, subscribeLogs, type ApiChannel, type SystemInfo } from '@/services/gatewayApi'
 import { writeValue } from '@/services/storage'
 import { _resetDetectedProtocolsCacheForTest, getChannelDetectedProtocols, saveChannelDetectedProtocols } from '@/services/channelProtocols'
@@ -27,7 +26,6 @@ vi.mock('@/services/gatewayApi', async (importOriginal) => ({
   probeChannelDetails: vi.fn(),
   injectionCheck: vi.fn(),
   updateSettings: vi.fn().mockResolvedValue(false),
-  getGatewayKey: vi.fn().mockResolvedValue('test'),
   getCustomModelMappings: vi.fn().mockResolvedValue({}),
   getSystemInfo: vi.fn().mockResolvedValue(null),
   listLogs: vi.fn().mockResolvedValue([]),
@@ -121,7 +119,7 @@ describe('GatewayView channel persistence', () => {
     if (action === 'modal') {
       grid.vm.$emit('open-inject', grid.props('channels')[0])
       await flushPromises()
-      wrapper.findComponent(ChannelInjectionContent).vm.$emit('check-primary')
+      wrapper.findComponent(ChannelInjectionContent).vm.$emit('check-one')
     } else if (action === 'batch') {
       content.vm.$emit('batch-action', 'injection')
       await flushPromises()
@@ -152,7 +150,7 @@ describe('GatewayView channel persistence', () => {
     grid.vm.$emit('open-inject', grid.props('channels')[0])
     await flushPromises()
     const modal = wrapper.findComponent(ChannelInjectionContent)
-    modal.vm.$emit('check-primary')
+    modal.vm.$emit('check-one')
     await flushPromises()
     expect(modal.props('results')).toHaveLength(1)
     expect(modal.props('results')[0].state).toBe('clean')
@@ -232,7 +230,6 @@ describe('GatewayView channel persistence', () => {
     await flushPromises()
     const manager = wrapper.findComponent(ChannelModelManager)
     expect(manager.props('modelNames')).toEqual(['second-model'])
-    expect(manager.props('primaryModel')).toBe('second-model')
     expect(manager.props('isFetching')).toBe(false)
   })
 
@@ -263,7 +260,6 @@ describe('GatewayView channel persistence', () => {
     await flushPromises()
     const manager = wrapper.findComponent(ChannelModelManager)
     expect(manager.props('modelNames')).toEqual(change === 'models' ? ['manual-model'] : ['model'])
-    expect(manager.props('primaryModel')).toBe('model')
     expect(manager.props('isFetching')).toBe(false)
   })
 
@@ -595,7 +591,7 @@ describe('GatewayView channel persistence', () => {
 })
 
 describe('GatewayView settings persistence', () => {
-  for (const key of ['log_retention_days', 'log_max_count', 'routing_strategy', 'hide_dock_icon'] as const) {
+  for (const key of ['log_retention_days', 'log_max_count', 'hide_dock_icon'] as const) {
     it.each([[false, true], [true, false], [false, false], [true, true]])(
       `${key} serializes rapid edits and rolls back to the last confirmed value (%s, %s)`, async (firstOk, secondOk) => {
         const wrapper = shallowMount(GatewayView, { global: { stubs: { StorageSettings: false } } })
@@ -604,19 +600,13 @@ describe('GatewayView settings persistence', () => {
         await flushPromises()
         const storage = wrapper.findComponent(StorageSettings)
         const general = wrapper.findComponent(DesktopGeneralSettings)
-        if (key === 'routing_strategy') {
-          await wrapper.findAll('button').find(button => button.text() === '客户端')!.trigger('click')
-          await flushPromises()
-        }
-        const current = () => key === 'routing_strategy' ? wrapper.findComponent(ClientsView).props('routingStrategy')
-          : key === 'hide_dock_icon' ? general.props('hideDockIcon')
+        const current = () => key === 'hide_dock_icon' ? general.props('hideDockIcon')
           : storage.props(key === 'log_retention_days' ? 'logRetentionDays' : 'logMaxCount')
         const initial = current()
-        const first = key === 'routing_strategy' ? 'smart_quality' : key === 'hide_dock_icon' ? true : key === 'log_retention_days' ? 30 : 1000
-        const second = key === 'routing_strategy' ? 'round_robin' : key === 'hide_dock_icon' ? false : key === 'log_retention_days' ? 14 : 3000
+        const first = key === 'hide_dock_icon' ? true : key === 'log_retention_days' ? 30 : 1000
+        const second = key === 'hide_dock_icon' ? false : key === 'log_retention_days' ? 14 : 3000
         const edit = async (value: typeof first | typeof second) => {
-          if (key === 'routing_strategy') wrapper.findComponent(ClientsView).vm.$emit('update-routing-strategy', value)
-          else if (key === 'hide_dock_icon') general.vm.$emit('update:hide-dock-icon', value)
+          if (key === 'hide_dock_icon') general.vm.$emit('update:hide-dock-icon', value)
           else await storage.findAll('select')[key === 'log_retention_days' ? 0 : 1]!.setValue(String(value))
           await flushPromises()
         }
@@ -716,30 +706,9 @@ describe('GatewayView settings persistence', () => {
     await flushPromises()
     expect(general.props('hideDockIcon')).toBe(mode === 'saved')
 
-    await wrapper.findAll('button').find(button => button.text() === '客户端')!.trigger('click')
-    await flushPromises()
-    if (mode === 'disconnected') await refresh()
-    const clients = wrapper.findComponent(ClientsView)
-    const initialStrategy = clients.props('routingStrategy')
-    clients.vm.$emit('update-routing-strategy', 'round_robin')
-    await flushPromises()
-    expect(clients.props('routingStrategy')).toBe(mode === 'saved' ? 'round_robin' : initialStrategy)
-    if (mode === 'disconnected') {
-      expect(updateSettings).not.toHaveBeenCalled()
-      expect(wrapper.find('.m26-toast-text').text()).toContain('未保存')
-      vi.mocked(listChannels).mockResolvedValue([channel()])
-      await refresh()
-      vi.mocked(updateSettings).mockResolvedValue(true)
-      clients.vm.$emit('update-routing-strategy', 'round_robin')
-      await flushPromises()
-      expect(updateSettings).toHaveBeenCalledWith({ routing_strategy: 'round_robin' })
-      expect(clients.props('routingStrategy')).toBe('round_robin')
-    } else {
-      expect(updateSettings).toHaveBeenCalledWith({ log_retention_days: 30 })
-      expect(updateSettings).toHaveBeenCalledWith({ log_max_count: 1000 })
-      expect(updateSettings).toHaveBeenCalledWith({ routing_strategy: 'round_robin' })
-      if (mode === 'rejected') expect(wrapper.find('.m26-toast-text').text()).toContain('未保存')
-    }
+    expect(updateSettings).toHaveBeenCalledWith({ log_retention_days: 30 })
+    expect(updateSettings).toHaveBeenCalledWith({ log_max_count: 1000 })
+    if (mode === 'rejected') expect(wrapper.find('.m26-toast-text').text()).toContain('未保存')
     expect(writeValue).not.toHaveBeenCalled()
   })
 })

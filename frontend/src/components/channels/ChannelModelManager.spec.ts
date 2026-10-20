@@ -6,7 +6,6 @@ import ChannelModelManager from './ChannelModelManager.vue'
 function mountManager(overrides: Partial<InstanceType<typeof ChannelModelManager>['$props']> = {}) {
   return mount(ChannelModelManager, {
     props: {
-      primaryModel: 'gpt-4o',
       modelNames: ['gpt-4o', 'gpt-4o-mini'],
       ...overrides,
     },
@@ -18,12 +17,11 @@ describe('ChannelModelManager', () => {
     const wrapper = mountManager()
     expect(wrapper.text()).not.toContain('周期探活')
     expect(wrapper.text()).not.toContain('可用模型')
-    expect(wrapper.find('.m26-primary-model-box').exists()).toBe(false)
     expect(wrapper.get('.m26-add-bar .m26-mgr-fetch-btn').text()).toBe('获取模型')
     expect(wrapper.get('.m26-count-pill').text()).toBe('2')
     expect(wrapper.get('.m26-add-bar input').attributes('placeholder')).toContain('输入模型名称')
   })
-  it('adds pasted model names, removes duplicates, and keeps the existing primary', async () => {
+  it('adds pasted model names and removes duplicates', async () => {
     const wrapper = mountManager()
     const input = wrapper.get('.m26-add-bar input')
 
@@ -33,30 +31,26 @@ describe('ChannelModelManager', () => {
     expect(wrapper.emitted('update:modelNames')).toEqual([
       [['gpt-4o', 'gpt-4o-mini', 'claude-3']],
     ])
-    expect(wrapper.emitted('update:primaryModel')).toBeUndefined()
   })
 
-  it('reassigns the primary model when the current one is removed', async () => {
+  it('removes a model without assigning a special model slot', async () => {
     const wrapper = mountManager()
 
-    await wrapper.get('.m26-tag-capsule.is-primary .tag-del-btn').trigger('click')
+    await wrapper.get('button[aria-label="移除模型 gpt-4o"]').trigger('click')
 
     expect(wrapper.emitted('update:modelNames')).toEqual([[['gpt-4o-mini']]])
-    expect(wrapper.emitted('update:primaryModel')).toEqual([['gpt-4o-mini']])
   })
 
-  it('selects another model as primary and emits a fetch request', async () => {
+  it('emits a fetch request without selecting a special model slot', async () => {
     const wrapper = mountManager()
 
-    await wrapper.get('.tag-set-btn').trigger('click')
     await wrapper.get('.m26-mgr-fetch-btn').trigger('click')
 
-    expect(wrapper.emitted('update:primaryModel')).toEqual([['gpt-4o-mini']])
     expect(wrapper.emitted('fetchUpstream')).toHaveLength(1)
   })
 
-  it('deduplicates text mode input and promotes its first model when needed', async () => {
-    const wrapper = mountManager({ primaryModel: 'removed-model', modelNames: ['removed-model'] })
+  it('deduplicates text mode input', async () => {
+    const wrapper = mountManager({ modelNames: ['removed-model'] })
 
     const textModeToggle = wrapper
       .findAll('button')
@@ -65,6 +59,5 @@ describe('ChannelModelManager', () => {
     await wrapper.get('textarea').setValue('claude-3\nclaude-3\ngpt-4o')
 
     expect(wrapper.emitted('update:modelNames')).toContainEqual([['claude-3', 'gpt-4o']])
-    expect(wrapper.emitted('update:primaryModel')).toContainEqual(['claude-3'])
   })
 })

@@ -27,6 +27,7 @@ pub struct BackupChannel {
     pub name: String,
     pub url: String,
     pub protocol: String,
+    #[serde(default)]
     pub primary_model: String,
     #[serde(default)]
     pub model_names: Vec<String>,
@@ -60,13 +61,16 @@ fn validate(backup: &Backup) -> Result<()> {
     }
     for channel in &backup.channels {
         let keys = channel_keys(channel);
+        let has_models = std::iter::once(&channel.primary_model)
+            .chain(&channel.model_names)
+            .any(|model| !model.trim().is_empty());
         if channel.name.trim().is_empty()
             || channel.url.trim().is_empty()
-            || channel.primary_model.trim().is_empty()
+            || !has_models
             || keys.is_empty()
         {
             return Err(StoreError::Invalid(
-                "渠道名称、地址、主模型和 Key 列表必须完整".into(),
+                "渠道名称、地址、模型列表和 Key 列表必须完整".into(),
             ));
         }
         if !["anthropic", "openai-compatible", "openai-responses"]
@@ -101,6 +105,7 @@ fn validate(backup: &Backup) -> Result<()> {
             endpoint: channel.url.clone(),
             api_key: String::new(),
             primary_model: channel.primary_model.clone(),
+            extra_models: channel.model_names.clone(),
             ..Default::default()
         })
         .map_err(|_| StoreError::Invalid("渠道地址或模型配置无效".into()))?;

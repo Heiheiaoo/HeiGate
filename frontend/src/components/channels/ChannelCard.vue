@@ -86,6 +86,7 @@ const isCircuitOpen = computed(() => {
 })
 
 const modelCount = computed(() => c.value.modelNames?.length ?? 0)
+const summaryModel = computed(() => c.value.modelNames?.[0] || c.value.primaryModel || '未配置模型')
 
 function onCardClick() {
   if (window.getSelection()?.toString().trim()) return
@@ -130,7 +131,7 @@ function onModelHighlightClick() {
         <span
           class="m26-card-status"
           :class="statusBadgeClass(c.status)"
-          :title="c.lastError ? `探活主模型 [${c.primaryModel || '默认'}] 状态: ${statusText(c.status)} (${c.lastError})` : `探活主模型 [${c.primaryModel || '默认'}] 状态: ${statusText(c.status)}`"
+          :title="c.lastError ? `最近探活状态: ${statusText(c.status)} (${c.lastError})` : `最近探活状态: ${statusText(c.status)}`"
           @click="c.status !== 'healthy' && c.lastError ? emit('open-diagnostic', c) : null"
         >
           <span class="status-dot"></span>
@@ -158,7 +159,7 @@ function onModelHighlightClick() {
       <span>熔断冷却保护中 (连续失败 {{ c.failureCount }} 次)</span>
     </div>
 
-    <!-- Middle Body: Primary Model -->
+    <!-- Middle Body: Configured Models -->
     <div
       class="m26-model-highlight"
       title="点击打开此渠道模型面板与实时探活"
@@ -169,8 +170,8 @@ function onModelHighlightClick() {
           <rect x="2.5" y="2.5" width="11" height="11" rx="3" />
           <path d="M5.5 8h5M8 5.5v5" stroke-linecap="round" />
         </svg>
-        <span class="m26-model-name font-mono truncate" :title="`探活主模型: ${c.primaryModel || '默认模型'}`">
-          {{ c.primaryModel || '默认模型' }}
+        <span class="m26-model-name font-mono truncate" :title="`模型 ID 示例: ${summaryModel}`">
+          {{ summaryModel }}
         </span>
       </div>
 
@@ -204,8 +205,8 @@ function onModelHighlightClick() {
         <button
           v-if="c.status !== 'healthy' && c.lastError"
           class="m26-metric-pill error icon-only"
-          :title="`查看主模型报错排障建议: ${c.lastError}`"
-          :aria-label="`查看主模型报错排障建议: ${c.lastError}`"
+          :title="`查看渠道探活报错排障建议: ${c.lastError}`"
+          :aria-label="`查看渠道探活报错排障建议: ${c.lastError}`"
           @click.stop="emit('open-diagnostic', c)"
         >
           <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
@@ -219,7 +220,7 @@ function onModelHighlightClick() {
           v-else
           class="m26-metric-pill latency"
           :class="{ degraded: c.status === 'degraded' }"
-          :title="`探活主模型 [${c.primaryModel || '默认'}] 首字响应 (TTFT): ${formatLatencySec(c.ttft ?? c.latency)}`"
+          :title="`最近一次渠道探活首字响应 (TTFT): ${formatLatencySec(c.ttft ?? c.latency)}`"
         >
           <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" class="metric-icon">
             <path d="M9 1.5L3.5 8.5H8L7 14.5L12.5 7.5H8L9 1.5Z" stroke-linejoin="round" />

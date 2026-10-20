@@ -57,15 +57,14 @@ impl ProbeRunner {
         }
     }
 
-    /// Runs the lightweight channel health check: only the primary model is
-    /// called, because it drives the channel headline status, routing priority,
-    /// circuit breaker, and adaptive schedule.
+    /// Runs the lightweight channel health check against the first configured
+    /// model. The result updates the channel-level headline status.
     pub async fn probe_now(&self, id: i64) -> Result<Vec<ProbeResult>, RunnerError> {
         self.probe(id, "", false, None).await
     }
 
-    /// Checks one explicitly selected model. When it is the channel's current
-    /// primary model, the normal health/circuit bookkeeping is persisted.
+    /// Checks one explicitly selected model and persists normal channel and
+    /// model health bookkeeping.
     pub async fn probe_model_now(
         &self,
         id: i64,
@@ -111,16 +110,16 @@ impl ProbeRunner {
             return Err(RunnerError::Disabled);
         }
 
-        let probed_primary = channel.primary_model.clone();
         let models = if !target_model.is_empty() {
             vec![target_model.to_string()]
         } else if all_models {
-            let mut models = vec![probed_primary.clone()];
-            models.extend(channel.extra_models.clone());
-            models
+            channel.configured_models()
         } else {
-            vec![probed_primary.clone()]
+            channel.first_model().into_iter().collect()
         };
+        if models.is_empty() {
+            return Err(RunnerError::Store("渠道未配置模型".into()));
+        }
         let mut results = Vec::new();
         for model in models {
             let lease = self

@@ -1,84 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Channel } from '@/components/channels/types'
-import hermesLogoUrl from '@/assets/icons/hermes.png'
-import GatewayAccessSettings from '@/components/settings/GatewayAccessSettings.vue'
-import RoutingSettings from '@/components/settings/RoutingSettings.vue'
-import type { GlobalRouteStrategy } from '@/views/GatewayView.vue'
-import { getClientConfigs, updateClientConfig, probeClientConnection, getCodexConfigStatus, applyCodexConfig, restoreCodexConfig } from '@/services/gatewayApi'
-import type { CodexApplyOptions } from '@/services/gatewayApi'
 import {
-  getCanonicalGroupKey,
-  selectCanonicalDisplayName,
-} from '@/services/modelNaming'
-import {
-  type ClientPlatformId,
-  type ClientMode,
-  type ClientPlatformItem,
-  type ClientGatewayStrategy,
-  filterChannelsForPlatform,
-} from './types'
+  getClientConfigs,
+  getGatewayConnection,
+  updateClientConfig,
+  type ClientPlatformBackendConfig,
+} from '@/services/gatewayApi'
+import type { GatewayConnectionInfo } from '@/services/gatewayApi'
+import { type ClientPlatformId, type ClientPlatformItem, type ClientGatewayStrategy } from './types'
 
-const props = withDefaults(
-  defineProps<{
-    channels: Channel[]
-    gatewayBaseUrl?: string
-    gatewayKey?: string
-    routingStrategy?: GlobalRouteStrategy
-    customModelMappings?: Record<string, string>
-  }>(),
-  {
-    gatewayBaseUrl: 'http://127.0.0.1:28888/v1',
-    gatewayKey: '',
-    routingStrategy: 'smart_quality',
-    customModelMappings: () => ({}),
-  }
-)
+const props = defineProps<{ channels: Channel[] }>()
 
-const emit = defineEmits<{
-  'update-routing-strategy': [strategy: GlobalRouteStrategy]
-}>()
-
-const activePlatformId = ref<ClientPlatformId>('hermes')
-const showDiff = ref(false)
-const testState = ref<{ [K in ClientPlatformId]?: 'testing' | 'success' | 'failed' | null }>({})
-const testMessage = ref<{ [K in ClientPlatformId]?: string }>({})
-const saveState = ref<Partial<Record<ClientPlatformId, 'saving' | 'success' | 'error'>>>({})
-const saveMessage = ref<Partial<Record<ClientPlatformId, string>>>({})
-const copiedKey = ref(false)
-const copiedPath = ref(false)
-const copiedEnv = ref(false)
-const finderTip = ref('')
-const showGenericApiKey = ref(false)
-const codexConfigStatus = ref<Awaited<ReturnType<typeof getCodexConfigStatus>> | null>(null)
-const codexLocalActionBusy = ref(false)
-
-const maskedGenericApiKey = computed(() => {
-  const k = props.gatewayKey || ''
-  if (!k) return '••••••••'
-  if (k.length <= 16) return '••••••••'
-  return `${k.slice(0, 8)}••••••••${k.slice(-6)}`
-})
-
-// 平台展示顺序：Hermes -> Codex -> Claude Desktop -> Claude Code -> 通用
-const PLATFORM_ORDER: ClientPlatformId[] = ['hermes', 'codex', 'claude-desktop', 'claude-code', 'generic']
-
-// 初始默认平台列表及各自个性化配置
 const platforms = ref<Record<ClientPlatformId, ClientPlatformItem>>({
   'hermes': {
     id: 'hermes',
     name: 'Hermes',
-    categoryLabel: '全能自主智能体',
-    description: '自主智能体系统，深度融合长上下文思考与多工具调用，依托 HeiGate 网关专享调度。',
-    configPath: '~/.hermes/config.yaml',
-    supportedModes: ['gateway'],
-    activeMode: 'gateway',
-    direct: {
-      channelName: '',
-      endpoint: '',
-      apiKey: '',
-      model: '',
-    },
     gateway: {
       strategy: 'smart_quality',
       allowedChannels: [],
@@ -86,114 +23,8 @@ const platforms = ref<Record<ClientPlatformId, ClientPlatformItem>>({
       fallbackChannel: '',
       allowedModels: [],
     },
-    status: 'stopped',
-    fileStatus: 'synced',
-    lastBackupTime: '刚刚',
-  },
-  'codex': {
-    id: 'codex',
-    name: 'Codex',
-    categoryLabel: 'OpenAI 规范编程工具',
-    description: 'OpenAI 生态代码辅助工具与终端智能体，支持官方协议直连与网关容灾调度。',
-    configPath: '~/.codex/config.toml',
-    supportedModes: ['direct', 'gateway'],
-    activeMode: 'direct',
-    direct: {
-      channelName: '',
-      endpoint: '',
-      apiKey: '',
-      model: 'gpt-4o',
-    },
-    gateway: {
-      strategy: 'smart_quality',
-      allowedChannels: [],
-      model: 'gpt-4o',
-      fallbackChannel: '',
-      allowedModels: [],
-    },
-    status: 'stopped',
-    fileStatus: 'synced',
-    lastBackupTime: '刚刚',
-  },
-  'claude-desktop': {
-    id: 'claude-desktop',
-    name: 'Claude Desktop',
-    categoryLabel: 'macOS 原生桌面应用',
-    description: 'Anthropic 官方桌面应用，支持多窗口交互与原生 MCP (Model Context Protocol) 本地插件服务。',
-    configPath: '~/Library/Application Support/Claude/claude_desktop_config.json',
-    supportedModes: ['direct', 'gateway'],
-    activeMode: 'direct',
-    direct: {
-      channelName: '',
-      endpoint: '',
-      apiKey: '',
-      model: 'claude-3-7-sonnet-latest',
-    },
-    gateway: {
-      strategy: 'smart_quality',
-      allowedChannels: [],
-      model: 'claude-3-7-sonnet-latest',
-      fallbackChannel: '',
-      allowedModels: [],
-    },
-    status: 'stopped',
-    fileStatus: 'synced',
-    lastBackupTime: '刚刚',
-  },
-  'claude-code': {
-    id: 'claude-code',
-    name: 'Claude Code',
-    categoryLabel: 'Anthropic 终端 CLI',
-    description: 'Anthropic 官方终端智能体，深度集成 Bash 执行、全局代码重构与双模型架构。',
-    configPath: '~/.claude.json',
-    supportedModes: ['direct', 'gateway'],
-    activeMode: 'direct',
-    direct: {
-      channelName: '',
-      endpoint: '',
-      apiKey: '',
-      model: 'claude-3-7-sonnet-latest',
-      smallModel: 'claude-3-5-haiku-latest',
-    },
-    gateway: {
-      strategy: 'latency',
-      allowedChannels: [],
-      model: 'claude-3-7-sonnet-latest',
-      fallbackChannel: '',
-      allowedModels: [],
-    },
-    status: 'stopped',
-    fileStatus: 'synced',
-    lastBackupTime: '刚刚',
-  },
-  'generic': {
-    id: 'generic',
-    name: '通用',
-    categoryLabel: '标准 API 网关',
-    description: 'Cursor / Windsurf / Cline / Continue / Python SDK 等任何客户端的标准 OpenAI / Anthropic 协议接入。',
-    configPath: '标准 HTTP Bearer 鉴权',
-    supportedModes: ['gateway'],
-    activeMode: 'gateway',
-    direct: {
-      channelName: '',
-      endpoint: '',
-      apiKey: '',
-      model: '',
-    },
-    gateway: {
-      strategy: 'smart_quality',
-      allowedChannels: [],
-      model: 'gpt-4o',
-      fallbackChannel: '',
-      allowedModels: [],
-    },
-    status: 'running',
-    fileStatus: 'synced',
-    lastBackupTime: '实时在线',
-  },
+  }
 })
-
-const orderedPlatforms = computed(() => PLATFORM_ORDER.map((id) => platforms.value[id]))
 
 // 本地草稿恢复
 const STORAGE_KEY = 'heigate_client_platforms_draft'
@@ -215,11 +46,14 @@ if (typeof localStorage !== 'undefined') {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      for (const key of Object.keys(parsed) as ClientPlatformId[]) {
-        if (platforms.value[key]) {
-          platforms.value[key].activeMode = parsed[key].activeMode || platforms.value[key].activeMode
-          platforms.value[key].direct = { ...platforms.value[key].direct, ...parsed[key].direct, apiKey: '' }
-          platforms.value[key].gateway = { ...platforms.value[key].gateway, ...parsed[key].gateway }
+      const savedHermes = parsed?.hermes
+      if (savedHermes && typeof savedHermes === 'object') {
+        const legacySmallModel = savedHermes.smallModel ?? savedHermes.direct?.smallModel
+        if (typeof legacySmallModel === 'string') {
+          platforms.value.hermes.smallModel = legacySmallModel
+        }
+        if (savedHermes.gateway && typeof savedHermes.gateway === 'object') {
+          platforms.value.hermes.gateway = { ...platforms.value.hermes.gateway, ...savedHermes.gateway }
         }
       }
     }
@@ -239,312 +73,55 @@ watch(
 )
 
 onMounted(async () => {
-  try {
-    codexConfigStatus.value = await getCodexConfigStatus()
-  } catch {
-    codexConfigStatus.value = null
-  }
-  try {
-    const remoteConfigs = await getClientConfigs()
-    if (remoteConfigs && typeof remoteConfigs === 'object') {
-      for (const [id, cfg] of Object.entries(remoteConfigs)) {
-        const platId = id.replace('_', '-') as ClientPlatformId
-        if (platforms.value[platId]) {
-          if (cfg.strategy) platforms.value[platId].gateway.strategy = cfg.strategy as any
-          if (cfg.allowed_channels) platforms.value[platId].gateway.allowedChannels = cfg.allowed_channels
-          if (cfg.model) platforms.value[platId].gateway.model = cfg.model
-          if (cfg.small_model) platforms.value[platId].direct.smallModel = cfg.small_model
-          if (cfg.allowed_models) platforms.value[platId].gateway.allowedModels = cfg.allowed_models
-          if (platId === 'hermes') {
-            isHermesAutoEnabled.value = Boolean(cfg.auto_enabled ?? (cfg.model === 'Auto' || true))
-            if (cfg.auto_strategy) {
-              hermesStrategy.value = cfg.auto_strategy as any
-            } else if (cfg.strategy) {
-              hermesStrategy.value = cfg.strategy as any
-            }
-            if (cfg.allowed_channels && cfg.allowed_channels.length > 0) {
-              hermesSelectedChannels.value = [...cfg.allowed_channels]
-            }
-            if (cfg.allowed_models && cfg.allowed_models.length > 0) {
-              platforms.value['hermes'].gateway.allowedModels = [...cfg.allowed_models]
-            }
-          }
-        }
+  if (typeof localStorage !== 'undefined') {
+    try {
+      for (const key of [
+        'heigate_codex_access_profiles_v1',
+        'heigate_codex_active_profile_v1',
+        'heigate_codex_selected_profile_v1',
+      ]) {
+        localStorage.removeItem(key)
       }
+    } catch {
+      // Profile cleanup is best-effort; Hermes settings can still load.
+    }
+  }
+  try {
+    const [configs, connection] = await Promise.all([getClientConfigs(), getGatewayConnection()])
+    gatewayConnection.value = connection
+    const config = configs.hermes
+    if (config) {
+      if (config.strategy) platforms.value.hermes.gateway.strategy = config.strategy as ClientGatewayStrategy
+      if (config.allowed_channels) platforms.value.hermes.gateway.allowedChannels = config.allowed_channels
+      if (config.model) platforms.value.hermes.gateway.model = config.model
+      if (config.allowed_models) platforms.value.hermes.gateway.allowedModels = config.allowed_models
+      isHermesAutoEnabled.value = Boolean(config.auto_enabled ?? config.model === 'Auto')
+      hermesStrategy.value = (config.auto_strategy || config.strategy || 'smart_quality') as ClientGatewayStrategy
+      if (config.allowed_channels?.length) hermesSelectedChannels.value = [...config.allowed_channels]
+      if (config.allowed_models?.length) platforms.value.hermes.gateway.allowedModels = [...config.allowed_models]
     }
   } catch {
-    // 忽略远端加载错误
-  }
-})
-
-const currentPlatform = computed(() => platforms.value[activePlatformId.value])
-
-// 当前平台兼容的供应商列表
-const compatibleChannels = computed(() => {
-  return filterChannelsForPlatform(activePlatformId.value, props.channels)
-})
-
-// Codex 直连必须使用原生 Responses；走 HeiGate 网关时则可以利用网关的
-// 协议转换和故障转移，因此应把所有已启用的供应商纳入候选池。
-const codexGatewayChannels = computed(() => {
-  if (activePlatformId.value !== 'codex') return compatibleChannels.value
-  return props.channels.filter(channel => channel.enabled)
-})
-
-// 当切换平台或供应商列表更新时，如果当前直连供应商为空，自动选取第一个兼容渠道
-watch(
-  [activePlatformId, compatibleChannels],
-  ([platId, compChans]) => {
-    const plat = platforms.value[platId]
-    if (plat && plat.supportedModes.includes('direct')) {
-      if (!plat.direct.channelName && compChans.length > 0) {
-        selectDirectChannel(compChans[0].name)
-      } else {
-        const selected = compChans.find(channel => channel.name === plat.direct.channelName)
-        plat.direct.apiKey = selected?.apiKey || ''
-      }
-    }
-  },
-  { immediate: true }
-)
-
-function selectDirectChannel(channelName: string) {
-  const plat = currentPlatform.value
-  plat.direct.channelName = channelName
-  const found = props.channels.find((c) => c.name === channelName)
-  if (found) {
-    plat.direct.endpoint = found.url || ''
-    plat.direct.apiKey = found.apiKey || ''
-    const availableModels = found.modelNames && found.modelNames.length > 0 ? found.modelNames : found.primaryModel ? [found.primaryModel] : []
-    if (availableModels.length > 0 && !availableModels.includes(plat.direct.model)) {
-      plat.direct.model = availableModels[0]
-    }
-  }
-}
-
-const currentChannelModels = computed(() => {
-  const found = props.channels.find((c) => c.name === currentPlatform.value.direct.channelName)
-  if (!found) return []
-  const list = [...(found.modelNames || [])]
-  if (found.primaryModel && !list.includes(found.primaryModel)) {
-    list.unshift(found.primaryModel)
-  }
-  return list
-})
-
-const currentDirectChannel = computed(() => {
-  return props.channels.find((c) => c.name === currentPlatform.value.direct.channelName) || null
-})
-
-const codexDirectProtocolReady = computed(() => {
-  const channel = currentDirectChannel.value
-  return channel?.protocol === 'openai-responses' || channel?.supportsResponses === true
-})
-const codexDirectProtocolLabel = computed(() => {
-  if (codexDirectProtocolReady.value) return 'Responses 可用'
-  if (currentDirectChannel.value?.protocol === 'openai-compatible') return 'Chat 兼容，建议网关'
-  return '等待协议检测'
-})
-
-function switchMode(mode: ClientMode) {
-  if (currentPlatform.value.supportedModes.includes(mode)) {
-    currentPlatform.value.activeMode = mode
-  }
-}
-
-async function handleSave() {
-  const plat = currentPlatform.value
-  if (plat.id === 'hermes') {
-    await applyHermesConfig('save_only')
-    return
-  }
-  if (plat.id === 'codex') {
-    await applyCodexClientConfig()
-    return
-  }
-  saveState.value[plat.id] = 'saving'
-  saveMessage.value[plat.id] = ''
-  try {
-    if (plat.activeMode === 'direct') {
-      persistClientDraft()
-      saveMessage.value[plat.id] = '直连草稿已保存在此设备，请在客户端中手动配置并启动。'
-    } else {
-      const res = await updateClientConfig(plat.id, {
-        strategy: plat.gateway.strategy,
-        allowed_channels: plat.gateway.allowedChannels,
-        model: plat.gateway.model,
-        small_model: plat.direct.smallModel,
-        allowed_models: plat.gateway.allowedModels,
-      })
-      if (!res.ok) throw new Error(res.message || '保存失败，请检查网关连接')
-      saveMessage.value[plat.id] = '网关设置已保存，请在客户端中手动配置接入地址并启动。'
-    }
-    saveState.value[plat.id] = 'success'
-  } catch (error) {
-    saveState.value[plat.id] = 'error'
-    saveMessage.value[plat.id] = error instanceof Error ? error.message : '保存失败'
-  }
-}
-
-function codexModelsForApply(): string[] {
-  const models = currentChannelModels.value.map(model => model.trim()).filter(Boolean)
-  const selected = currentPlatform.value.activeMode === 'direct'
-    ? currentPlatform.value.direct.model.trim()
-    : currentPlatform.value.gateway.model.trim()
-  if (selected && !models.includes(selected)) models.unshift(selected)
-  return [...new Set(models)]
-}
-
-function codexGatewayModelsForApply(): string[] {
-  const selectedChannels = platforms.value.codex.gateway.allowedChannels
-  const channels = codexGatewayChannels.value.filter(channel => {
-    return selectedChannels.length === 0 || selectedChannels.includes(channel.name)
-  })
-  const models = channels.flatMap(channel => {
-    const names = [...(channel.modelNames || [])]
-    if (channel.primaryModel && !names.includes(channel.primaryModel)) names.unshift(channel.primaryModel)
-    return names
-  }).map(model => model.trim()).filter(Boolean)
-  const selected = platforms.value.codex.gateway.model.trim()
-  if (selected && !models.includes(selected)) models.unshift(selected)
-  return [...new Set(models)]
-}
-
-async function applyCodexClientConfig() {
-  const plat = platforms.value.codex
-  const direct = plat.activeMode === 'direct'
-  const channel = currentDirectChannel.value
-  saveState.value.codex = 'saving'
-  saveMessage.value.codex = ''
-  codexLocalActionBusy.value = true
-  try {
-    if (direct && !channel) throw new Error('请先选择供应商渠道')
-    if (direct && !codexDirectProtocolReady.value) {
-      throw new Error('当前渠道不是 Responses 协议，无法让 Codex 直连；请切换到网关模式或选择 Responses 渠道')
-    }
-    const models = direct ? codexModelsForApply() : codexGatewayModelsForApply()
-    if (models.length === 0) throw new Error('请先配置至少一个 Codex 模型')
-    if (!direct) {
-      const policy = await updateClientConfig('codex', {
-        strategy: plat.gateway.strategy,
-        allowed_channels: plat.gateway.allowedChannels,
-        model: plat.gateway.model,
-        allowed_models: plat.gateway.allowedModels,
-      })
-      if (!policy.ok) throw new Error(policy.message || '保存 Codex 网关策略失败')
-    }
-    const options: CodexApplyOptions = direct
-      ? {
-          model: plat.direct.model.trim() || models[0],
-          mode: 'direct',
-          channel_id: channel?.gatewayId,
-          models,
-          restart: true,
-        }
-      : {
-          model: plat.gateway.model.trim() || models[0],
-          mode: 'gateway',
-          models,
-          restart: true,
-        }
-    const result = await applyCodexConfig(options)
-    if (!result.ok) throw new Error(result.message || '应用 Codex 配置失败')
-    codexConfigStatus.value = result.config || await getCodexConfigStatus()
-    saveState.value.codex = 'success'
-    saveMessage.value.codex = result.message || (direct ? '已配置直连并重启 Codex' : '已配置网关并重启 Codex')
-    persistClientDraft()
-  } catch (error) {
-    saveState.value.codex = 'error'
-    saveMessage.value.codex = error instanceof Error ? error.message : '应用 Codex 配置失败'
+    // Keep the local Hermes defaults when the management API is unavailable.
   } finally {
-    codexLocalActionBusy.value = false
+    gatewayConfigLoaded.value = true
+    gatewayConfigSaveState.value = 'saved'
+    savedGatewayConfigSignature.value = JSON.stringify(sharedGatewayConfig.value)
   }
-}
-
-async function restoreCodexGatewayConfig() {
-  codexLocalActionBusy.value = true
-  saveState.value.codex = 'saving'
-  try {
-    const restored = await restoreCodexConfig()
-    if (!restored.ok) throw new Error(restored.message || '切回官方 Codex 失败')
-    codexConfigStatus.value = restored.config || await getCodexConfigStatus()
-    saveState.value.codex = 'success'
-    saveMessage.value.codex = restored.message || '已恢复接管前的 Codex 配置并重启'
-  } catch (error) {
-    saveState.value.codex = 'error'
-    saveMessage.value.codex = error instanceof Error ? error.message : '切回官方 Codex 失败'
-  } finally {
-    codexLocalActionBusy.value = false
-  }
-}
-
-async function copyText(text: string, isKey = false) {
-  try {
-    await navigator.clipboard.writeText(text)
-    if (isKey) {
-      copiedKey.value = true
-      setTimeout(() => (copiedKey.value = false), 2000)
-    } else {
-      copiedPath.value = true
-      setTimeout(() => (copiedPath.value = false), 2000)
-    }
-  } catch {
-    // 忽略剪贴板错误
-  }
-}
-
-const gatewayOrigin = computed(() => {
-  return props.gatewayBaseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '')
 })
-
-function getPlatformBaseUrl(id: ClientPlatformId): string {
-  const origin = gatewayOrigin.value
-  switch (id) {
-    case 'hermes':
-      return `${origin}/hermes/v1`
-    case 'codex':
-      return `${origin}/codex/v1`
-    case 'claude-desktop':
-      return `${origin}/claude_desktop/v1`
-    case 'claude-code':
-      return `${origin}/claude_code`
-    case 'generic':
-    default:
-      return `${origin}/v1`
-  }
-}
-
-function shellQuote(value: string): string {
-  return "'" + value.replaceAll("'", "'\"'\"'") + "'"
-}
-
-function envScript(platformId: ClientPlatformId): string {
-  const plat = platforms.value[platformId]
-  const direct = plat.activeMode === 'direct'
-  const base = direct ? plat.direct.endpoint : getPlatformBaseUrl(platformId)
-  const key = direct ? plat.direct.apiKey : props.gatewayKey
-  const prefix = platformId === 'claude-code' ? 'ANTHROPIC' : 'OPENAI'
-  return `export ${prefix}_BASE_URL=${shellQuote(base)}\nexport ${prefix}_API_KEY=${shellQuote(key || '')}`
-}
-
-async function copyEnvScript(platformId: ClientPlatformId) {
-  try {
-    await navigator.clipboard.writeText(envScript(platformId))
-    copiedEnv.value = true
-    setTimeout(() => (copiedEnv.value = false), 2500)
-  } catch {
-    copiedEnv.value = false
-  }
-}
-
 // Hermes 专享：供应商多选、模型多选与调度状态
 const hermesSelectedChannels = ref<string[]>([])
-const isApplyingLocalHermes = ref(false)
-const hermesActionMessage = ref<{ type: 'success' | 'error'; text: string } | null>(null)
 const isHermesAutoEnabled = ref(true)
 const showHermesAutoHelp = ref(false)
 const hermesStrategy = ref<ClientGatewayStrategy>('smart_quality')
 const isHermesStrategyDropdownOpen = ref(false)
+const gatewayConnection = ref<GatewayConnectionInfo | null>(null)
+const gatewayConfigLoaded = ref(false)
+const gatewayConfigSaveState = ref<'loading' | 'saving' | 'saved' | 'error'>('loading')
+const savedGatewayConfigSignature = ref('')
+const copiedGatewayField = ref<'address' | 'key' | null>(null)
+let gatewayConfigSaveTimer: ReturnType<typeof setTimeout> | undefined
+let pendingGatewayConfig: ClientPlatformBackendConfig | null = null
+let gatewayConfigSaveInFlight = false
 
 const hermesStrategyOptions = [
   { value: 'smart_quality' as const, label: '智能综合质量优先' },
@@ -719,27 +296,22 @@ const MODEL_FAMILY_LABELS: Record<string, string> = {
   other: '其他',
 }
 
-// 汇聚已选供应商的去重模型，按归并后的来 (Canonical / Merged Models)
-interface MergedModelItem {
+// List exact model IDs from the selected channels. Only case variants of the
+// same ID are deduplicated; aliases and model families are never merged.
+interface HermesModelItem {
   name: string
-  canonicalKey: string
-  rawNames: string[]
   providers: string[]
-  aliases: string[]
   familyKey: string
   familyLabel: string
 }
 
 const selectedHermesModelFamily = ref<string>('all')
 
-const hermesMergedModels = computed<MergedModelItem[]>(() => {
+const hermesAvailableModels = computed<HermesModelItem[]>(() => {
   const groupMap = new Map<string, {
-    canonicalKey: string
-    rawNames: Set<string>
+    name: string
     providers: Set<string>
   }>()
-
-  const mappings = props.customModelMappings || {}
 
   for (const ch of hermesAvailableChannels.value) {
     if (!hermesSelectedChannels.value.includes(ch.name)) continue
@@ -749,30 +321,22 @@ const hermesMergedModels = computed<MergedModelItem[]>(() => {
     for (const raw of list) {
       const trimmed = (raw || '').trim()
       if (!trimmed) continue
-      const groupKey = getCanonicalGroupKey(trimmed, mappings) || trimmed.toLowerCase()
+      const groupKey = trimmed.toLowerCase()
       const current = groupMap.get(groupKey) || {
-        canonicalKey: groupKey,
-        rawNames: new Set<string>(),
+        name: trimmed,
         providers: new Set<string>(),
       }
-      current.rawNames.add(trimmed)
       current.providers.add(ch.name)
       groupMap.set(groupKey, current)
     }
   }
 
-  const result: MergedModelItem[] = []
-  groupMap.forEach((data, groupKey) => {
-    const allRaw = Array.from(data.rawNames)
-    const displayName = selectCanonicalDisplayName(allRaw, mappings) || allRaw[0]
-    const aliases = allRaw.filter((r) => r.toLowerCase() !== displayName.toLowerCase())
-    const family = getModelFamily(displayName)
+  const result: HermesModelItem[] = []
+  groupMap.forEach((data) => {
+    const family = getModelFamily(data.name)
     result.push({
-      name: displayName,
-      canonicalKey: groupKey,
-      rawNames: allRaw,
+      name: data.name,
       providers: Array.from(data.providers),
-      aliases,
       familyKey: family.key,
       familyLabel: family.label,
     })
@@ -784,11 +348,11 @@ const hermesMergedModels = computed<MergedModelItem[]>(() => {
 // 图二模型分类 Tabs
 const hermesModelFamilyTabs = computed(() => {
   const counts: Record<string, number> = {}
-  hermesMergedModels.value.forEach((m) => {
+  hermesAvailableModels.value.forEach((m) => {
     const fam = m.familyKey
     counts[fam] = (counts[fam] || 0) + 1
   })
-  const tabs = [{ key: 'all', label: '全部', count: hermesMergedModels.value.length }]
+  const tabs = [{ key: 'all', label: '全部', count: hermesAvailableModels.value.length }]
   MODEL_FAMILY_ORDER.forEach((k) => {
     if (counts[k]) {
       tabs.push({ key: k, label: MODEL_FAMILY_LABELS[k] || k, count: counts[k] })
@@ -798,10 +362,10 @@ const hermesModelFamilyTabs = computed(() => {
 })
 
 const allHermesAvailableModelNames = computed<string[]>(() => {
-  return hermesMergedModels.value.map((m) => m.name)
+  return hermesAvailableModels.value.map((m) => m.name)
 })
 
-// 有效已选模型：严格限定在当前已选供应商的归并模型池中
+// Limit the selectable IDs to models exposed by the selected channels.
 const effectiveHermesAllowedModels = computed<string[]>({
   get() {
     const list = platforms.value['hermes']?.gateway.allowedModels || []
@@ -823,7 +387,7 @@ watch(
     if (!platforms.value['hermes']) return
     const current = platforms.value['hermes'].gateway.allowedModels || []
     const valid = current.filter((m) => available.includes(m))
-    // 如果之前保存的模型无任何交集（例如切换了完全不同的供应商），或者未初始化过，则默认全选当前供应商的归并模型
+    // If saved choices no longer match the selected channels, select their current IDs.
     if (valid.length === 0 && available.length > 0) {
       platforms.value['hermes'].gateway.allowedModels = [...available]
       platforms.value['hermes'].gateway.model = available[0]
@@ -838,7 +402,7 @@ watch(
 )
 
 const filteredHermesModels = computed(() => {
-  let list = hermesMergedModels.value
+  let list = hermesAvailableModels.value
   if (selectedHermesModelFamily.value !== 'all') {
     list = list.filter((m) => m.familyKey === selectedHermesModelFamily.value)
   }
@@ -895,7 +459,7 @@ function selectAllHermesModels() {
   if (selectedHermesModelFamily.value === 'all') {
     platforms.value['hermes'].gateway.allowedModels = [...allHermesAvailableModelNames.value]
   } else {
-    const familyModels = hermesMergedModels.value
+    const familyModels = hermesAvailableModels.value
       .filter((m) => m.familyKey === selectedHermesModelFamily.value)
       .map((m) => m.name)
     const set = new Set([...effectiveHermesAllowedModels.value, ...familyModels])
@@ -911,7 +475,7 @@ function clearHermesModels() {
     platforms.value['hermes'].gateway.allowedModels = []
   } else {
     const familyModels = new Set(
-      hermesMergedModels.value
+      hermesAvailableModels.value
         .filter((m) => m.familyKey === selectedHermesModelFamily.value)
         .map((m) => m.name)
     )
@@ -926,7 +490,7 @@ const isAllHermesModelsSelected = computed(() => {
       effectiveHermesAllowedModels.value.length === allHermesAvailableModelNames.value.length
     )
   }
-  const familyModels = hermesMergedModels.value
+  const familyModels = hermesAvailableModels.value
     .filter((m) => m.familyKey === selectedHermesModelFamily.value)
     .map((m) => m.name)
   return (
@@ -946,277 +510,98 @@ function toggleAllHermesModels() {
 }
 
 
-async function applyHermesConfig(action: 'restart' | 'launch_terminal' | 'save_only') {
-  isApplyingLocalHermes.value = true
-  hermesActionMessage.value = null
-  try {
-    const plat = platforms.value['hermes']
-    const allowedChannels = hermesSelectedChannels.value.length > 0
-      ? hermesSelectedChannels.value
-      : (plat.gateway.allowedChannels || [])
-    const allowedModels = effectiveHermesAllowedModels.value.length > 0
-      ? effectiveHermesAllowedModels.value
-      : allHermesAvailableModelNames.value
-    const effectiveModel = isHermesAutoEnabled.value
+const sharedGatewayConfig = computed<ClientPlatformBackendConfig>(() => {
+  const platform = platforms.value.hermes
+  const allowedModels = effectiveHermesAllowedModels.value.length > 0
+    ? [...effectiveHermesAllowedModels.value]
+    : [...allHermesAvailableModelNames.value]
+
+  return {
+    strategy: hermesStrategy.value,
+    allowed_channels: [...hermesSelectedChannels.value],
+    model: isHermesAutoEnabled.value
       ? 'Auto'
-      : (allowedModels[0] || plat.gateway.model || 'Auto')
-    const payload = {
-      strategy: hermesStrategy.value,
-      allowed_channels: allowedChannels,
-      model: effectiveModel,
-      small_model: plat.direct.smallModel,
-      allowed_models: allowedModels,
-      auto_enabled: isHermesAutoEnabled.value,
-      auto_strategy: hermesStrategy.value,
-      auto_models: allowedModels,
-      apply_local: action !== 'save_only',
-      restart: action === 'restart',
-      launch_terminal: action === 'launch_terminal',
-    }
-    const res = await updateClientConfig('hermes', payload)
-    if (res && res.ok) {
-      hermesActionMessage.value = {
-        type: 'success',
-        text: res.message || (action === 'restart' ? '✅ 已更新 ~/.hermes/config.yaml 并成功重启 Hermes 网关！' : action === 'launch_terminal' ? '💻 已更新配置并在终端启动 Hermes！' : '💾 Hermes 配置已成功保存！'),
-      }
-    } else {
-      hermesActionMessage.value = {
-        type: 'error',
-        text: res?.message || '❌ 保存失败，请检查服务连接',
-      }
-    }
-  } catch (err: any) {
-    hermesActionMessage.value = {
-      type: 'error',
-      text: `❌ 操作异常: ${err?.message || err}`,
-    }
-  } finally {
-    isApplyingLocalHermes.value = false
+      : (allowedModels[0] || platform.gateway.model || 'Auto'),
+    allowed_models: allowedModels,
+    auto_enabled: isHermesAutoEnabled.value,
+    auto_strategy: hermesStrategy.value,
+    auto_models: allowedModels,
+    apply_local: false,
+    restart: false,
+    launch_terminal: false,
   }
-}
-
-
-function revealInFinder() {
-  const folderPath = '~/Library/Application Support/Claude/'
-  void copyText(folderPath)
-  finderTip.value = '已复制目录路径！在 Finder 中按 Cmd+Shift+G 即可直达'
-  setTimeout(() => (finderTip.value = ''), 4000)
-}
-
-function quickSelectModel(modelName: string, isDirect = false) {
-  if (isDirect) {
-    currentPlatform.value.direct.model = modelName
-  } else {
-    currentPlatform.value.gateway.model = modelName
-  }
-}
-
-function quickSelectSmallModel(modelName: string) {
-  currentPlatform.value.direct.smallModel = modelName
-}
-
-async function runTestConnection() {
-  const plat = currentPlatform.value
-  if (testState.value[plat.id] === 'testing') return
-  testState.value[plat.id] = 'testing'
-  testMessage.value[plat.id] = '正在请求上游模型...'
-  try {
-    const channel = props.channels.find(c => c.name === plat.direct.channelName)
-    if (!channel || !plat.direct.endpoint || !plat.direct.apiKey || !plat.direct.model.trim()) {
-      throw new Error('请先选择供应商，并配置有效的密钥和模型')
-    }
-    const result = await probeClientConnection({
-      provider: channel.protocol === 'anthropic' ? 'anthropic' : 'openai',
-      api_mode: channel.protocol === 'openai-responses' ? 'responses' : 'chat_completions',
-      endpoint: plat.direct.endpoint,
-      api_key: plat.direct.apiKey,
-      primary_model: plat.direct.model,
-    })
-    const succeeded = result.status === 'operational' || result.status === 'degraded'
-    testState.value[plat.id] = succeeded ? 'success' : 'failed'
-    testMessage.value[plat.id] = succeeded
-      ? `模型响应成功${result.latencyMs != null ? ` · 实测延迟 ${result.latencyMs}ms` : ''}`
-      : (result.message || '上游模型未成功响应')
-  } catch (error) {
-    testState.value[plat.id] = 'failed'
-    testMessage.value[plat.id] = error instanceof Error ? error.message : '探测失败，请检查网络'
-  }
-}
-
-function toggleGatewayChannel(chanName: string) {
-  const list = currentPlatform.value.gateway.allowedChannels
-  const idx = list.indexOf(chanName)
-  if (idx >= 0) {
-    list.splice(idx, 1)
-  } else {
-    list.push(chanName)
-  }
-}
-
-// 接入信息预览不读取或假定客户端本地配置。
-const diffPreview = computed(() => {
-  const plat = currentPlatform.value
-  const keyDisplay = props.gatewayKey ? `${props.gatewayKey.slice(0, 8)}****************` : 'hg_********************************'
-  if (plat.id === 'hermes') {
-    const allowed = (effectiveHermesAllowedModels.value.length > 0)
-      ? effectiveHermesAllowedModels.value.join(', ')
-      : (allHermesAvailableModelNames.value.join(', ') || 'Auto')
-    const effectiveModel = isHermesAutoEnabled.value
-      ? 'Auto'
-      : (effectiveHermesAllowedModels.value[0] || plat.gateway.model || 'Auto')
-    return `# ~/.hermes/config.yaml
-model:
-  default: ${effectiveModel}
-  provider: bend
-  base_url: ${getPlatformBaseUrl('hermes')}
-  key_env: HERMES_CUSTOM_BEND_API_KEY
-providers:
-  bend:
-    name: 本地网关
-    base_url: ${getPlatformBaseUrl('hermes')}
-    model: ${effectiveModel}
-    discover_models: true
-    models: [${allowed}]
-# ~/.hermes/.env
-HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
-  }
-
-  return JSON.stringify({
-    客户端: plat.name,
-    接入方式: plat.activeMode === 'direct' ? '直连草稿' : '网关设置',
-    地址: plat.activeMode === 'direct' ? plat.direct.endpoint : getPlatformBaseUrl(plat.id),
-    模型: plat.activeMode === 'direct' ? plat.direct.model : plat.gateway.model,
-    密钥: '已隐藏',
-    说明: '接入设置预览；请手动配置客户端。本页未读取本地配置文件。',
-  }, null, 2)
 })
+
+async function flushGatewayConfig() {
+  if (gatewayConfigSaveInFlight || !pendingGatewayConfig) return
+  const payload = pendingGatewayConfig
+  pendingGatewayConfig = null
+  gatewayConfigSaveInFlight = true
+  const result = await updateClientConfig('hermes', payload)
+  gatewayConfigSaveInFlight = false
+
+  if (pendingGatewayConfig) {
+    gatewayConfigSaveState.value = 'saving'
+    if (!gatewayConfigSaveTimer) void flushGatewayConfig()
+    return
+  }
+
+  if (result.ok) {
+    savedGatewayConfigSignature.value = JSON.stringify(payload)
+    gatewayConfigSaveState.value = 'saved'
+  } else {
+    gatewayConfigSaveState.value = 'error'
+  }
+}
+
+watch(sharedGatewayConfig, (payload) => {
+  if (!gatewayConfigLoaded.value) return
+  if (JSON.stringify(payload) === savedGatewayConfigSignature.value) return
+
+  pendingGatewayConfig = payload
+  gatewayConfigSaveState.value = 'saving'
+  if (gatewayConfigSaveTimer) clearTimeout(gatewayConfigSaveTimer)
+  gatewayConfigSaveTimer = setTimeout(() => {
+    gatewayConfigSaveTimer = undefined
+    void flushGatewayConfig()
+  }, 350)
+}, { deep: true })
+
+async function copyGatewayField(field: 'address' | 'key') {
+  const value = field === 'address'
+    ? gatewayConnection.value?.base_url
+    : gatewayConnection.value?.api_key
+  if (!value) return
+
+  try {
+    await navigator.clipboard.writeText(value)
+    copiedGatewayField.value = field
+    setTimeout(() => {
+      if (copiedGatewayField.value === field) copiedGatewayField.value = null
+    }, 1600)
+  } catch {
+    copiedGatewayField.value = null
+  }
+}
+
+onBeforeUnmount(() => {
+  if (gatewayConfigSaveTimer) {
+    clearTimeout(gatewayConfigSaveTimer)
+    gatewayConfigSaveTimer = undefined
+  }
+  if (pendingGatewayConfig) void flushGatewayConfig()
+})
+
+
 </script>
 
 <template>
   <div class="m26-clients-layout">
-    <!-- 顶部：5 联独立客户端切换卡片 (Horizontal Separate Bento Cards) -->
-    <nav class="m26-clients-nav-deck" aria-label="客户端平台选择">
-      <button
-        v-for="plat in orderedPlatforms"
-        :key="plat.id"
-        class="m26-client-tab-card"
-        :class="[plat.id, { active: activePlatformId === plat.id }]"
-        :title="plat.name"
-        @click="activePlatformId = plat.id"
-      >
-        <!-- 品牌图标盒 -->
-        <div class="m26-tab-logo-box" :class="plat.id">
-          <!-- Hermes: Nous Research 官方动漫头像 -->
-          <template v-if="plat.id === 'hermes'">
-            <img :src="hermesLogoUrl" alt="Hermes" class="m26-deck-hermes-img" />
-          </template>
-
-          <!-- Codex: OpenAI 官方螺旋徽标 -->
-          <template v-else-if="plat.id === 'codex'">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
-              <path d="M21.55 10.004a5.416 5.416 0 00-.478-4.501c-1.217-2.09-3.662-3.166-6.05-2.66A5.59 5.59 0 0010.831 1C8.39.995 6.224 2.546 5.473 4.838A5.553 5.553 0 001.76 7.496a5.487 5.487 0 00.691 6.5 5.416 5.416 0 00.477 4.502c1.217 2.09 3.662 3.165 6.05 2.66A5.586 5.586 0 0013.168 23c2.443.006 4.61-1.546 5.361-3.84a5.553 5.553 0 003.715-2.66 5.488 5.488 0 00-.693-6.497v.001zm-8.381 11.558a4.199 4.199 0 01-2.675-.954c.034-.018.093-.05.132-.074l4.44-2.53a.71.71 0 00.364-.623v-6.176l1.877 1.069c.02.01.033.029.036.05v5.115c-.003 2.274-1.87 4.118-4.174 4.123zM4.192 17.78a4.059 4.059 0 01-.498-2.763c.032.02.09.055.131.078l4.44 2.53c.225.13.504.13.73 0l5.42-3.088v2.138a.068.068 0 01-.027.057L9.9 19.288c-1.999 1.136-4.552.46-5.707-1.51h-.001zM3.023 8.216A4.15 4.15 0 015.198 6.41l-.002.151v5.06a.711.711 0 00.364.624l5.42 3.087-1.876 1.07a.067.067 0 01-.063.005l-4.489-2.559c-1.995-1.14-2.679-3.658-1.53-5.63h.001zm15.417 3.54l-5.42-3.088L14.896 7.6a.067.067 0 01.063-.006l4.489 2.557c1.998 1.14 2.683 3.662 1.529 5.633a4.163 4.163 0 01-2.174 1.807V12.38a.71.71 0 00-.363-.623zm1.867-2.773a6.04 6.04 0 00-.132-.078l-4.44-2.53a.731.731 0 00-.729 0l-5.42 3.088V7.325a.068.068 0 01.027-.057L14.1 4.713c2-1.137 4.555-.46 5.707 1.513.487.833.664 1.809.499 2.757h.001zm-11.741 3.81l-1.877-1.068a.065.065 0 01-.036-.051V6.559c.001-2.277 1.873-4.122 4.181-4.12.976 0 1.92.338 2.671.954-.034.018-.092.05-.131.073l-4.44 2.53a.71.71 0 00-.365.623l-.003 6.173v.002zm1.02-2.168L12 9.25l2.414 1.375v2.75L12 14.75l-2.415-1.375v-2.75z" />
-            </svg>
-          </template>
-
-          <!-- Claude Desktop: 官方 Claude 标志 + 桌面角标 -->
-          <template v-else-if="plat.id === 'claude-desktop'">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="#D97757">
-              <path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" />
-            </svg>
-            <span class="m26-glyph-badge desktop">
-              <svg viewBox="0 0 24 24" width="8" height="8" fill="none" stroke="currentColor" stroke-width="2.5">
-                <rect x="2" y="3" width="20" height="14" rx="2" />
-                <line x1="8" y1="21" x2="16" y2="21" />
-                <line x1="12" y1="17" x2="12" y2="21" />
-              </svg>
-            </span>
-          </template>
-
-          <!-- Claude Code: 官方 Claude 标志 + 终端角标 -->
-          <template v-else-if="plat.id === 'claude-code'">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="#D97757">
-              <path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" />
-            </svg>
-            <span class="m26-glyph-badge terminal">
-              <svg viewBox="0 0 24 24" width="8" height="8" fill="none" stroke="currentColor" stroke-width="3">
-                <polyline points="4 17 10 11 4 5" />
-                <line x1="12" y1="19" x2="20" y2="19" />
-              </svg>
-            </span>
-          </template>
-
-          <!-- 通用: 插件/通用接入徽标 -->
-          <template v-else-if="plat.id === 'generic'">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 22v-5" />
-              <path d="M9 8V2" />
-              <path d="M15 2v6" />
-              <path d="M18 8v5a6 6 0 0 1-12 0V8z" />
-            </svg>
-          </template>
-        </div>
-
-        <!-- 平台名称 -->
-        <div class="m26-tab-info">
-          <span class="m26-client-tab-name">{{ plat.name }}</span>
-        </div>
-      </button>
-    </nav>
-
-    <!-- 工作区主体：每个平台专属定制视图 -->
     <main class="m26-clients-workspace">
-      <!-- 平台专属头部卡片 (Header) - Hermes 采用直接配置，无需冗余横幅 -->
-      <section v-if="currentPlatform.id !== 'hermes'" class="m26-client-hero-card">
-        <div class="m26-hero-content">
-          <div class="m26-hero-avatar" :class="currentPlatform.id">
-            <template v-if="currentPlatform.id === 'codex'">
-              <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor">
-                <path d="M21.55 10.004a5.416 5.416 0 00-.478-4.501c-1.217-2.09-3.662-3.166-6.05-2.66A5.59 5.59 0 0010.831 1C8.39.995 6.224 2.546 5.473 4.838A5.553 5.553 0 001.76 7.496a5.487 5.487 0 00.691 6.5 5.416 5.416 0 00.477 4.502c1.217 2.09 3.662 3.165 6.05 2.66A5.586 5.586 0 0013.168 23c2.443.006 4.61-1.546 5.361-3.84a5.553 5.553 0 003.715-2.66 5.488 5.488 0 00-.693-6.497v.001zm-8.381 11.558a4.199 4.199 0 01-2.675-.954c.034-.018.093-.05.132-.074l4.44-2.53a.71.71 0 00.364-.623v-6.176l1.877 1.069c.02.01.033.029.036.05v5.115c-.003 2.274-1.87 4.118-4.174 4.123zM4.192 17.78a4.059 4.059 0 01-.498-2.763c.032.02.09.055.131.078l4.44 2.53c.225.13.504.13.73 0l5.42-3.088v2.138a.068.068 0 01-.027.057L9.9 19.288c-1.999 1.136-4.552.46-5.707-1.51h-.001zM3.023 8.216A4.15 4.15 0 015.198 6.41l-.002.151v5.06a.711.711 0 00.364.624l5.42 3.087-1.876 1.07a.067.067 0 01-.063.005l-4.489-2.559c-1.995-1.14-2.679-3.658-1.53-5.63h.001zm15.417 3.54l-5.42-3.088L14.896 7.6a.067.067 0 01.063-.006l4.489 2.557c1.998 1.14 2.683 3.662 1.529 5.633a4.163 4.163 0 01-2.174 1.807V12.38a.71.71 0 00-.363-.623zm1.867-2.773a6.04 6.04 0 00-.132-.078l-4.44-2.53a.731.731 0 00-.729 0l-5.42 3.088V7.325a.068.068 0 01.027-.057L14.1 4.713c2-1.137 4.555-.46 5.707 1.513.487.833.664 1.809.499 2.757h.001zm-11.741 3.81l-1.877-1.068a.065.065 0 01-.036-.051V6.559c.001-2.277 1.873-4.122 4.181-4.12.976 0 1.92.338 2.671.954-.034.018-.092.05-.131.073l-4.44 2.53a.71.71 0 00-.365.623l-.003 6.173v.002zm1.02-2.168L12 9.25l2.414 1.375v2.75L12 14.75l-2.415-1.375v-2.75z" />
-              </svg>
-            </template>
-            <template v-else-if="currentPlatform.id === 'claude-desktop' || currentPlatform.id === 'claude-code'">
-              <svg viewBox="0 0 24 24" width="26" height="26" fill="#D97757">
-                <path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" />
-              </svg>
-            </template>
-            <template v-else>
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 22v-5" /><path d="M9 8V2" /><path d="M15 2v6" /><path d="M18 8v5a6 6 0 0 1-12 0V8z" />
-              </svg>
-            </template>
-          </div>
 
-          <div class="m26-hero-info">
-            <div class="flex items-center gap-2">
-              <h2 class="m26-hero-title">{{ currentPlatform.name }}</h2>
-              <span class="m26-hero-badge">{{ currentPlatform.categoryLabel }}</span>
-
-              <span v-if="currentPlatform.id === 'claude-code'" class="m26-hero-badge-cli">Terminal CLI</span>
-            </div>
-            <p class="m26-hero-desc">{{ currentPlatform.description }}</p>
-            <div v-if="finderTip" class="text-xs text-indigo-600 mt-1 font-medium animate-pulse">
-              {{ finderTip }}
-            </div>
-          </div>
-        </div>
-
-        <div class="m26-hero-actions">
-          <button class="m26-btn-ghost" :disabled="saveState[currentPlatform.id] === 'saving' || isApplyingLocalHermes" @click="handleSave()">
-            {{ saveState[currentPlatform.id] === 'saving' ? '正在应用并重启...' : currentPlatform.id === 'codex' ? '一键配置并重启 Codex' : currentPlatform.activeMode === 'direct' ? '保存直连草稿' : '保存网关设置' }}
-          </button>
-        </div>
-      </section>
-
-      <p v-if="saveMessage[currentPlatform.id]" role="status" :class="saveState[currentPlatform.id] === 'error' ? 'text-red-600' : 'text-emerald-700'">
-        {{ saveMessage[currentPlatform.id] }}
-      </p>
-
-      <!-- =================================================================== -->
-      <!-- 1. HERMES 专享精简配置视图 (整体重新设计：双栏资源池展示齐全 + Auto 与调度模式紧密结合) -->
-      <!-- =================================================================== -->
-      <template v-if="currentPlatform.id === 'hermes'">
+      <!-- Hermes 专享调度配置。 -->
         <div class="m26-hermes-redesign-container">
-          <!-- 1. 顶部控制栏：Auto 智能模型容灾调度 + 调度模式 + 保存并重启 (统一整合面板) -->
+          <!-- 顶部控制栏：Auto 调度策略与统一网关连接信息。 -->
           <div class="m26-hermes-top-panel m26-hermes-bottom-panel m26-hermes-auto-card" :class="{ 'auto-enabled': isHermesAutoEnabled }">
             <div class="m26-bottom-panel-main">
               <!-- 左侧流式组合：是否启用AUTO - 开关 - 下拉选择框 - 帮助icon -->
@@ -1354,26 +739,37 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
                 </div>
               </div>
 
-              <!-- 右侧：保存并重启主按钮 (已移除 ~/.hermes/config.yaml) -->
-              <div class="m26-panel-right-group">
-                <button
-                  type="button"
-                  class="m26-btn-save-restart"
-                  :disabled="isApplyingLocalHermes"
-                  @click="applyHermesConfig('restart')"
-                >
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" :class="{ 'animate-spin': isApplyingLocalHermes }">
-                    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-                  </svg>
-                  <span>{{ isApplyingLocalHermes ? '正在保存并重启...' : '保存并重启' }}</span>
-                </button>
+              <div class="m26-panel-right-group" aria-label="统一网关连接信息">
+                <div class="m26-connection-field">
+                  <span class="m26-connection-label">统一地址</span>
+                  <code class="m26-connection-value" :title="gatewayConnection?.base_url || (gatewayConfigLoaded ? '连接信息读取失败' : '连接信息加载中')">
+                    {{ gatewayConnection?.base_url || (gatewayConfigLoaded ? '连接信息读取失败' : '连接信息加载中…') }}
+                  </code>
+                  <button
+                    type="button"
+                    class="m26-connection-copy"
+                    :disabled="!gatewayConnection?.base_url"
+                    :title="copiedGatewayField === 'address' ? '已复制地址' : '复制地址'"
+                    @click="copyGatewayField('address')"
+                  >{{ copiedGatewayField === 'address' ? '已复制' : '复制' }}</button>
+                </div>
+                <div class="m26-connection-field">
+                  <span class="m26-connection-label">API Key</span>
+                  <code class="m26-connection-value" :title="gatewayConnection?.api_key || (gatewayConfigLoaded ? '连接信息读取失败' : '连接信息加载中')">
+                    {{ gatewayConnection?.api_key || (gatewayConfigLoaded ? '连接信息读取失败' : '连接信息加载中…') }}
+                  </code>
+                  <button
+                    type="button"
+                    class="m26-connection-copy"
+                    :disabled="!gatewayConnection?.api_key"
+                    :title="copiedGatewayField === 'key' ? '已复制 Key' : '复制 Key'"
+                    @click="copyGatewayField('key')"
+                  >{{ copiedGatewayField === 'key' ? '已复制' : '复制' }}</button>
+                </div>
+                <span v-if="gatewayConfigSaveState !== 'saved'" class="m26-config-sync-state" :class="gatewayConfigSaveState" aria-live="polite">
+                  {{ gatewayConfigSaveState === 'saving' ? '配置同步中…' : gatewayConfigSaveState === 'error' ? '配置同步失败' : '配置加载中…' }}
+                </span>
               </div>
-            </div>
-
-            <!-- 操作结果反馈条 -->
-            <div v-if="hermesActionMessage" class="m26-panel-feedback-bar" :class="hermesActionMessage.type">
-              <span class="text-xs font-medium">{{ hermesActionMessage.text }}</span>
-              <button type="button" class="m26-feedback-close" @click="hermesActionMessage = null">✕</button>
             </div>
           </div>
 
@@ -1436,7 +832,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
                     </span>
                     <span class="m26-panel-badge">
                       {{ selectedHermesModelFamily === 'all'
-                        ? `${effectiveHermesAllowedModels.length}/${hermesMergedModels.length}`
+                        ? `${effectiveHermesAllowedModels.length}/${hermesAvailableModels.length}`
                         : `${currentFilterSelectedCount}/${filteredHermesModels.length}` }}
                     </span>
                   </div>
@@ -1494,12 +890,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
                     <div class="flex flex-col min-w-0">
                       <div class="flex items-center gap-2">
                         <span class="m26-model-title font-mono" :title="item.name">{{ item.name }}</span>
-                        <span v-if="item.rawNames.length > 1" class="m26-merged-pill">
-                          归并 {{ item.rawNames.length }} 源
-                        </span>
-                      </div>
-                      <div v-if="item.aliases.length > 0" class="m26-model-aliases" :title="item.rawNames.join(', ')">
-                        别名: {{ item.aliases.slice(0, 2).join(', ') }}{{ item.aliases.length > 2 ? '...' : '' }}
                       </div>
                     </div>
                   </div>
@@ -1514,690 +904,12 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
             </div>
           </div>
 </div>
-      </template>
-
-      <!-- =================================================================== -->
-      <!-- 2. CODEX 定制视图 (OpenAI 协议编程工具与终端助手)                       -->
-      <!-- =================================================================== -->
-      <template v-else-if="currentPlatform.id === 'codex'">
-        <!-- 接入模式：先选择请求路径，再配置对应参数 -->
-        <section class="m26-client-mode-strip">
-          <div class="m26-mode-strip-left">
-            <div class="m26-mode-strip-label">接入方式</div>
-            <div class="m26-mode-strip-copy">
-              <strong>{{ currentPlatform.activeMode === 'direct' ? '直连供应商' : 'HeiGate 网关' }}</strong>
-              <span>{{ currentPlatform.activeMode === 'direct' ? '请求直接发送到选中的 Responses 供应商' : '由本地网关统一调度、转换协议并故障转移' }}</span>
-            </div>
-          </div>
-
-          <div class="m26-mode-segmented">
-            <button
-              class="m26-mode-btn"
-              :class="{ active: currentPlatform.activeMode === 'direct' }"
-              @click="switchMode('direct')"
-            >
-              <span class="m26-mode-dot direct"></span>
-              <span>直连供应商</span>
-            </button>
-            <button
-              class="m26-mode-btn"
-              :class="{ active: currentPlatform.activeMode === 'gateway' }"
-              @click="switchMode('gateway')"
-            >
-              <span class="m26-mode-dot gateway"></span>
-              <span>HeiGate 网关</span>
-            </button>
-          </div>
-        </section>
-
-        <!-- 模式 A：Codex 直连 Responses 供应商 -->
-        <section v-if="currentPlatform.activeMode === 'direct'" class="m26-client-config-card">
-          <div class="m26-codex-section-heading">
-            <div>
-              <div class="m26-config-title">直连配置</div>
-              <div class="m26-config-subtitle">Codex 直接访问供应商，不经过 HeiGate 网关；应用时由本地后端选择该模型当前可用的一把 Key，后续请求不参与 HeiGate 的多 Key 轮换与故障转移。协议检测针对端点，目录中的每个模型仍需供应商支持 Responses。</div>
-            </div>
-            <span class="m26-config-status-pill" :class="codexDirectProtocolReady ? 'ready' : currentDirectChannel ? 'warning' : 'muted'">
-              <span class="m26-status-dot"></span>
-              {{ codexDirectProtocolLabel }}
-            </span>
-          </div>
-
-          <div v-if="compatibleChannels.length === 0" class="m26-empty-config-state">
-            <div class="m26-empty-config-title">暂无可直连的 Responses 供应商</div>
-            <div class="m26-empty-config-desc">请先在“供应商”中添加并确认支持 OpenAI Responses 的渠道。仅支持 Chat Completions 的渠道请切换到 HeiGate 网关模式。</div>
-          </div>
-
-          <div v-else class="m26-codex-direct-layout">
-            <div class="m26-codex-direct-main">
-              <div class="m26-form-group">
-                <label class="m26-form-label">供应商渠道 <span class="m26-label-hint">选择一个已配置的 Responses 渠道</span></label>
-                <div class="m26-select-wrap">
-                  <select
-                    class="m26-select m26-select-emphasis"
-                    :value="currentPlatform.direct.channelName"
-                    @change="selectDirectChannel(($event.target as HTMLSelectElement).value)"
-                  >
-                    <option value="" disabled>请选择 Responses 供应商</option>
-                    <option
-                      v-for="chan in compatibleChannels"
-                      :key="chan.name"
-                      :value="chan.name"
-                    >
-                      {{ chan.name }} · {{ chan.models || (chan.modelNames || []).length }} 个模型
-                    </option>
-                  </select>
-                </div>
-              </div>
-
-              <div v-if="currentDirectChannel" class="m26-direct-channel-meta">
-                <div class="m26-direct-meta-item">
-                  <span class="m26-direct-meta-label">请求地址</span>
-                  <code :title="currentDirectChannel.url">{{ currentDirectChannel.url }}</code>
-                </div>
-                <div class="m26-direct-meta-item">
-                  <span class="m26-direct-meta-label">渠道状态</span>
-                  <span class="m26-channel-health" :class="currentDirectChannel.status">{{ currentDirectChannel.status === 'healthy' ? '健康' : currentDirectChannel.status === 'degraded' ? '降级' : '待检测' }}</span>
-                </div>
-              </div>
-
-              <div class="m26-form-group">
-                <div class="flex items-center justify-between gap-3">
-                  <label class="m26-form-label">默认模型 <span class="m26-label-hint">Codex 启动后优先使用</span></label>
-                  <span v-if="currentChannelModels.length" class="m26-model-count-pill">{{ currentChannelModels.length }} 个可用模型</span>
-                </div>
-                <input
-                  v-model="currentPlatform.direct.model"
-                  type="text"
-                  class="m26-input m26-input-model"
-                  list="codex-models-list"
-                  placeholder="从下方模型目录选择，或输入模型 ID"
-                />
-                <datalist id="codex-models-list">
-                  <option v-for="m in currentChannelModels" :key="m" :value="m" />
-                </datalist>
-                <div v-if="currentChannelModels.length" class="m26-model-suggestions" aria-label="当前渠道模型">
-                  <button v-for="model in currentChannelModels.slice(0, 5)" :key="model" type="button" class="m26-model-suggestion" :class="{ selected: currentPlatform.direct.model === model }" @click="currentPlatform.direct.model = model">
-                    {{ model }}
-                  </button>
-                  <span v-if="currentChannelModels.length > 5" class="m26-model-more">+{{ currentChannelModels.length - 5 }} 个</span>
-                </div>
-              </div>
-            </div>
-
-            <aside class="m26-codex-catalog-summary">
-              <div class="m26-catalog-summary-head">
-                <div>
-                  <div class="m26-catalog-title">模型目录</div>
-                  <div class="m26-catalog-subtitle">应用配置时同步到 Codex 选择器</div>
-                </div>
-                <span class="m26-catalog-count">{{ currentChannelModels.length }}</span>
-              </div>
-              <div v-if="currentChannelModels.length" class="m26-catalog-list">
-                <code v-for="model in currentChannelModels" :key="model">{{ model }}</code>
-              </div>
-              <div v-else class="m26-catalog-empty">该渠道暂未配置模型</div>
-              <div class="m26-catalog-note">目录来自当前渠道的主模型和附加模型，不会修改供应商配置。</div>
-            </aside>
-          </div>
-
-          <div class="m26-codex-direct-footer">
-            <div class="m26-test-row">
-              <button
-                class="m26-btn-test"
-                :disabled="!currentPlatform.direct.channelName || testState['codex'] === 'testing'"
-                @click="runTestConnection"
-              >
-                <span>{{ testState['codex'] === 'testing' ? '正在检测...' : '测试直连' }}</span>
-              </button>
-              <span v-if="testMessage['codex']" class="m26-test-result-msg" :class="testState['codex']">
-                {{ testMessage['codex'] }}
-              </span>
-            </div>
-            <span class="m26-footer-hint">点击顶部“一键配置并重启 Codex”后自动写入配置、同步目录并重启。</span>
-          </div>
-        </section>
-
-        <!-- 模式 B：Codex 走 HeiGate 网关 -->
-        <section v-else class="m26-client-config-card">
-          <div class="m26-config-head">
-            <div class="m26-config-title">Codex 专属网关调度策略</div>
-            <div class="m26-config-subtitle">通过本地网关代理 Codex 请求，提供多渠道故障容灾避让</div>
-          </div>
-
-          <div class="m26-config-form">
-            <div class="m26-form-group">
-              <label class="m26-form-label">调度分发算法</label>
-              <div class="m26-strategy-cards">
-                <div
-                  class="m26-strategy-card"
-                  :class="{ selected: currentPlatform.gateway.strategy === 'smart_quality' }"
-                  @click="currentPlatform.gateway.strategy = 'smart_quality'"
-                >
-                  <div class="m26-strategy-title">智能综合质量</div>
-                  <div class="m26-strategy-desc">动态优选当前最健康的可用渠道</div>
-                </div>
-                <div
-                  class="m26-strategy-card"
-                  :class="{ selected: currentPlatform.gateway.strategy === 'latency' }"
-                  @click="currentPlatform.gateway.strategy = 'latency'"
-                >
-                  <div class="m26-strategy-title">最低延迟优先</div>
-                  <div class="m26-strategy-desc">针对代码补全场景极速响应</div>
-                </div>
-                <div
-                  class="m26-strategy-card"
-                  :class="{ selected: currentPlatform.gateway.strategy === 'round_robin' }"
-                  @click="currentPlatform.gateway.strategy = 'round_robin'"
-                >
-                  <div class="m26-strategy-title">轮询负载均衡</div>
-                  <div class="m26-strategy-desc">候选渠道间均衡负载轮流分发</div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 可用供应商池 -->
-            <div class="m26-form-group">
-              <label class="m26-form-label">参与 Codex 调度的供应商渠道</label>
-              <div class="m26-checkbox-grid">
-                <label
-                  v-for="chan in codexGatewayChannels"
-                  :key="chan.name"
-                  class="m26-checkbox-item"
-                  :class="{ checked: currentPlatform.gateway.allowedChannels.includes(chan.name) }"
-                >
-                  <input
-                    type="checkbox"
-                    class="sr-only"
-                    :checked="currentPlatform.gateway.allowedChannels.includes(chan.name)"
-                    @change="toggleGatewayChannel(chan.name)"
-                  />
-                  <span class="m26-checkbox-box"></span>
-                  <span class="m26-checkbox-text">{{ chan.name }}</span>
-                  <span class="m26-checkbox-proto">{{ chan.protocol }}</span>
-                </label>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="m26-client-config-card">
-          <div class="m26-config-head">
-            <div class="m26-config-title">本机 Codex 状态</div>
-            <div class="m26-config-subtitle">HeiGate 接管时会暂时切换 Codex 配置；此处可恢复接管前配置并重启。若之前使用官方 Codex，即可切回官方。不会修改 auth.json。</div>
-          </div>
-          <div class="flex flex-wrap items-center gap-3">
-            <span class="text-sm text-neutral-600">
-              配置：{{ codexConfigStatus?.path || currentPlatform.configPath }}
-              <template v-if="codexConfigStatus">· {{ codexConfigStatus.managed ? (codexConfigStatus.provider === 'heigate_direct' ? '已接入直连' : '已接入 HeiGate 网关') : codexConfigStatus.parse_error ? '配置无法解析' : '尚未接入' }}</template>
-            </span>
-            <span v-if="codexConfigStatus?.catalog_managed" class="text-xs text-neutral-500">模型目录已同步</span>
-            <button v-if="codexConfigStatus && (codexConfigStatus.managed || codexConfigStatus.catalog_managed || (codexConfigStatus.parse_error && codexConfigStatus.backup_exists))" class="m26-btn-ghost" :disabled="codexLocalActionBusy" @click="restoreCodexGatewayConfig">
-              {{ codexLocalActionBusy ? '正在切回…' : '切回官方并重启' }}
-            </button>
-          </div>
-          <p v-if="codexConfigStatus?.parse_error" class="mt-2 text-sm text-red-600">{{ codexConfigStatus.parse_error }}</p>
-        </section>
-
-        <!-- Codex 专属亮点：CLI 环境变量快捷复制 -->
-        <section class="m26-cli-env-card">
-          <div class="m26-cli-env-head">
-            <span class="m26-cli-env-title">💻 Codex 终端环境命令 (一行快速生效)</span>
-            <button class="m26-btn-ghost-sm" @click="copyEnvScript('codex')">
-              {{ copiedEnv ? '已复制环境变量' : '复制终端 export 命令' }}
-            </button>
-          </div>
-          <pre class="m26-cli-code"><code>{{ envScript('codex') }}</code></pre>
-        </section>
-
-        <!-- 配置文件保护与 Diff -->
-        <section class="m26-config-guard-card">
-          <div class="m26-guard-header" @click="showDiff = !showDiff">
-            <div class="flex items-center gap-2">
-              <svg class="text-emerald-500" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-              </svg>
-              <span class="m26-guard-title">Codex 接入设置预览</span>
-            </div>
-            <span class="m26-guard-toggle">
-              {{ showDiff ? '收起配置详情 ▲' : '查看接入设置 ▼' }}
-            </span>
-          </div>
-          <div v-if="showDiff" class="m26-diff-box">
-            <pre class="m26-diff-code"><code>{{ diffPreview }}</code></pre>
-          </div>
-        </section>
-      </template>
-
-      <!-- =================================================================== -->
-      <!-- 3. CLAUDE DESKTOP 定制视图 (macOS 原生客户端 · 核心 MCP 保护)         -->
-      <!-- =================================================================== -->
-      <template v-else-if="currentPlatform.id === 'claude-desktop'">
-        <!-- Claude Desktop 专属重点：MCP 工具安全防护卡片 -->
-        <section class="m26-mcp-banner-card">
-          <div class="m26-mcp-banner-icon">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-              <polyline points="9 12 11 14 15 10" />
-            </svg>
-          </div>
-          <div class="m26-mcp-banner-body">
-            <div class="m26-mcp-banner-title">Claude Desktop 接入说明</div>
-            <div class="m26-mcp-banner-desc">
-              此页用于整理接入设置，目前不读取或写入 Claude Desktop 本地文件。请先确认客户端支持自定义 API，再手动配置接入。
-            </div>
-          </div>
-          <button class="m26-mcp-finder-btn" @click="revealInFinder">
-            在 Finder 中定位
-          </button>
-        </section>
-
-        <!-- 接入方式分段切换 -->
-        <section class="m26-client-mode-strip">
-          <div class="m26-mode-strip-left">
-            <span class="text-sm font-semibold text-neutral-800">接入模式</span>
-            <span class="m26-mode-strip-desc">选择直连 Anthropic 官方/转发渠道，或经由 HeiGate 网关统一代理</span>
-          </div>
-
-          <div class="m26-mode-segmented">
-            <button
-              class="m26-mode-btn"
-              :class="{ active: currentPlatform.activeMode === 'direct' }"
-              @click="switchMode('direct')"
-            >
-              <span>⚡️ 直连 Anthropic 渠道</span>
-            </button>
-            <button
-              class="m26-mode-btn"
-              :class="{ active: currentPlatform.activeMode === 'gateway' }"
-              @click="switchMode('gateway')"
-            >
-              <span>🛡 走 HeiGate 网关</span>
-            </button>
-          </div>
-        </section>
-
-        <!-- 直连配置卡片 -->
-        <section v-if="currentPlatform.activeMode === 'direct'" class="m26-client-config-card">
-          <div class="m26-config-head">
-            <div class="m26-config-title">Claude Desktop 直连设置</div>
-            <div class="m26-config-subtitle">选择 Anthropic 协议渠道与官方 Key，直接写入本地配置</div>
-          </div>
-
-          <div class="m26-config-form">
-            <div class="m26-form-group">
-              <label class="m26-form-label">选择 Anthropic 协议渠道</label>
-              <div class="m26-select-wrap">
-                <select
-                  class="m26-select"
-                  :value="currentPlatform.direct.channelName"
-                  @change="selectDirectChannel(($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="" disabled>-- 请选择 Anthropic 协议供应商 --</option>
-                  <option
-                    v-for="chan in compatibleChannels"
-                    :key="chan.name"
-                    :value="chan.name"
-                  >
-                    {{ chan.name }} ({{ chan.models }} 个模型)
-                  </option>
-                </select>
-              </div>
-            </div>
-
-            <!-- 模型选择 -->
-            <div class="m26-form-group">
-              <div class="flex items-center justify-between">
-                <label class="m26-form-label">主力模型 (Default Model)</label>
-                <div class="m26-quick-models">
-                  <span class="text-xs text-neutral-400 mr-1">快捷填入:</span>
-                  <button type="button" class="m26-chip-btn" @click="quickSelectModel('claude-3-7-sonnet-latest', true)">Claude 3.7</button>
-                  <button type="button" class="m26-chip-btn" @click="quickSelectModel('claude-3-5-sonnet-20241022', true)">Claude 3.5 Sonnet</button>
-                </div>
-              </div>
-              <input
-                v-model="currentPlatform.direct.model"
-                type="text"
-                class="m26-input"
-                placeholder="claude-3-7-sonnet-latest"
-              />
-            </div>
-
-            <!-- 连通性测试 -->
-            <div class="m26-test-row">
-              <button
-                class="m26-btn-test"
-                :disabled="!currentPlatform.direct.channelName || testState['claude-desktop'] === 'testing'"
-                @click="runTestConnection"
-              >
-                <span>{{ testState['claude-desktop'] === 'testing' ? '正在探测...' : '测试直连网络' }}</span>
-              </button>
-              <span v-if="testMessage['claude-desktop']" class="m26-test-result-msg" :class="testState['claude-desktop']">
-                {{ testMessage['claude-desktop'] }}
-              </span>
-            </div>
-          </div>
-        </section>
-
-        <!-- 网关配置卡片 -->
-        <section v-else class="m26-client-config-card">
-          <div class="m26-config-head">
-            <div class="m26-config-title">Claude Desktop 网关容灾调度策略</div>
-            <div class="m26-config-subtitle">配置此客户端在多渠道间的调度算法与备用渠道</div>
-          </div>
-
-          <div class="m26-config-form">
-            <div class="m26-form-group">
-              <label class="m26-form-label">调度分发算法</label>
-              <div class="m26-strategy-cards">
-                <div
-                  class="m26-strategy-card"
-                  :class="{ selected: currentPlatform.gateway.strategy === 'smart_quality' }"
-                  @click="currentPlatform.gateway.strategy = 'smart_quality'"
-                >
-                  <div class="m26-strategy-title">智能综合质量</div>
-                  <div class="m26-strategy-desc">优先保障对话流畅度与可用性</div>
-                </div>
-                <div
-                  class="m26-strategy-card"
-                  :class="{ selected: currentPlatform.gateway.strategy === 'latency' }"
-                  @click="currentPlatform.gateway.strategy = 'latency'"
-                >
-                  <div class="m26-strategy-title">最低延迟优先</div>
-                  <div class="m26-strategy-desc">实时选取首字耗时最快的节点</div>
-                </div>
-                <div
-                  class="m26-strategy-card"
-                  :class="{ selected: currentPlatform.gateway.strategy === 'round_robin' }"
-                  @click="currentPlatform.gateway.strategy = 'round_robin'"
-                >
-                  <div class="m26-strategy-title">轮询负载均衡</div>
-                  <div class="m26-strategy-desc">在可用渠道中均匀调度流量</div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 可用渠道池 -->
-            <div class="m26-form-group">
-              <label class="m26-form-label">参与此平台的 Anthropic 渠道</label>
-              <div class="m26-checkbox-grid">
-                <label
-                  v-for="chan in compatibleChannels"
-                  :key="chan.name"
-                  class="m26-checkbox-item"
-                  :class="{ checked: currentPlatform.gateway.allowedChannels.includes(chan.name) }"
-                >
-                  <input
-                    type="checkbox"
-                    class="sr-only"
-                    :checked="currentPlatform.gateway.allowedChannels.includes(chan.name)"
-                    @change="toggleGatewayChannel(chan.name)"
-                  />
-                  <span class="m26-checkbox-box"></span>
-                  <span class="m26-checkbox-text">{{ chan.name }}</span>
-                  <span class="m26-checkbox-proto">{{ chan.protocol }}</span>
-                </label>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Diff 预览 -->
-        <section class="m26-config-guard-card">
-          <div class="m26-guard-header" @click="showDiff = !showDiff">
-            <div class="flex items-center gap-2">
-              <svg class="text-emerald-500" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-              </svg>
-              <span class="m26-guard-title">Claude Desktop 接入设置预览</span>
-            </div>
-            <span class="m26-guard-toggle">
-              {{ showDiff ? '收起配置详情 ▲' : '查看接入设置 ▼' }}
-            </span>
-          </div>
-          <div v-if="showDiff" class="m26-diff-box">
-            <pre class="m26-diff-code"><code>{{ diffPreview }}</code></pre>
-          </div>
-        </section>
-      </template>
-
-      <!-- =================================================================== -->
-      <!-- 4. CLAUDE CODE 定制视图 (终端 CLI · 双模型架构 · 环境变量脚本)           -->
-      <!-- =================================================================== -->
-      <template v-else-if="currentPlatform.id === 'claude-code'">
-        <!-- Claude Code 专属终端环境脚本卡片 -->
-        <section class="m26-cli-env-card">
-          <div class="m26-cli-env-head">
-            <div class="flex items-center gap-2">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="4 17 10 11 4 5" />
-                <line x1="12" y1="19" x2="20" y2="19" />
-              </svg>
-              <span class="m26-cli-env-title">Claude Code 终端环境变量（一键配置）</span>
-            </div>
-            <button class="m26-btn-ghost-sm" @click="copyEnvScript('claude-code')">
-              {{ copiedEnv ? '已复制环境变量' : '复制终端 export 命令' }}
-            </button>
-          </div>
-          <pre class="m26-cli-code"><code>{{ envScript('claude-code') }}</code></pre>
-          <div class="m26-cli-env-tip">
-            在终端粘贴执行或写入 <code>~/.zshrc</code>，在任意项目目录下输入 <code>claude</code> 即可直接享受本地网关调度加速。
-          </div>
-        </section>
-
-        <!-- 模式切换 -->
-        <section class="m26-client-mode-strip">
-          <div class="m26-mode-strip-left">
-            <span class="text-sm font-semibold text-neutral-800">接入模式</span>
-            <span class="m26-mode-strip-desc">选择直连上游或通过网关调度</span>
-          </div>
-
-          <div class="m26-mode-segmented">
-            <button
-              class="m26-mode-btn"
-              :class="{ active: currentPlatform.activeMode === 'direct' }"
-              @click="switchMode('direct')"
-            >
-              <span>⚡️ 直连 Anthropic 渠道</span>
-            </button>
-            <button
-              class="m26-mode-btn"
-              :class="{ active: currentPlatform.activeMode === 'gateway' }"
-              @click="switchMode('gateway')"
-            >
-              <span>🛡 走 HeiGate 网关</span>
-            </button>
-          </div>
-        </section>
-
-        <!-- Claude Code 专属核心：双模型架构设置 (Dual Model Config) -->
-        <section class="m26-client-config-card">
-          <div class="m26-config-head">
-            <div class="m26-config-title">Claude Code 双模型智能架构设置</div>
-            <div class="m26-config-subtitle">Claude Code 官方支持主控复杂推理模型与次级极速响应模型分离</div>
-          </div>
-
-          <div class="m26-config-form">
-            <!-- 供应商选择 (直连模式下) -->
-            <div v-if="currentPlatform.activeMode === 'direct'" class="m26-form-group">
-              <label class="m26-form-label">指定直连供应商渠道</label>
-              <div class="m26-select-wrap">
-                <select
-                  class="m26-select"
-                  :value="currentPlatform.direct.channelName"
-                  @change="selectDirectChannel(($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="" disabled>-- 请选择兼容供应商 --</option>
-                  <option
-                    v-for="chan in compatibleChannels"
-                    :key="chan.name"
-                    :value="chan.name"
-                  >
-                    {{ chan.name }} ({{ chan.models }} 个可用模型)
-                  </option>
-                </select>
-              </div>
-            </div>
-
-            <!-- 主模型与次级模型双输入 -->
-            <div class="m26-form-grid">
-              <div class="m26-form-group">
-                <div class="flex items-center justify-between">
-                  <label class="m26-form-label">主力主脑模型 (Primary Model)</label>
-                  <button type="button" class="m26-chip-btn" @click="quickSelectModel('claude-3-7-sonnet-latest', currentPlatform.activeMode === 'direct')">Claude 3.7</button>
-                </div>
-                <input
-                  v-if="currentPlatform.activeMode === 'direct'"
-                  v-model="currentPlatform.direct.model"
-                  type="text"
-                  class="m26-input"
-                  placeholder="claude-3-7-sonnet-latest"
-                />
-                <input
-                  v-else
-                  v-model="currentPlatform.gateway.model"
-                  type="text"
-                  class="m26-input"
-                  placeholder="claude-3-7-sonnet-latest"
-                />
-                <span class="m26-field-desc">用于复杂任务规划、代码架构生成与高难度重构</span>
-              </div>
-
-              <div class="m26-form-group">
-                <div class="flex items-center justify-between">
-                  <label class="m26-form-label">次级极速模型 (Small Fast Model)</label>
-                  <button type="button" class="m26-chip-btn" @click="quickSelectSmallModel('claude-3-5-haiku-latest')">Haiku 3.5</button>
-                </div>
-                <input
-                  v-model="currentPlatform.direct.smallModel"
-                  type="text"
-                  class="m26-input"
-                  placeholder="claude-3-5-haiku-latest"
-                />
-                <span class="m26-field-desc">用于快速行补全、文件查找与小型指令执行</span>
-              </div>
-            </div>
-
-            <!-- 网关模式下的算法与渠道 -->
-            <template v-if="currentPlatform.activeMode === 'gateway'">
-              <div class="m26-form-group">
-                <label class="m26-form-label">网关分发调度策略</label>
-                <div class="m26-strategy-cards">
-                  <div
-                    class="m26-strategy-card"
-                    :class="{ selected: currentPlatform.gateway.strategy === 'latency' }"
-                    @click="currentPlatform.gateway.strategy = 'latency'"
-                  >
-                    <div class="m26-strategy-title">⚡️ 最低延迟优先（推荐）</div>
-                    <div class="m26-strategy-desc">专为 CLI 终端交互优化的响应速度</div>
-                  </div>
-                  <div
-                    class="m26-strategy-card"
-                    :class="{ selected: currentPlatform.gateway.strategy === 'smart_quality' }"
-                    @click="currentPlatform.gateway.strategy = 'smart_quality'"
-                  >
-                    <div class="m26-strategy-title">智能综合质量</div>
-                    <div class="m26-strategy-desc">以最高模型输出准确度为核心</div>
-                  </div>
-                  <div
-                    class="m26-strategy-card"
-                    :class="{ selected: currentPlatform.gateway.strategy === 'round_robin' }"
-                    @click="currentPlatform.gateway.strategy = 'round_robin'"
-                  >
-                    <div class="m26-strategy-title">轮询负载均衡</div>
-                    <div class="m26-strategy-desc">在渠道池间平均分配终端流量</div>
-                  </div>
-                </div>
-              </div>
-            </template>
-          </div>
-        </section>
-
-        <!-- 差量预览 -->
-        <section class="m26-config-guard-card">
-          <div class="m26-guard-header" @click="showDiff = !showDiff">
-            <span class="m26-guard-title">CLI 接入设置预览</span>
-            <span class="m26-guard-toggle">{{ showDiff ? '收起 ▲' : '展开 ▼' }}</span>
-          </div>
-          <div v-if="showDiff" class="m26-diff-box">
-            <pre class="m26-diff-code"><code>{{ diffPreview }}</code></pre>
-          </div>
-        </section>
-      </template>
-
-      <!-- =================================================================== -->
-      <!-- 5. 通用接入 (Universal Gateway for Cursor, Windsurf, Cline, Python)  -->
-      <!-- =================================================================== -->
-      <template v-else>
-        <!-- 网关核心凭证与端点 -->
-        <GatewayAccessSettings
-          :gateway-base-url="gatewayBaseUrl"
-          :gateway-api-key="gatewayKey || ''"
-          :masked-overview-api-key="maskedGenericApiKey"
-          :show-api-key="showGenericApiKey"
-          @copy-url="copyText(gatewayBaseUrl)"
-          @copy-key="copyText(gatewayKey || '', true)"
-          @update:show-api-key="(val) => (showGenericApiKey = val)"
-        />
-
-        <!-- 全局路由分发策略 -->
-        <RoutingSettings
-          :routing-strategy="routingStrategy || 'smart_quality'"
-          @select="(strategy) => emit('update-routing-strategy', strategy)"
-        />
-
-        <!-- 第三方工具快速接入指引 -->
-        <section class="m26-generic-guide-card">
-          <div class="m26-guide-header">
-            <div class="flex items-center gap-2">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="12" y1="16" x2="12" y2="12" />
-                <line x1="12" y1="8" x2="12.01" y2="8" />
-              </svg>
-              <span class="font-semibold text-neutral-800 text-sm">常见客户端快速接入指引</span>
-            </div>
-          </div>
-          <div class="m26-guide-grid">
-            <div class="m26-guide-item">
-              <div class="m26-guide-app-title">Cursor / Windsurf</div>
-              <div class="m26-guide-app-desc">在设置中的 OpenAI API Key 处填入：</div>
-              <ul class="m26-guide-list">
-                <li><span class="m26-guide-k">Base URL:</span> <code>{{ gatewayBaseUrl }}</code></li>
-                <li><span class="m26-guide-k">API Key:</span> <code>{{ maskedGenericApiKey }}</code></li>
-                <li><span class="m26-guide-k">Model:</span> <code>填入渠道中支持的任意模型名</code></li>
-              </ul>
-            </div>
-            <div class="m26-guide-item">
-              <div class="m26-guide-app-title">Cline / Roo Code / Continue</div>
-              <div class="m26-guide-app-desc">选择 OpenAI-Compatible 或 Anthropic 兼容模式：</div>
-              <ul class="m26-guide-list">
-                <li><span class="m26-guide-k">Base URL:</span> <code>{{ gatewayBaseUrl }}</code></li>
-                <li><span class="m26-guide-k">API Key:</span> <code>{{ maskedGenericApiKey }}</code></li>
-              </ul>
-            </div>
-            <div class="m26-guide-item">
-              <div class="m26-guide-app-title">Python / OpenAI SDK</div>
-              <div class="m26-guide-app-desc">使用官方 SDK 初始化本地端点：</div>
-              <pre class="m26-guide-code"><code>client = OpenAI(
-  base_url="{{ gatewayBaseUrl }}",
-  api_key="{{ gatewayKey || 'heigate-secret' }}"
-)</code></pre>
-            </div>
-            <div class="m26-guide-item">
-              <div class="m26-guide-app-title">cURL 终端快速测试</div>
-              <div class="m26-guide-app-desc">直接向本地网关端口发起测试请求：</div>
-              <pre class="m26-guide-code"><code>curl {{ gatewayBaseUrl }}/chat/completions \
-  -H "Authorization: Bearer {{ gatewayKey || 'heigate-secret' }}" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"claude-3-7-sonnet-latest","messages":[{"role":"user","content":"ping"}]}'</code></pre>
-            </div>
-          </div>
-        </section>
-      </template>
     </main>
   </div>
 </template>
+
+
+
 
 <style scoped>
 .m26-clients-layout {
@@ -2211,63 +923,22 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   gap: 12px;
 }
 
-/* 顶部横向 5 联独立客户端卡片 (5 Separate Bento Cards) */
-.m26-clients-nav-deck {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 10px;
-  width: 100%;
-  flex-shrink: 0;
-  background: transparent;
-  border: none;
-  padding: 2px 1px 4px 1px;
-}
-
-.m26-client-tab-card {
+.m26-clients-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 2px 20px;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: var(--m26-card-bg);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  cursor: pointer;
-  transition: background-color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
-  text-align: left;
-  user-select: none;
-  position: relative;
-  min-width: 0;
-  outline: none;
+  flex-direction: column;
+  gap: 12px;
 }
 
-/* 未激活卡片在鼠标悬停时：背景纯白、边框微加深、柔和轻微阴影，绝不抖动或丢失边框 */
-.m26-client-tab-card:hover:not(.active) {
-  background: #ffffff;
-  border-color: rgba(0, 0, 0, 0.16);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+.m26-clients-workspace:has(.m26-hermes-redesign-container) {
+  overflow-y: hidden;
+  padding-bottom: 14px;
+  gap: 8px;
 }
 
-.m26-client-tab-card:active:not(.active) {
-  background: rgba(0, 0, 0, 0.02);
-}
-
-/* 激活状态：独立浮起卡片，清晰 1px 强调边框 + 柔和阴影，任何悬浮状态下边框都绝不丢失 */
-.m26-client-tab-card.active {
-  background: #ffffff;
-  border-color: var(--m26-accent, #4f46e5);
-  box-shadow: 0 0 0 1px var(--m26-accent, #4f46e5), 0 2px 8px rgba(79, 70, 229, 0.12);
-}
-
-.m26-client-tab-card.active:hover {
-  background: #ffffff;
-  border-color: var(--m26-accent, #4f46e5);
-  box-shadow: 0 0 0 1px var(--m26-accent, #4f46e5), 0 3px 10px rgba(79, 70, 229, 0.16);
-}
-
-/* 图标容器 */
 .m26-tab-logo-box {
   width: 32px;
   height: 32px;
@@ -2280,32 +951,9 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   transition: transform 0.2s ease;
 }
 
-.m26-client-tab-card:hover .m26-tab-logo-box {
-  transform: scale(1.05);
-}
-
-.m26-tab-logo-box.claude-desktop,
-.m26-tab-logo-box.claude-code {
-  color: #D97757;
-  background: #fff8f5;
-  border: 1px solid #ffedd5;
-}
-
-.m26-tab-logo-box.codex {
-  color: #10a37f;
-  background: #ecfdf5;
-  border: 1px solid #d1fae5;
-}
-
 .m26-tab-logo-box.hermes {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
-}
-
-.m26-tab-logo-box.generic {
-  color: #6366f1;
-  background: #eef2ff;
-  border: 1px solid #e0e7ff;
 }
 
 .m26-glyph-badge {
@@ -2349,91 +997,11 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   flex: 1;
 }
 
-.m26-client-tab-name {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--m26-text, #18181b);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.m26-client-tab-card.active .m26-client-tab-name {
-  color: #4338ca;
-  font-weight: 600;
-}
-
-/* 主工作区 */
-.m26-clients-workspace {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 0 2px 20px 2px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.m26-clients-workspace:has(.m26-hermes-redesign-container) {
-  overflow-y: hidden;
-  padding-bottom: 14px;
-  gap: 8px;
-}
-
-/* 顶部概览卡片 */
-.m26-client-hero-card {
-  padding: 14px 18px;
-  border-radius: 12px;
-  border: 1px solid var(--m26-border);
-  background: var(--m26-card-bg);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
 .m26-hero-content {
   display: flex;
   align-items: center;
   gap: 14px;
   min-width: 0;
-}
-
-.m26-hero-avatar {
-  width: 42px;
-  height: 42px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.m26-hero-avatar.claude-desktop,
-.m26-hero-avatar.claude-code {
-  color: #D97757;
-  background: #fff8f5;
-  border: 1px solid #fed7aa;
-}
-
-.m26-hero-avatar.codex {
-  color: #10a37f;
-  background: #ecfdf5;
-  border: 1px solid #d1fae5;
-}
-
-.m26-hero-avatar.hermes {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-}
-
-.m26-hero-avatar.generic {
-  color: #6366f1;
-  background: #eef2ff;
-  border: 1px solid #e0e7ff;
 }
 
 .m26-hero-hermes-img {
@@ -2591,21 +1159,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   background: #4338ca;
 }
 
-/* 模式条 (Mode Strip) */
-.m26-client-mode-strip {
-  padding: 10px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--m26-border);
-  background: var(--m26-card-bg);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-}
-
 .m26-mode-strip-left {
   display: flex;
   align-items: center;
@@ -2736,126 +1289,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: var(--m26-text-muted);
 }
 
-/* Claude Desktop 专属 MCP 防护横幅 */
-.m26-mcp-banner-card {
-  padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid rgba(16, 185, 129, 0.25);
-  background: rgba(16, 185, 129, 0.04);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.m26-mcp-banner-icon {
-  color: #059669;
-  flex-shrink: 0;
-}
-
-.m26-mcp-banner-body {
-  flex: 1;
-  min-width: 0;
-}
-
-.m26-mcp-banner-title {
-  font-size: 12.5px;
-  font-weight: 650;
-  color: #065f46;
-}
-
-.m26-mcp-banner-desc {
-  font-size: 11.5px;
-  color: #047857;
-  margin-top: 2px;
-  line-height: 1.45;
-}
-
-.m26-mcp-banner-desc strong {
-  font-weight: 600;
-}
-
-.m26-mcp-banner-desc code {
-  background: rgba(16, 185, 129, 0.15);
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-family: monospace;
-}
-
-.m26-mcp-finder-btn {
-  font-size: 11px;
-  color: #065f46;
-  background: #ffffff;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  padding: 4px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-  font-weight: 500;
-}
-
-.m26-mcp-finder-btn:hover {
-  background: #ecfdf5;
-}
-
-/* Claude Code 专属终端环境卡片 */
-.m26-cli-env-card {
-  padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--m26-border);
-  background: var(--m26-card-bg);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.m26-cli-env-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.m26-cli-env-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--m26-text);
-}
-
-.m26-cli-code {
-  margin: 0;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: #0f172a;
-  color: #38bdf8;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  overflow-x: auto;
-  border: 1px solid #1e293b;
-}
-
-.m26-cli-env-tip {
-  font-size: 11px;
-  color: var(--m26-text-secondary);
-}
-
-.m26-cli-env-tip code {
-  background: rgba(0, 0, 0, 0.05);
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-
-/* 主配置卡片 */
-.m26-client-config-card {
-  padding: 14px 18px;
-  border-radius: 12px;
-  border: 1px solid var(--m26-border);
-  background: var(--m26-card-bg);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-}
-
 .m26-config-head {
   margin-bottom: 12px;
 }
@@ -2872,12 +1305,16 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   margin-top: 2px;
 }
 
-.m26-codex-section-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
+.m26-profile-active-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.m26-profile-active-dot.active {
+  background: #10b981;
+  box-shadow: 0 0 0 3px #d1fae5;
 }
 
 .m26-config-status-pill {
@@ -2940,20 +1377,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: var(--m26-text-muted);
   font-size: 11px;
   line-height: 1.5;
-}
-
-.m26-codex-direct-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(250px, 0.65fr);
-  gap: 18px;
-  align-items: stretch;
-}
-
-.m26-codex-direct-main {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 0;
 }
 
 .m26-select-emphasis {
@@ -3047,16 +1470,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   font-size: 10px;
 }
 
-.m26-codex-catalog-summary {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid #dbe4f0;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
 .m26-catalog-summary-head {
   display: flex;
   align-items: flex-start;
@@ -3125,16 +1538,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   padding-top: 8px;
 }
 
-.m26-codex-direct-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 18px;
-  padding-top: 12px;
-  border-top: 1px solid var(--m26-border);
-}
-
 .m26-footer-hint {
   color: var(--m26-text-muted);
   font-size: 10.5px;
@@ -3142,12 +1545,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
 }
 
 @media (max-width: 760px) {
-  .m26-client-mode-strip,
-  .m26-codex-section-heading,
-  .m26-codex-direct-footer {
-    align-items: flex-start;
-    flex-direction: column;
-  }
 
   .m26-mode-strip-left {
     width: 100%;
@@ -3160,14 +1557,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   .m26-mode-btn {
     flex: 1;
     justify-content: center;
-  }
-
-  .m26-codex-direct-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .m26-codex-catalog-summary {
-    min-height: 0;
   }
 
   .m26-footer-hint {
@@ -3244,7 +1633,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   box-shadow: 0 0 0 2px var(--m26-accent-glow);
 }
 
-/* 快速推荐模型标签 */
+
 .m26-quick-models {
   display: flex;
   align-items: center;
@@ -3274,7 +1663,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   border-color: var(--m26-accent, #4f46e5);
 }
 
-/* 模型统计小药丸 */
+
 .m26-model-count-pill {
   font-size: 11px;
   padding: 2px 8px;
@@ -3291,7 +1680,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   font-weight: 600;
 }
 
-/* 模型池复选卡片网格 */
+
 .m26-model-chips-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -3392,12 +1781,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   border: 1px solid #fce7f3;
 }
 
-.m26-model-vendor-tag.generic {
-  background: #f1f5f9;
-  color: #475569;
-  border: 1px solid #e2e8f0;
-}
-
 .m26-model-chip-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 11.5px;
@@ -3408,41 +1791,13 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   white-space: nowrap;
 }
 
-.m26-primary-star-badge {
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #eef2ff;
-  color: #4338ca;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.m26-set-primary-btn {
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--m26-text-muted);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  white-space: nowrap;
-}
-
-.m26-set-primary-btn:hover {
-  background: #f1f5f9;
-  color: var(--m26-text);
-  border-color: #cbd5e1;
-}
-
 .m26-custom-model-input-row {
   display: flex;
   gap: 8px;
   align-items: center;
 }
 
-/* 全自动容灾横幅 */
+
 .m26-failover-strip {
   padding: 10px 14px;
   border-radius: 8px;
@@ -3474,7 +1829,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: #065f46;
 }
 
-/* 分发策略三卡片 */
+
 .m26-strategy-cards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -3521,7 +1876,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   line-height: 1.35;
 }
 
-/* 渠道复选框网格 */
+
 .m26-checkbox-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -3595,7 +1950,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   border-radius: 3px;
 }
 
-/* 连通性测试栏 */
+
 .m26-test-row {
   display: flex;
   align-items: center;
@@ -3643,7 +1998,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: #e11d48;
 }
 
-/* 配置保护与 Diff 预览 */
+
 .m26-config-guard-card {
   padding: 12px 16px;
   border-radius: 12px;
@@ -3729,20 +2084,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: #e2e8f0;
   line-height: 1.5;
   overflow-x: auto;
-}
-
-/* 通用指引卡片 */
-.m26-generic-guide-card {
-  padding: 14px 18px;
-  border-radius: 12px;
-  border: 1px solid var(--m26-border);
-  background: var(--m26-card-bg);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 
 .m26-guide-header {
@@ -3835,7 +2176,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: #334155;
 }
 
-/* Hermes 专享接入卡片 */
+
 .m26-hermes-access-card {
   padding: 14px 18px;
   border-radius: 12px;
@@ -3888,7 +2229,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   white-space: nowrap;
 }
 
-/* Hermes 整体重新设计：双栏资源池展示齐全 + Auto 与调度模式紧密结合，一屏全览无滚动条 */
+
 .m26-hermes-redesign-container {
   display: flex;
   flex-direction: column;
@@ -3899,7 +2240,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   overflow: hidden;
 }
 
-/* 1. 双栏资源池 (左供应商、右模型) */
+
 .m26-hermes-pool-grid {
   display: grid;
   grid-template-columns: 210px 1fr;
@@ -3982,7 +2323,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   cursor: not-allowed;
 }
 
-/* 供应商左侧列表：单行紧凑展示 (一行展示) */
+
 .m26-channel-cards-list {
   padding: 6px;
   display: flex;
@@ -4059,7 +2400,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: #166534;
 }
 
-/* 模型分类单行左右平滑滚动 (鼠标滚轮与手势直接左右滑动) */
+
 .m26-family-tabs-scroll {
   display: flex;
   align-items: center;
@@ -4167,24 +2508,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   white-space: nowrap;
 }
 
-.m26-merged-pill {
-  font-size: 9.5px;
-  font-weight: 600;
-  color: #4f46e5;
-  background: #e0e7ff;
-  padding: 1px 5px;
-  border-radius: 3px;
-  white-space: nowrap;
-}
-
-.m26-model-aliases {
-  font-size: 10.5px;
-  color: #64748b;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .m26-provider-pill {
   font-size: 10.5px;
   color: #64748b;
@@ -4206,7 +2529,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   padding: 24px 10px;
 }
 
-/* 2. 整合控制区 (Auto 智能容灾调度 + 调度模式 + 保存并重启) */
+
 .m26-hermes-top-panel,
 .m26-hermes-bottom-panel {
   background: #ffffff;
@@ -4249,7 +2572,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   white-space: nowrap;
 }
 
-/* Auto 帮助提示按钮与弹出层 */
+
 .m26-auto-help-wrapper {
   position: relative;
   display: inline-flex;
@@ -4403,7 +2726,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   padding-left: 2px;
 }
 
-/* 自定义调度模式下拉选择框 (替换原生 select，彻底解决系统弹窗错位与不对齐) */
+
 .m26-strategy-dropdown-wrap {
   position: relative;
   width: 144px;
@@ -4539,89 +2862,103 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
 }
 
 .m26-panel-right-group {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.8fr) minmax(420px, 1.2fr) auto;
+  align-items: center;
+  gap: 5px 10px;
+  flex: 0 1 820px;
+  min-width: 0;
+}
+
+.m26-connection-field {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.m26-btn-save-restart {
-  height: 32px;
-  padding: 0 16px;
-  background: #2563eb;
-  color: #ffffff;
-  border: none;
-  border-radius: 7px;
-  font-size: 12.5px;
-  font-weight: 500;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 7px;
+  border: 1px solid #dbe3ef;
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.m26-connection-label {
+  flex-shrink: 0;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 600;
   white-space: nowrap;
-  box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2);
-  transition: all 0.15s ease;
 }
 
-.m26-btn-save-restart:hover:not(:disabled) {
-  background: #1d4ed8;
-  box-shadow: 0 2px 5px rgba(37, 99, 235, 0.3);
-  transform: translateY(-0.5px);
+.m26-connection-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.m26-btn-save-restart:active:not(:disabled) {
-  transform: translateY(0);
+.m26-connection-copy {
+  flex-shrink: 0;
+  border: 0;
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: #2563eb;
+  background: #eff6ff;
+  font-size: 10px;
+  cursor: pointer;
 }
 
-.m26-btn-save-restart:disabled {
-  opacity: 0.6;
+.m26-connection-copy:hover:not(:disabled) {
+  background: #dbeafe;
+}
+
+.m26-connection-copy:disabled {
+  color: #94a3b8;
   cursor: not-allowed;
 }
 
-.m26-panel-feedback-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  animation: fadeIn 0.15s ease;
-}
-
-.m26-panel-feedback-bar.success {
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
+.m26-config-sync-state {
   color: #15803d;
+  font-size: 10px;
+  white-space: nowrap;
 }
 
-.m26-panel-feedback-bar.error {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+.m26-config-sync-state.saving {
+  color: #64748b;
+}
+
+.m26-config-sync-state.error {
   color: #b91c1c;
 }
 
-.m26-feedback-close {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: inherit;
-  opacity: 0.6;
-  font-size: 12px;
-  padding: 0 4px;
-}
 
-.m26-feedback-close:hover {
-  opacity: 1;
-}
-
-
-@media (max-width: 860px) {
+@media (max-width: 1200px) {
   .m26-bottom-panel-main {
     flex-wrap: wrap;
     gap: 10px;
   }
+
+  .m26-panel-left-group,
+  .m26-panel-right-group {
+    flex: 1 1 100%;
+  }
+
   .m26-panel-left-group {
     flex-wrap: wrap;
+  }
+
+  .m26-panel-right-group {
+    grid-template-columns: minmax(250px, 0.8fr) minmax(420px, 1.2fr) auto;
+  }
+}
+
+@media (max-width: 860px) {
+  .m26-panel-right-group {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -4719,7 +3056,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   cursor: not-allowed;
 }
 
-/* 防降智与质量保障提示条 */
+
 .m26-quality-guard-banner {
   display: flex;
   align-items: center;
@@ -4744,7 +3081,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   color: #15803d;
 }
 
-/* 渠道质量徽章 */
+
 .m26-quality-badge {
   font-size: 10px;
   font-weight: 600;
@@ -4779,7 +3116,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
 
 
 
-/* 步骤 2: 当前主脑指示条 */
+
 .m26-brain-summary-bar {
   display: flex;
   align-items: center;
@@ -4812,7 +3149,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   border-color: #86efac;
 }
 
-/* ✨ Auto 智能调度面板与开关 */
+
 .m26-auto-control-panel {
   background: #ffffff;
   border: 1.5px solid #e2e8f0;
@@ -4882,7 +3219,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   margin-top: 2px;
 }
 
-/* 现代化开关滑动条 */
+
 .m26-switch-label {
   position: relative;
   display: inline-block;
@@ -4930,7 +3267,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   transform: translateX(18px);
 }
 
-/* Auto 调度策略选择框 */
+
 .m26-auto-strategy-selector {
   display: flex;
   align-items: center;
@@ -4990,7 +3327,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   border-radius: 3px;
 }
 
-/* 步骤 2: 模型网格 */
+
 .m26-hermes-models-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -5072,14 +3409,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
 .m26-primary-badge {
   color: #b45309;
   font-weight: 700;
-}
-
-.m26-click-set-hint {
-  color: #9ca3af;
-}
-
-.m26-hermes-model-card:hover .m26-click-set-hint {
-  color: #6366f1;
 }
 
 .m26-allowed-pill {
@@ -5302,7 +3631,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   transform: rotate(180deg);
 }
 
-/* 下拉菜单浮层 */
+
 .m26-dropdown-menu {
   position: absolute;
   top: calc(100% + 6px);
@@ -5449,24 +3778,6 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   white-space: nowrap;
 }
 
-.m26-merged-badge {
-  font-size: 10px;
-  font-weight: 600;
-  color: #4f46e5;
-  background: #e0e7ff;
-  padding: 1px 5px;
-  border-radius: 3px;
-  white-space: nowrap;
-}
-
-.m26-model-alias-sub {
-  font-size: 10.5px;
-  color: #64748b;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .m26-dropdown-empty {
   font-size: 12px;
   color: #94a3b8;
@@ -5474,7 +3785,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   padding: 20px 10px;
 }
 
-/* 图二模型分类 Tabs 与分组样式 */
+
 .m26-model-dropdown-menu {
   max-height: 420px;
 }
@@ -5585,7 +3896,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   text-decoration: underline;
 }
 
-/* 步骤 3: 调度策略 4 列网格 */
+
 .m26-strategy-row-4 {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -5604,7 +3915,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   }
 }
 
-/* 手动优先级排序调整面板 */
+
 .m26-manual-sort-section {
   background: #f8fafc;
   border: 1.5px dashed #cbd5e1;
@@ -5724,7 +4035,7 @@ HERMES_CUSTOM_BEND_API_KEY=${keyDisplay}`
   text-align: center;
 }
 
-/* 步骤 4: 底部一键生效卡片 */
+
 .m26-hermes-apply-section {
   background: linear-gradient(135deg, rgba(238, 242, 255, 0.95) 0%, rgba(245, 243, 255, 0.85) 100%);
   border: 1.5px solid rgba(99, 102, 241, 0.25);

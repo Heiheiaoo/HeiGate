@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
-use crate::canonical::channel_supports_model_or_canonical;
+use crate::canonical::channel_supports_model;
 use crate::probe::{STATUS_DEGRADED, STATUS_ERROR, STATUS_OPERATIONAL};
 use crate::resilience::{
     failure_cooldown, failure_is_channel_fault, failure_is_circuit_eligible, failure_label,
@@ -308,12 +308,8 @@ impl Router {
                 || fresh.endpoint != channel.endpoint
                 || fresh.provider != channel.provider
                 || fresh.api_mode != channel.api_mode
-                // Per-model health above remains useful when this model is
-                // retained as an extra, but only a request for the same
-                // primary model in both the snapshot and current config may
-                // alter the channel headline.
-                || channel.primary_model != model
-                || fresh.primary_model != model
+                || !channel.has_model(model)
+                || !fresh.has_model(model)
                 || fresh
                     .last_checked_at
                     .is_some_and(|checked| checked > started_at)
@@ -325,7 +321,7 @@ impl Router {
                     info.class,
                     Some(FailureClass::RateLimit | FailureClass::Auth | FailureClass::Model)
                 );
-                if !key_fault && fresh.extra_models.is_empty() {
+                if !key_fault && fresh.configured_models().len() <= 1 {
                     fresh.failure_count += 1;
                     fresh.last_status = STATUS_ERROR.to_string();
                     fresh.last_error = format!("{}: {message}", failure_label(info));
@@ -438,11 +434,6 @@ fn quality_score(channel: &Channel, model: &str) -> i64 {
         _ => {}
     }
 
-    let model = if model.is_empty() {
-        &channel.primary_model
-    } else {
-        model
-    };
     let lat = responsiveness_of(channel, model);
     if lat < 1_000_000 {
         score -= lat;
@@ -455,7 +446,7 @@ fn supports_model(channel: &Channel, model: &str) -> bool {
     if model.is_empty() {
         return false;
     }
-    channel_supports_model_or_canonical(channel, model)
+    channel_supports_model(channel, model)
 }
 
 fn latency_of(channel: &Channel) -> i64 {

@@ -2,13 +2,11 @@
 import { ref, computed, watch } from 'vue'
 
 const props = defineProps<{
-  primaryModel?: string
   modelNames: string[]
   isFetching?: boolean
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:primaryModel', val: string): void
   (e: 'update:modelNames', val: string[]): void
   (e: 'fetchUpstream'): void
 }>()
@@ -17,11 +15,6 @@ const emit = defineEmits<{
 const modelList = computed({
   get: () => props.modelNames || [],
   set: (val: string[]) => emit('update:modelNames', val)
-})
-
-const currentPrimary = computed({
-  get: () => props.primaryModel || '',
-  set: (val: string) => emit('update:primaryModel', val)
 })
 
 // UI Mode: 'tags' or 'text'
@@ -40,10 +33,6 @@ watch(
     if (!isTextMode.value) {
       rawModelText.value = (newVal || []).join('\n')
     }
-    // Automatically keep primary model synced to first available model if unset or missing
-    if (newVal && newVal.length > 0 && (!currentPrimary.value || !newVal.includes(currentPrimary.value))) {
-      emit('update:primaryModel', newVal[0])
-    }
   },
   { immediate: true }
 )
@@ -56,11 +45,6 @@ function onTextModeChange(text: string) {
     .filter(Boolean)
   const unique = Array.from(new Set(parsed))
   emit('update:modelNames', unique)
-
-  // If primary model is not set or removed, set first line as primary
-  if (unique.length > 0 && (!currentPrimary.value || !unique.includes(currentPrimary.value))) {
-    emit('update:primaryModel', unique[0])
-  }
 }
 
 function parseAndAdd(input: string) {
@@ -82,10 +66,6 @@ function parseAndAdd(input: string) {
 
   if (addedAny) {
     emit('update:modelNames', current)
-    // If no primary model yet, set the first added model as primary
-    if (!currentPrimary.value) {
-      emit('update:primaryModel', current[0])
-    }
   }
 }
 
@@ -106,18 +86,6 @@ function handlePaste(e: ClipboardEvent) {
 function removeModel(modelToRemove: string) {
   const updated = modelList.value.filter((m) => m !== modelToRemove)
   emit('update:modelNames', updated)
-
-  // If the removed model was the primary model, reassign to the first remaining model
-  if (currentPrimary.value === modelToRemove) {
-    emit('update:primaryModel', updated[0] || '')
-  }
-}
-
-function selectPrimary(m: string) {
-  emit('update:primaryModel', m)
-  if (!modelList.value.includes(m)) {
-    emit('update:modelNames', [m, ...modelList.value])
-  }
 }
 </script>
 
@@ -165,18 +133,7 @@ function selectPrimary(m: string) {
               v-for="m in modelList"
               :key="m"
               class="m26-tag-capsule"
-              :class="{ 'is-primary': m === currentPrimary }"
             >
-              <span v-if="m === currentPrimary" class="tag-primary-badge">主模型</span>
-              <button
-                v-else
-                type="button"
-                class="tag-set-btn"
-                title="点击设为主模型"
-                @click.stop="selectPrimary(m)"
-              >
-                设为主模型
-              </button>
               <span class="tag-text font-mono truncate" :title="m">{{ m }}</span>
               <button
                 type="button"
@@ -404,41 +361,6 @@ function selectPrimary(m: string) {
 
 .m26-tag-capsule:hover {
   border-color: #94a3b8;
-}
-
-.m26-tag-capsule.is-primary {
-  background: #eef2ff;
-  border-color: #818cf8;
-  color: #312e81;
-  font-weight: 600;
-}
-
-.tag-primary-badge {
-  font-size: 9.5px;
-  font-weight: 700;
-  color: #4338ca;
-  background: #e0e7ff;
-  padding: 1px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
-
-.tag-set-btn {
-  font-size: 9.5px;
-  font-weight: 500;
-  color: #64748b;
-  background: #f1f5f9;
-  border: none;
-  padding: 1.5px 5px;
-  border-radius: 4px;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.12s;
-}
-
-.tag-set-btn:hover {
-  background: #e0e7ff;
-  color: #4338ca;
 }
 
 .tag-text {

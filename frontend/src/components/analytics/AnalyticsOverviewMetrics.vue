@@ -7,8 +7,8 @@ const props = defineProps<{
   enabledChannelsCount: number
   averageLatency: number | null
   routingStrategy: RoutingStrategy
-  modelCount: number
-  availableModels: number
+  modelIdCount: number
+  channelCountWithModels: number
 }>()
 
 function formatLatencySec(ms: number | null | undefined): string {
@@ -39,9 +39,9 @@ function formatLatencySec(ms: number | null | undefined): string {
     </div>
 
     <div class="m26-bento-card">
-      <div class="m26-bento-head"><span class="m26-bento-label">大模型总数</span><span class="m26-pill-icon cyan"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polygon points="8 2 14 5 14 11 8 14 2 11 2 5" /></svg></span></div>
-      <div class="m26-bento-stat"><span class="m26-bento-num">{{ props.modelCount }}</span><span class="m26-bento-sub">个聚合模型</span></div>
-      <div class="m26-bento-foot"><span class="m26-tag-subtle">{{ props.availableModels }} 家上游提供</span></div>
+      <div class="m26-bento-head"><span class="m26-bento-label">已配置模型 ID</span><span class="m26-pill-icon cyan"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polygon points="8 2 14 5 14 11 8 14 2 11 2 5" /></svg></span></div>
+      <div class="m26-bento-stat"><span class="m26-bento-num">{{ props.modelIdCount }}</span><span class="m26-bento-sub">个独立 ID</span></div>
+      <div class="m26-bento-foot"><span class="m26-tag-subtle">{{ props.channelCountWithModels }} 家渠道配置了模型</span></div>
     </div>
   </div>
 </template>

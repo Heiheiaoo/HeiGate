@@ -20,11 +20,11 @@ use crate::api::forward::{
 };
 use crate::api::policy::{
     adapt_unsupported_reasoning_effort, auto_choice_for_strategy, auto_choices_for_strategy,
-    channel_serving_traffic, channel_supports_model, parse_upstream_error_message,
-    upstream_error_payload, upstream_stream_error, TraceStep, AUTO_MODEL_NAME,
+    parse_upstream_error_message, upstream_error_payload, upstream_stream_error, TraceStep,
+    AUTO_MODEL_NAME,
 };
 use crate::canonical::{
-    are_models_equivalent, channel_supports_model_or_canonical, find_channel_model_for_request,
+    are_models_equivalent, channel_supports_model, find_channel_model_for_request,
 };
 use crate::key_pool::{KeyLease, KeyPool};
 use crate::probe::{normalize_endpoint, PROVIDER_OPENAI};
@@ -232,7 +232,7 @@ impl Gateway {
         }
 
         let is_auto = model.eq_ignore_ascii_case(AUTO_MODEL_NAME);
-        let mut effective_model = self.resolve_model_alias(&model);
+        let mut effective_model = model.clone();
         if is_auto {
             effective_model = AUTO_MODEL_NAME.to_string();
         }
@@ -276,9 +276,7 @@ impl Gateway {
             if is_auto {
                 if let Some(ref allowed_m) = allowed_models {
                     if !allowed_m.is_empty() {
-                        let has_any = allowed_m
-                            .iter()
-                            .any(|m| channel_supports_model_or_canonical(ch, m));
+                        let has_any = allowed_m.iter().any(|m| channel_supports_model(ch, m));
                         if !has_any {
                             return false;
                         }
@@ -418,8 +416,8 @@ impl Gateway {
         let mut attempts = 0;
         let mut blocked_retry = Duration::ZERO;
         // (channel id, upstream model) pairs actually tried, so cooldown waits
-        // are computed for the model the key pool was keyed on, not the
-        // client-facing alias or `auto`.
+        // use the exact model ID selected for each channel, not the request's
+        // `auto` sentinel.
         let mut resolved_models: Vec<(i64, String)> = Vec::new();
 
         'candidates: for channel in &mut candidates {
@@ -574,6 +572,15 @@ impl Gateway {
                                 ));
                                 if info.class == Some(FailureClass::Client) {
                                     last_error = Some(err);
+                                    // A request-level 4xx normally makes retries pointless,
+                                    // but reasoning budgets can be supported by one model and
+                                    // rejected by another in an Auto pool. Let Auto try its
+                                    // next model instead of ending the whole route here.
+                                    if is_auto
+                                        && message.to_ascii_lowercase().contains("thinking_budget")
+                                    {
+                                        continue 'models;
+                                    }
                                     break 'candidates;
                                 }
                                 if self
@@ -776,41 +783,6 @@ impl Gateway {
         upstream.stream =
             Box::pin(stream::once(async move { Ok(Bytes::from(prefix)) }).chain(rest));
         Ok(upstream)
-    }
-
-    fn resolve_model_alias(&self, requested: &str) -> String {
-        let requested = requested.trim();
-        if requested.is_empty() {
-            return String::new();
-        }
-        let Ok(channels) = self.store.list() else {
-            return requested.to_string();
-        };
-        for ch in &channels {
-            if ch.enabled && channel_supports_model(ch, requested) {
-                return requested.to_string();
-            }
-        }
-        let lower = requested.to_lowercase();
-        if lower.starts_with("claude-") || lower.starts_with("anthropic/claude-") {
-            let mut benched: Option<String> = None;
-            for ch in &channels {
-                let model = ch.primary_model.trim().to_string();
-                if !ch.enabled || model.is_empty() {
-                    continue;
-                }
-                if channel_serving_traffic(ch) {
-                    return model;
-                }
-                if benched.is_none() {
-                    benched = Some(model);
-                }
-            }
-            if let Some(model) = benched {
-                return model;
-            }
-        }
-        requested.to_string()
     }
 
     /// Sends the request upstream, translating when the client speaks Anthropic

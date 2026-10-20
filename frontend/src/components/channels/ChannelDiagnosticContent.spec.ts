@@ -15,7 +15,6 @@ const baseChannel: Channel = {
   lastCheck: '刚刚',
   accent: '#3b82f6',
   enabled: true,
-  primaryModel: 'gpt-4o',
   modelNames: ['gpt-4o'],
   lastError: 'HTTP 401 unauthorized',
 }
@@ -31,7 +30,7 @@ function mountDiagnostic(lastError: string | undefined) {
 describe('ChannelDiagnosticContent', () => {
   it.each([
     ['HTTP 401 unauthorized', 'HTTP 401', '检查 API 密钥'],
-    ['HTTP 404 model route not found', 'HTTP 404', '核对探活主模型'],
+    ['HTTP 404 model route not found', 'HTTP 404', '核对模型 ID'],
     ['HTTP 429 rate limited', 'HTTP 429', '检查账号额度'],
     ['request timeout exceeded', 'TIMEOUT', '检查本地网络与代理'],
   ])('renders %s diagnostics and advice', (lastError, code, advice) => {

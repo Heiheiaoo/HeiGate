@@ -82,7 +82,7 @@ pub enum ProbeError {
     InvalidApiMode,
     InvalidEndpoint,
     InvalidInterval,
-    MissingPrimaryModel,
+    MissingModels,
 }
 
 impl std::fmt::Display for ProbeError {
@@ -100,7 +100,7 @@ impl std::fmt::Display for ProbeError {
             ProbeError::InvalidInterval => {
                 "invalid interval_seconds: expected 0 (manual) or a value between 15 and 86400"
             }
-            ProbeError::MissingPrimaryModel => "primary_model is required",
+            ProbeError::MissingModels => "at least one model is required",
         };
         write!(f, "{message}")
     }
@@ -275,7 +275,7 @@ pub fn redact_endpoint(raw: &str) -> String {
     url.to_string()
 }
 
-/// Checks provider, api mode, endpoint and primary model.
+/// Checks provider, API mode, endpoint and at least one configured model.
 pub fn validate_config(cfg: &Config) -> Result<(), ProbeError> {
     let provider = cfg.provider.trim();
     if provider != PROVIDER_OPENAI && provider != PROVIDER_ANTHROPIC {
@@ -291,8 +291,8 @@ pub fn validate_config(cfg: &Config) -> Result<(), ProbeError> {
         _ => return Err(ProbeError::InvalidApiMode),
     }
     validate_endpoint(&cfg.endpoint)?;
-    if cfg.primary_model.trim().is_empty() {
-        return Err(ProbeError::MissingPrimaryModel);
+    if configured_models(cfg).is_empty() {
+        return Err(ProbeError::MissingModels);
     }
     Ok(())
 }
@@ -328,9 +328,9 @@ fn validate_endpoint(raw: &str) -> Result<(), ProbeError> {
     }
 }
 
-/// Probes the primary model and every extra model sequentially and returns one
-/// result per distinct model, in configuration order. A non-`Ok` is only
-/// returned for invalid configuration; upstream failures are per-model results.
+/// Probes every configured model sequentially and returns one result per
+/// distinct model, in configuration order. A non-`Ok` is only returned for
+/// invalid configuration; upstream failures are per-model results.
 pub async fn run(cfg: &Config) -> Result<Vec<ProbeResult>, ProbeError> {
     let mut cfg = cfg.clone();
     cfg.provider = cfg.provider.trim().to_string();
@@ -340,11 +340,9 @@ pub async fn run(cfg: &Config) -> Result<Vec<ProbeResult>, ProbeError> {
     cfg.primary_model = cfg.primary_model.trim().to_string();
     validate_config(&cfg)?;
 
-    let mut models = vec![cfg.primary_model.clone()];
-    models.extend(cfg.extra_models.clone());
-    let models = dedupe_models(&models);
+    let models = configured_models(&cfg);
     if models.is_empty() {
-        return Err(ProbeError::MissingPrimaryModel);
+        return Err(ProbeError::MissingModels);
     }
 
     let mut results = Vec::with_capacity(models.len());
@@ -354,9 +352,17 @@ pub async fn run(cfg: &Config) -> Result<Vec<ProbeResult>, ProbeError> {
     Ok(results)
 }
 
-/// Runs the lightweight channel health check for the primary model only.
+/// Runs the lightweight channel health check across the configured models.
 pub async fn run_once(cfg: &Config) -> Result<Vec<ProbeResult>, ProbeError> {
     run(cfg).await
+}
+
+pub fn configured_models(cfg: &Config) -> Vec<String> {
+    let models = std::iter::once(&cfg.primary_model)
+        .chain(&cfg.extra_models)
+        .cloned()
+        .collect::<Vec<_>>();
+    dedupe_models(&models)
 }
 
 pub(crate) fn dedupe_models(models: &[String]) -> Vec<String> {
@@ -869,10 +875,7 @@ mod tests {
 
         let mut no_model = good.clone();
         no_model.primary_model = "  ".to_string();
-        assert_eq!(
-            validate_config(&no_model),
-            Err(ProbeError::MissingPrimaryModel)
-        );
+        assert_eq!(validate_config(&no_model), Err(ProbeError::MissingModels));
     }
 
     #[test]
