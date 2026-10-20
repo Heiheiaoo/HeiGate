@@ -706,8 +706,12 @@ describe('GatewayView settings persistence', () => {
     await flushPromises()
     expect(general.props('hideDockIcon')).toBe(mode === 'saved')
 
-    expect(updateSettings).toHaveBeenCalledWith({ log_retention_days: 30 })
-    expect(updateSettings).toHaveBeenCalledWith({ log_max_count: 1000 })
+    if (mode === 'disconnected') {
+      expect(updateSettings).not.toHaveBeenCalled()
+    } else {
+      expect(updateSettings).toHaveBeenCalledWith({ log_retention_days: 30 })
+      expect(updateSettings).toHaveBeenCalledWith({ log_max_count: 1000 })
+    }
     if (mode === 'rejected') expect(wrapper.find('.m26-toast-text').text()).toContain('未保存')
     expect(writeValue).not.toHaveBeenCalled()
   })

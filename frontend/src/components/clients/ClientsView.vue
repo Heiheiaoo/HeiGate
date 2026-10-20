@@ -598,8 +598,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="m26-clients-layout">
     <main class="m26-clients-workspace">
-
-      <!-- Hermes 专享调度配置。 -->
+<!-- Hermes 专享调度配置。 -->
         <div class="m26-hermes-redesign-container">
           <!-- 顶部控制栏：Auto 调度策略与统一网关连接信息。 -->
           <div class="m26-hermes-top-panel m26-hermes-bottom-panel m26-hermes-auto-card" :class="{ 'auto-enabled': isHermesAutoEnabled }">
@@ -751,7 +750,9 @@ onBeforeUnmount(() => {
                     :disabled="!gatewayConnection?.base_url"
                     :title="copiedGatewayField === 'address' ? '已复制地址' : '复制地址'"
                     @click="copyGatewayField('address')"
-                  >{{ copiedGatewayField === 'address' ? '已复制' : '复制' }}</button>
+                  >
+{{ copiedGatewayField === 'address' ? '已复制' : '复制' }}
+</button>
                 </div>
                 <div class="m26-connection-field">
                   <span class="m26-connection-label">API Key</span>
@@ -764,7 +765,9 @@ onBeforeUnmount(() => {
                     :disabled="!gatewayConnection?.api_key"
                     :title="copiedGatewayField === 'key' ? '已复制 Key' : '复制 Key'"
                     @click="copyGatewayField('key')"
-                  >{{ copiedGatewayField === 'key' ? '已复制' : '复制' }}</button>
+                  >
+{{ copiedGatewayField === 'key' ? '已复制' : '复制' }}
+</button>
                 </div>
                 <span v-if="gatewayConfigSaveState !== 'saved'" class="m26-config-sync-state" :class="gatewayConfigSaveState" aria-live="polite">
                   {{ gatewayConfigSaveState === 'saving' ? '配置同步中…' : gatewayConfigSaveState === 'error' ? '配置同步失败' : '配置加载中…' }}

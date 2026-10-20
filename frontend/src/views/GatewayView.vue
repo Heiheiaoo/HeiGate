@@ -3121,8 +3121,7 @@ function handleContextMenu(event: MouseEvent) {
               @import-config="openImport"
               @clear-workspace="clearWorkspace"
             />
-
-          </div>
+</div>
         </section>
       </div>
     </main>

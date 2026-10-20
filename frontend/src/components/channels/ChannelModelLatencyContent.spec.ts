@@ -91,7 +91,7 @@ describe('ChannelModelLatencyContent', () => {
   it('emits injection detail and copy actions without selecting the card', async () => {
     const wrapper = mountContent()
     await wrapper.get('.m26-model-inject-pill').trigger('click')
-    await wrapper.get('button[title="复制模型名"]').trigger('click')
+    await wrapper.get('button.m26-model-row-copy').trigger('click')
 
     expect(wrapper.emitted('open-injection-detail')).toEqual([['gpt-4o']])
     expect(wrapper.emitted('copy-model')).toEqual([['gpt-4o']])
