@@ -996,12 +996,8 @@ impl Store {
     pub fn set_injection(
         &self,
         expected: &Channel,
-        model: &str,
+        report: &crate::probe::InjectionReport,
         lease: &crate::key_pool::KeyLease,
-        checked_at: DateTime<Utc>,
-        state: &str,
-        tokens: i64,
-        content: &str,
     ) -> Result<bool> {
         let _runtime_guard = self.runtime_mu.lock().unwrap_or_else(|p| p.into_inner());
         let mut conn = self.lock();
@@ -1015,11 +1011,11 @@ impl Store {
         };
         if !current.enabled
             || !current.same_upstream(expected)
-            || !current.has_model(model)
+            || !current.has_model(&report.model)
             || current
                 .injection_checked_at
-                .is_some_and(|time| time > checked_at)
-            || !lease.is_current_in(&tx, model)?
+                .is_some_and(|time| time > report.checked_at)
+            || !lease.is_current_in(&tx, &report.model)?
         {
             return Ok(false);
         }
@@ -1027,7 +1023,7 @@ impl Store {
             "UPDATE desktop_channels
              SET injection_state = ?, injection_tokens = ?, injection_content = ?, injection_checked_at = ?, updated_at = ?
              WHERE id = ?",
-            params![state, tokens, content, format_time(checked_at), format_time(Utc::now()), expected.id],
+            params![report.state, report.prompt_tokens, report.content, format_time(report.checked_at), format_time(Utc::now()), expected.id],
         )?;
         tx.commit()?;
         Ok(true)
@@ -1788,6 +1784,23 @@ pub fn format_time(value: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
 
+    fn injection_report(
+        model: &str,
+        state: &str,
+        prompt_tokens: i64,
+        content: &str,
+        checked_at: DateTime<Utc>,
+    ) -> crate::probe::InjectionReport {
+        crate::probe::InjectionReport {
+            model: model.into(),
+            state: state.into(),
+            prompt_tokens,
+            content: content.into(),
+            message: String::new(),
+            checked_at,
+        }
+    }
+
     #[test]
     fn upstream_edits_reset_runtime_preserve_identity_and_fence_old_leases() {
         use crate::{
@@ -1969,12 +1982,8 @@ mod tests {
         assert!(!store
             .set_injection(
                 &old_channel,
-                &channel.primary_model,
+                &injection_report(&channel.primary_model, "detected", 500, "old", Utc::now(),),
                 &fresh_lease,
-                Utc::now(),
-                "detected",
-                500,
-                "old"
             )
             .unwrap());
         let fresh = pool
@@ -1984,23 +1993,21 @@ mod tests {
         assert!(store
             .set_injection(
                 &channel,
-                &channel.primary_model,
+                &injection_report(&channel.primary_model, "clean", 20, "", Utc::now(),),
                 &fresh,
-                Utc::now(),
-                "clean",
-                20,
-                "",
             )
             .unwrap());
         assert!(!store
             .set_injection(
                 &channel,
-                &channel.primary_model,
+                &injection_report(
+                    &channel.primary_model,
+                    "detected",
+                    500,
+                    "old",
+                    Utc::now() - chrono::Duration::seconds(2),
+                ),
                 &fresh,
-                Utc::now() - chrono::Duration::seconds(2),
-                "detected",
-                500,
-                "old"
             )
             .unwrap());
         assert_eq!(store.get(channel.id).unwrap().injection_state, "clean");

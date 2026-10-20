@@ -419,15 +419,7 @@ pub async fn injection_check(
                 .first_model()
                 .is_some_and(|model| report.model.eq_ignore_ascii_case(&model))
             {
-                match state.store.set_injection(
-                    &channel,
-                    &report.model,
-                    &lease,
-                    report.checked_at,
-                    &report.state,
-                    report.prompt_tokens,
-                    &report.content,
-                ) {
+                match state.store.set_injection(&channel, report, &lease) {
                     Ok(accepted) => accepted,
                     Err(err) => return store_error_response(&err),
                 }
@@ -1967,7 +1959,6 @@ mod settings_tests {
     use crate::api::gateway::Gateway;
     use crate::router::Router as ChannelRouter;
     use crate::runner::ProbeRunner;
-    use axum::response::IntoResponse;
 
     fn test_state() -> SharedState {
         let store = Store::open_in_memory().unwrap();
